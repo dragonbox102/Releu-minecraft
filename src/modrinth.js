@@ -108,6 +108,10 @@ async function fetchModrinthJson(pathname, searchParams = null) {
   return response.json();
 }
 
+async function fetchProjectInfo(projectId) {
+  return fetchModrinthJson(`/project/${encodeURIComponent(projectId)}`);
+}
+
 function buildSearchFacets({ kind, profile, gameVersion }) {
   void kind;
   void gameVersion;
@@ -168,6 +172,7 @@ export async function resolveCatalogInstall({
   gameVersion,
 }) {
   const profile = resolveCatalogProfile(kind, profileId, serverSoftware);
+  const projectInfo = await fetchProjectInfo(projectId);
   const versions = await fetchModrinthJson(
     `/project/${encodeURIComponent(projectId)}/version`,
     {
@@ -205,6 +210,10 @@ export async function resolveCatalogInstall({
   return {
     profile,
     projectId,
+    projectSlug: projectInfo.slug ?? null,
+    projectTitle: projectInfo.title ?? projectInfo.name ?? null,
+    projectDescription: projectInfo.description ?? projectInfo.summary ?? null,
+    iconUrl: projectInfo.icon_url ?? null,
     versionId: selectedVersion.id,
     versionNumber: selectedVersion.version_number,
     versionName: selectedVersion.name,
@@ -212,6 +221,12 @@ export async function resolveCatalogInstall({
     fileUrl: file.url,
     gameVersions: selectedVersion.game_versions ?? [],
     loaders: selectedVersion.loaders ?? [],
+    dependencies: (selectedVersion.dependencies ?? []).map((entry) => ({
+      versionId: entry.version_id ?? null,
+      projectId: entry.project_id ?? null,
+      fileName: entry.file_name ?? null,
+      type: entry.dependency_type ?? null,
+    })),
     publishedAt: selectedVersion.date_published ?? null,
   };
 }

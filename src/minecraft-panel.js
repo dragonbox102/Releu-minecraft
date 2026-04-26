@@ -66,8 +66,16 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function stripMinecraftLogPrefix(value) {
+  return sanitizeLogLine(value)
+    .replace(/^\[[0-9:.]+\]\s+\[[^\]]+\]:\s*/i, "")
+    .replace(/^\[[^\]]+\]\s+\[[^\]]+\]:\s*/i, "")
+    .replace(/^\[[^\]]+\]:\s*/i, "")
+    .trim();
+}
+
 function normalizePlayerName(name) {
-  return String(name ?? "").trim();
+  return stripMinecraftLogPrefix(name);
 }
 
 function playerKey(name) {
@@ -75,7 +83,37 @@ function playerKey(name) {
 }
 
 function pickLinePayload(payload) {
-  return sanitizeLogLine(payload).replace(/^\[[^\]]+\]:\s*/, "").trim();
+  return stripMinecraftLogPrefix(payload);
+}
+
+function kindLabel(kind) {
+  return kind === "mod" ? "mod" : "plugin";
+}
+
+function emptyAssetIndex() {
+  return {
+    plugin: {},
+    mod: {},
+  };
+}
+
+function normalizeAssetIndex(index) {
+  return {
+    plugin: { ...(index?.plugin ?? {}) },
+    mod: { ...(index?.mod ?? {}) },
+  };
+}
+
+function isNoisyPlayitLog(message) {
+  const normalized = String(message ?? "").toLowerCase();
+  return [
+    "udp channel requires auth",
+    "udp session details received",
+    "tunnel running,",
+    "send keepalive",
+    "agent registered details",
+    "reload_control_addr",
+  ].some((pattern) => normalized.includes(pattern));
 }
 
 function sanitizeAssetFilename(fileName) {
@@ -251,6 +289,10 @@ export class MinecraftPanelService {
       return;
     }
 
+    if (source === "playit" && isNoisyPlayitLog(message)) {
+      return;
+    }
+
     this.logs.push({
       id: this.nextLogId++,
       serverId,
@@ -332,6 +374,7 @@ export class MinecraftPanelService {
     await ensureJsonFile(context.paths.bannedIpsFile, []);
     await ensureJsonFile(context.paths.usercacheFile, []);
     await ensureJsonFile(context.paths.playerIndexFile, {});
+    await ensureJsonFile(context.paths.assetIndexFile, emptyAssetIndex());
 
     if (!(await fileExists(context.paths.eulaFile))) {
       await fs.writeFile(context.paths.eulaFile, "eula=false\n", "utf8");
@@ -1552,6 +1595,7 @@ if (-not $sample) { exit 0 }
     if (payload.includes("Done (") && payload.includes("For help")) {
       context.state.serverStatus = "running";
       context.state.serverReady = true;
+      this.markInstalledAssetsLoaded(serverId).catch(() => {});
       if (this.playit.snapshot().secretConfigured) {
         this.playit.refreshTunnels({ force: true }).catch(() => {});
       }
@@ -1564,7 +1608,7 @@ if (-not $sample) { exit 0 }
 
     const joinedMatch = payload.match(/^(.+?) joined the game$/);
     if (joinedMatch) {
-      const player = joinedMatch[1];
+      const player = normalizePlayerName(joinedMatch[1]);
       context.onlinePlayers.add(player);
       context.state.playerCount = context.onlinePlayers.size;
       this.rememberPlayer(serverId, player, { lastSeenAt: currentTimestamp() }).catch(() => {});
@@ -1572,9 +1616,10 @@ if (-not $sample) { exit 0 }
 
     const leftMatch = payload.match(/^(.+?) left the game$/);
     if (leftMatch) {
-      context.onlinePlayers.delete(leftMatch[1]);
+      const player = normalizePlayerName(leftMatch[1]);
+      context.onlinePlayers.delete(player);
       context.state.playerCount = context.onlinePlayers.size;
-      this.rememberPlayer(serverId, leftMatch[1], { lastSeenAt: currentTimestamp() }).catch(
+      this.rememberPlayer(serverId, player, { lastSeenAt: currentTimestamp() }).catch(
         () => {},
       );
     }
@@ -1650,6 +1695,7 @@ if (-not $sample) { exit 0 }
         context.paths.bannedIpsFile,
         context.paths.usercacheFile,
         context.paths.configFile,
+        context.paths.assetIndexFile,
       ]) {
         if (await fileExists(filePath)) {
           await fs.copyFile(filePath, path.join(targetDir, path.basename(filePath)));
@@ -2026,6 +2072,137 @@ if (-not $sample) { exit 0 }
     await writeJsonFile(context.paths.playerIndexFile, index);
   }
 
+  async loadAssetIndex(serverId) {
+    const context = this.getServerContext(serverId);
+    const index = normalizeAssetIndex(
+      await readJsonFile(context.paths.assetIndexFile, emptyAssetIndex()),
+    );
+    await writeJsonFile(context.paths.assetIndexFile, index);
+    return index;
+  }
+
+  async saveAssetIndex(serverId, index) {
+    const context = this.getServerContext(serverId);
+    const normalized = normalizeAssetIndex(index);
+    await writeJsonFile(context.paths.assetIndexFile, normalized);
+    return normalized;
+  }
+
+  getServerSoftwareOption(context) {
+    return (
+      serverSoftwareOptions.find(
+        (entry) =>
+          entry.id ===
+          (context.config.install.installedSoftware ?? context.config.install.software),
+      ) ?? null
+    );
+  }
+
+  assertAssetCompatibility(context, kind, options = {}) {
+    const label = kindLabel(kind);
+    const softwareId =
+      context.config.install.installedSoftware ?? context.config.install.software ?? "vanilla";
+    const softwareOption = this.getServerSoftwareOption(context);
+    const softwareName = softwareOption?.name ?? formatSoftwareName(softwareId) ?? softwareId;
+
+    if (label === "plugin" && !softwareOption?.supportsPlugins) {
+      throw new Error(
+        `${softwareName} does not load plugins. Switch this server to Paper or Purpur before installing plugin add-ons.`,
+      );
+    }
+
+    if (label === "mod" && !softwareOption?.supportsMods) {
+      throw new Error(
+        `${softwareName} does not load mods. Switch this server to Fabric before installing mod add-ons.`,
+      );
+    }
+
+    const profileId = String(options.profileId ?? "").trim().toLowerCase();
+    if (!profileId) {
+      return;
+    }
+
+    if (label === "mod" && profileId !== softwareId) {
+      throw new Error(
+        `This server is using ${softwareName}. ${profileId.toUpperCase()} mods will not load here.`,
+      );
+    }
+
+    if (
+      label === "plugin" &&
+      softwareId === "paper" &&
+      !["paper", "spigot", "bukkit", "auto"].includes(profileId)
+    ) {
+      throw new Error("This Paper server can only install Paper, Spigot, or Bukkit plugins.");
+    }
+
+    if (
+      label === "plugin" &&
+      softwareId === "purpur" &&
+      !["purpur", "paper", "spigot", "bukkit", "auto"].includes(profileId)
+    ) {
+      throw new Error("This Purpur server can only install Purpur, Paper, Spigot, or Bukkit plugins.");
+    }
+  }
+
+  async rememberInstalledAsset(serverId, kind, fileName, metadata = {}) {
+    const label = kindLabel(kind);
+    const safeName = sanitizeAssetFilename(fileName);
+    const index = await this.loadAssetIndex(serverId);
+    index[label][safeName] = {
+      ...(index[label][safeName] ?? {}),
+      fileName: safeName,
+      displayName: metadata.displayName ?? metadata.projectTitle ?? safeName,
+      kind: label,
+      source: metadata.source ?? index[label][safeName]?.source ?? "upload",
+      iconUrl: metadata.iconUrl ?? index[label][safeName]?.iconUrl ?? null,
+      projectId: metadata.projectId ?? index[label][safeName]?.projectId ?? null,
+      projectSlug: metadata.projectSlug ?? index[label][safeName]?.projectSlug ?? null,
+      versionId: metadata.versionId ?? index[label][safeName]?.versionId ?? null,
+      versionNumber: metadata.versionNumber ?? index[label][safeName]?.versionNumber ?? null,
+      versionName: metadata.versionName ?? index[label][safeName]?.versionName ?? null,
+      profileId: metadata.profileId ?? index[label][safeName]?.profileId ?? null,
+      gameVersions: metadata.gameVersions ?? index[label][safeName]?.gameVersions ?? [],
+      loaders: metadata.loaders ?? index[label][safeName]?.loaders ?? [],
+      dependencyOf: metadata.dependencyOf ?? index[label][safeName]?.dependencyOf ?? null,
+      installedAt: metadata.installedAt ?? currentTimestamp(),
+      restartRequired: metadata.restartRequired ?? true,
+      restartReason:
+        metadata.restartReason ??
+        "Restart the Minecraft server before this add-on will appear in game.",
+      addedFromUrl: metadata.addedFromUrl ?? index[label][safeName]?.addedFromUrl ?? null,
+    };
+    await this.saveAssetIndex(serverId, index);
+    return index[label][safeName];
+  }
+
+  async forgetInstalledAsset(serverId, kind, fileName) {
+    const label = kindLabel(kind);
+    const safeName = sanitizeAssetFilename(fileName);
+    const index = await this.loadAssetIndex(serverId);
+    delete index[label][safeName];
+    await this.saveAssetIndex(serverId, index);
+  }
+
+  async markInstalledAssetsLoaded(serverId) {
+    const index = await this.loadAssetIndex(serverId);
+    let changed = false;
+    for (const kind of ["plugin", "mod"]) {
+      for (const entry of Object.values(index[kind])) {
+        if (!entry.restartRequired) {
+          continue;
+        }
+        entry.restartRequired = false;
+        entry.restartReason = null;
+        entry.loadedAt = currentTimestamp();
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.saveAssetIndex(serverId, index);
+    }
+  }
+
   async rememberPlayer(serverId, name, updates = {}) {
     const normalized = normalizePlayerName(name);
     if (!normalized) {
@@ -2306,6 +2483,9 @@ if (-not $sample) { exit 0 }
   async searchCatalog(serverId, payload = {}) {
     const context = this.getServerContext(serverId);
     const kind = payload.kind === "mod" ? "mod" : "plugin";
+    this.assertAssetCompatibility(context, kind, {
+      profileId: String(payload.profileId ?? "").trim() || null,
+    });
     const gameVersion =
       String(payload.gameVersion ?? this.getServerGameVersion(serverId) ?? "").trim() || null;
 
@@ -2341,41 +2521,76 @@ if (-not $sample) { exit 0 }
       throw new Error("A catalog project ID is required.");
     }
 
+    this.assertAssetCompatibility(context, kind, {
+      profileId: String(payload.profileId ?? "").trim() || null,
+    });
+
     const gameVersion =
       String(payload.gameVersion ?? this.getServerGameVersion(serverId) ?? "").trim() || null;
-    const selection = await resolveCatalogInstall({
-      projectId,
-      kind,
-      profileId: String(payload.profileId ?? "").trim() || null,
-      serverSoftware: context.config.install.software,
-      gameVersion,
-    });
+    const visited = new Set();
+    const installChain = [];
 
-    const response = await fetch(selection.fileUrl, {
-      headers: {
-        "User-Agent": "localhost-minecraft-panel/1.0",
-      },
-    });
+    const installProject = async (targetProjectId, dependencyOf = null) => {
+      const visitKey = `${kind}:${targetProjectId}`;
+      if (visited.has(visitKey)) {
+        return null;
+      }
+      visited.add(visitKey);
 
-    if (!response.ok) {
-      throw new Error(`Unable to download catalog file (${response.status}).`);
-    }
+      const selection = await resolveCatalogInstall({
+        projectId: targetProjectId,
+        kind,
+        profileId: String(payload.profileId ?? "").trim() || null,
+        serverSoftware: context.config.install.software,
+        gameVersion,
+      });
 
-    const installedTo = await this.installAssetUpload(
-      serverId,
-      kind,
-      selection.fileName,
-      await response.arrayBuffer(),
-    );
+      this.assertAssetCompatibility(context, kind, {
+        profileId: selection.profile?.id ?? payload.profileId ?? null,
+      });
+
+      for (const dependency of selection.dependencies ?? []) {
+        if (dependency.type !== "required" || !dependency.projectId) {
+          continue;
+        }
+        await installProject(dependency.projectId, selection.projectTitle ?? selection.fileName);
+      }
+
+      const installedTo = await this.installAssetFromUrl(serverId, kind, selection.fileUrl, {
+        displayName: selection.projectTitle ?? selection.fileName,
+        source: "catalog",
+        iconUrl: selection.iconUrl,
+        projectId: selection.projectId,
+        projectSlug: selection.projectSlug,
+        versionId: selection.versionId,
+        versionNumber: selection.versionNumber,
+        versionName: selection.versionName,
+        profileId: selection.profile?.id ?? null,
+        gameVersions: selection.gameVersions,
+        loaders: selection.loaders,
+        dependencyOf,
+      });
+
+      installChain.push({
+        installedTo,
+        selection,
+      });
+      return selection;
+    };
+
+    const selection = await installProject(projectId, null);
+    const installedTo =
+      installChain.find((entry) => entry.selection.projectId === projectId)?.installedTo ?? null;
 
     this.appendLog(
       serverId,
       "panel",
-      `Installed ${kind} from catalog: ${selection.fileName} (${selection.versionNumber}).`,
+      `Installed ${installChain.length} ${kind} add-on file(s). Restart the server before they will appear in game.`,
     );
     return {
       installedTo,
       selection,
+      installed: installChain,
     };
   }
 
@@ -2393,7 +2608,9 @@ if (-not $sample) { exit 0 }
 
   async listAssets(serverId, kind) {
     const context = this.getServerContext(serverId);
-    const targetDir = this.getAssetDirectory(context, kind);
+    const label = kindLabel(kind);
+    const targetDir = this.getAssetDirectory(context, label);
+    const assetIndex = await this.loadAssetIndex(serverId);
     try {
       const entries = await fs.readdir(targetDir, { withFileTypes: true });
       const files = entries
@@ -2403,8 +2620,22 @@ if (-not $sample) { exit 0 }
       for (const entry of files) {
         const filePath = path.join(targetDir, entry.name);
         const stats = await fs.stat(filePath);
+        const meta = assetIndex[label][entry.name] ?? {};
         output.push({
           name: entry.name,
+          displayName: meta.displayName ?? entry.name,
+          iconUrl: meta.iconUrl ?? null,
+          source: meta.source ?? "upload",
+          versionNumber: meta.versionNumber ?? null,
+          versionName: meta.versionName ?? null,
+          projectId: meta.projectId ?? null,
+          projectSlug: meta.projectSlug ?? null,
+          loaders: meta.loaders ?? [],
+          gameVersions: meta.gameVersions ?? [],
+          dependencyOf: meta.dependencyOf ?? null,
+          restartRequired: Boolean(meta.restartRequired),
+          restartReason: meta.restartReason ?? null,
+          installedAt: meta.installedAt ?? stats.birthtime?.toISOString?.() ?? stats.mtime.toISOString(),
           size: stats.size,
           updatedAt: stats.mtime.toISOString(),
           path: filePath,
@@ -2416,18 +2647,30 @@ if (-not $sample) { exit 0 }
     }
   }
 
-  async installAssetUpload(serverId, kind, fileName, bytes) {
+  async installAssetUpload(serverId, kind, fileName, bytes, metadata = {}) {
     const context = this.getServerContext(serverId);
+    const label = kindLabel(kind);
+    this.assertAssetCompatibility(context, label, metadata);
     const safeName = sanitizeAssetFilename(fileName);
-    const targetDir = this.getAssetDirectory(context, kind);
+    const targetDir = this.getAssetDirectory(context, label);
     const targetPath = path.join(targetDir, safeName);
     await fs.mkdir(targetDir, { recursive: true });
     await fs.writeFile(targetPath, Buffer.from(bytes));
-    this.appendLog(serverId, "panel", `Installed ${kind} file ${safeName} to ${targetDir}.`);
+    await this.rememberInstalledAsset(serverId, label, safeName, {
+      ...metadata,
+      installedAt: currentTimestamp(),
+      restartRequired: true,
+      restartReason: "Restart the Minecraft server before this add-on will appear in game.",
+    });
+    this.appendLog(
+      serverId,
+      "panel",
+      `Installed ${label} file ${safeName}. Restart the server before it will appear in game.`,
+    );
     return targetPath;
   }
 
-  async installAssetFromUrl(serverId, kind, url) {
+  async installAssetFromUrl(serverId, kind, url, metadata = {}) {
     const normalizedUrl = String(url ?? "").trim();
     if (!/^https?:\/\//i.test(normalizedUrl)) {
       throw new Error("Asset URL must start with http:// or https://");
@@ -2448,15 +2691,21 @@ if (-not $sample) { exit 0 }
       inferFilenameFromUrl(normalizedUrl) ??
       `${kind}.jar`;
 
-    return this.installAssetUpload(serverId, kind, fileName, await response.arrayBuffer());
+    return this.installAssetUpload(serverId, kind, fileName, await response.arrayBuffer(), {
+      ...metadata,
+      addedFromUrl: normalizedUrl,
+      source: metadata.source ?? "url",
+    });
   }
 
   async removeAsset(serverId, kind, fileName) {
     const context = this.getServerContext(serverId);
+    const label = kindLabel(kind);
     const safeName = sanitizeAssetFilename(fileName);
-    const targetPath = path.join(this.getAssetDirectory(context, kind), safeName);
+    const targetPath = path.join(this.getAssetDirectory(context, label), safeName);
     await fs.rm(targetPath, { force: true });
-    this.appendLog(serverId, "panel", `Removed ${kind} file ${safeName}.`);
-    return this.listAssets(serverId, kind);
+    await this.forgetInstalledAsset(serverId, label, safeName);
+    this.appendLog(serverId, "panel", `Removed ${label} file ${safeName}.`);
+    return this.listAssets(serverId, label);
   }
 }

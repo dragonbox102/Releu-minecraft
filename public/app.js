@@ -471,7 +471,92 @@ function updateConsoleElement() {
   const output = document.querySelector('[data-role="console-output"]');
   if (!output) return;
   output.textContent = runtime.consoleText;
-  output.scrollTop = output.scrollHeight;
+  const scrollTarget =
+    output.parentElement?.classList.contains("overflow-y-auto") ? output.parentElement : output;
+  window.requestAnimationFrame(() => {
+    scrollTarget.scrollTop = scrollTarget.scrollHeight;
+    output.scrollTop = output.scrollHeight;
+  });
+}
+
+function playerAvatarUrl(player) {
+  const target = player?.uuid || player?.name || "Steve";
+  return `https://mc-heads.net/avatar/${encodeURIComponent(target)}/64`;
+}
+
+function addonSupportState(server, kind) {
+  const softwareId = server?.install?.installedSoftware ?? server?.install?.software ?? "vanilla";
+  const software = getSoftwareOption(softwareId);
+  if (!software) {
+    return {
+      supported: false,
+      title: "Unsupported Server Software",
+      detail: "Releu could not determine which add-ons this server supports.",
+    };
+  }
+
+  if (kind === "plugin" && !software.supportsPlugins) {
+    return {
+      supported: false,
+      title: `${software.name} Does Not Support Plugins`,
+      detail: "Switch this server to Paper or Purpur before installing plugin add-ons.",
+    };
+  }
+
+  if (kind === "mod" && !software.supportsMods) {
+    return {
+      supported: false,
+      title: `${software.name} Does Not Support Mods`,
+      detail: "Switch this server to Fabric before installing mod add-ons.",
+    };
+  }
+
+  return {
+    supported: true,
+    title: `${software.name} ${kind === "plugin" ? "plugins" : "mods"} ready`,
+    detail: "Installed add-ons still need a server restart before they appear in game.",
+  };
+}
+
+function renderImageOrFallback(imageUrl, label, fallbackIcon = "archive", className = "h-12 w-12") {
+  const safeLabel = escapeHtml(label);
+  if (imageUrl) {
+    return `<div class="${className} overflow-hidden border border-outline bg-black"><img src="${escapeHtml(imageUrl)}" alt="${safeLabel}" class="h-full w-full object-cover" loading="lazy" /></div>`;
+  }
+  return `<div class="${className} flex items-center justify-center border border-outline bg-black text-zinc-500">${icon(fallbackIcon, "h-5 w-5")}</div>`;
+}
+
+function busyLabelForElement(element) {
+  if (!element) return "Loading...";
+  return element.dataset.busyLabel || "Loading...";
+}
+
+function setElementBusy(element, busy) {
+  if (!element) return;
+  if (busy) {
+    if (!element.dataset.originalHtml) {
+      element.dataset.originalHtml = element.innerHTML;
+    }
+    element.disabled = true;
+    element.classList.add("opacity-60", "pointer-events-none");
+    element.innerHTML = escapeHtml(busyLabelForElement(element));
+    return;
+  }
+  if (element.dataset.originalHtml) {
+    element.innerHTML = element.dataset.originalHtml;
+    delete element.dataset.originalHtml;
+  }
+  element.disabled = false;
+  element.classList.remove("opacity-60", "pointer-events-none");
+}
+
+async function withBusyElement(element, task) {
+  setElementBusy(element, true);
+  try {
+    return await task();
+  } finally {
+    setElementBusy(element, false);
+  }
 }
 
 function syncInstallDraft() {
@@ -701,7 +786,12 @@ function renderPlayerButtons(player) {
     [player.banned ? "pardon" : "ban", player.banned ? "PARDON" : "BAN"],
   ];
   if (player.online) actions.push(["kick", "KICK"], ["gamemode", "GAMEMODE"], ["heal", "HEAL"], ["feed", "FEED"], ["teleport", "TELEPORT"]);
-  return actions.map(([action, label]) => `<button type="button" class="border border-outline px-2 py-1 text-[9px] font-bold uppercase tracking-[0.16em] text-white transition hover:bg-white hover:text-black" data-action="player-action" data-player-name="${escapeHtml(player.name)}" data-player-action="${escapeHtml(action)}">${escapeHtml(label)}</button>`).join("");
+  return actions
+    .map(
+      ([action, label]) =>
+        `<button type="button" class="border border-outline px-2 py-1 text-[9px] font-bold uppercase tracking-[0.16em] text-white transition hover:bg-white hover:text-black" data-action="player-action" data-player-name="${escapeHtml(player.name)}" data-player-action="${escapeHtml(action)}" data-busy-label="Loading...">${escapeHtml(label)}</button>`,
+    )
+    .join("");
 }
 
 function renderWorldCard(world) {
@@ -709,13 +799,57 @@ function renderWorldCard(world) {
 }
 
 function renderCatalogResults(kind, resultSet) {
+  const support = addonSupportState(activeServer(), kind);
   if (!resultSet?.results?.length) return `<div class="border border-outline bg-surfaceAlt p-4 text-sm text-zinc-500">Search the catalog to install ${escapeHtml(kind)} files directly into this server.</div>`;
-  return resultSet.results.map((item) => `<article class="border border-outline bg-surfaceAlt p-4"><div class="mb-3 flex items-start justify-between gap-4"><div><h3 class="text-sm font-semibold text-white">${escapeHtml(item.title)}</h3><p class="text-xs text-zinc-500">by ${escapeHtml(item.author)} / ${escapeHtml(formatCount(item.downloads))} downloads</p></div><button type="button" class="${C.btnPrimary}" data-action="install-catalog" data-kind="${escapeHtml(kind)}" data-project-id="${escapeHtml(item.id)}" data-profile-id="${escapeHtml(resultSet.profile.id)}">Install</button></div><p class="text-sm text-zinc-400">${escapeHtml(item.description ?? "No description provided.")}</p></article>`).join("");
+  return resultSet.results
+    .map(
+      (item) => `<article class="border border-outline bg-surfaceAlt p-4">
+        <div class="mb-3 flex items-start justify-between gap-4">
+          <div class="flex items-start gap-4">
+            ${renderImageOrFallback(item.iconUrl, item.title, kind === "plugin" ? "plug" : "archive")}
+            <div>
+              <h3 class="text-sm font-semibold text-white">${escapeHtml(item.title)}</h3>
+              <p class="text-xs text-zinc-500">by ${escapeHtml(item.author)} / ${escapeHtml(formatCount(item.downloads))} downloads</p>
+            </div>
+          </div>
+          <button type="button" class="${C.btnPrimary}" data-action="install-catalog" data-kind="${escapeHtml(kind)}" data-project-id="${escapeHtml(item.id)}" data-profile-id="${escapeHtml(resultSet.profile.id)}" data-busy-label="Installing..." ${support.supported ? "" : "disabled"}>Install</button>
+        </div>
+        <p class="text-sm text-zinc-400">${escapeHtml(item.description ?? "No description provided.")}</p>
+      </article>`,
+    )
+    .join("");
 }
 
 function renderInstalledAssets(kind, assets) {
   if (!assets.length) return `<tr><td colspan="3" class="px-6 py-4 text-sm text-zinc-500">No ${escapeHtml(kind)} files are installed yet.</td></tr>`;
-  return assets.map((asset) => `<tr class="border-b border-zinc-900 transition hover:bg-zinc-900/30"><td class="px-6 py-4 uppercase tracking-wider">${escapeHtml(asset.name)}</td><td class="px-6 py-4 text-zinc-400">${escapeHtml(formatBytes(asset.size))}</td><td class="px-6 py-4 text-right"><button type="button" class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:text-white" data-action="remove-asset" data-kind="${escapeHtml(kind)}" data-file-name="${escapeHtml(asset.name)}">Remove</button></td></tr>`).join("");
+  return assets
+    .map(
+      (asset) => `<tr class="border-b border-zinc-900 align-top transition hover:bg-zinc-900/30">
+        <td class="px-6 py-4">
+          <div class="flex items-start gap-4">
+            ${renderImageOrFallback(asset.iconUrl, asset.displayName ?? asset.name, kind === "plugin" ? "plug" : "archive")}
+            <div>
+              <div class="text-sm font-semibold uppercase tracking-wider text-white">${escapeHtml(asset.displayName ?? asset.name)}</div>
+              <div class="mt-1 font-mono text-[11px] text-zinc-500">${escapeHtml(asset.name)}</div>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <span class="${C.chip}">${escapeHtml(asset.source ?? "upload")}</span>
+                ${asset.versionNumber ? `<span class="${C.chip}">${escapeHtml(asset.versionNumber)}</span>` : ""}
+                ${asset.restartRequired ? `<span class="border border-white px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white">Restart Required</span>` : ""}
+              </div>
+              ${asset.restartReason ? `<p class="mt-2 text-xs leading-6 text-zinc-400">${escapeHtml(asset.restartReason)}</p>` : ""}
+            </div>
+          </div>
+        </td>
+        <td class="px-6 py-4 text-zinc-400">
+          <div>${escapeHtml(formatBytes(asset.size))}</div>
+          <div class="mt-2 text-[11px] text-zinc-500">${escapeHtml(formatTimestamp(asset.updatedAt))}</div>
+        </td>
+        <td class="px-6 py-4 text-right">
+          <button type="button" class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:text-white" data-action="remove-asset" data-kind="${escapeHtml(kind)}" data-file-name="${escapeHtml(asset.name)}" data-busy-label="Removing...">Remove</button>
+        </td>
+      </tr>`,
+    )
+    .join("");
 }
 
 function icon(name, className = "h-4 w-4") {
@@ -788,7 +922,7 @@ function renderBootstrapScreen() {
 function renderModal() {
   if (!ui.modal) return "";
   if (ui.modal.type === "create-server") {
-    return `<div class="releu-modal-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="releu-modal-panel w-full max-w-xl border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6 flex items-start justify-between gap-4"><div><p class="${C.label} mb-2">Add Server</p><h2 class="text-3xl font-black tracking-tight text-white">Create a new Minecraft server.</h2><p class="mt-3 text-sm text-zinc-400">Releu creates the folder automatically, picks a free port automatically, and saves the server to disk right away.</p></div><button type="button" class="text-zinc-500 transition hover:text-white" data-action="close-modal" aria-label="Close">${icon("plus", "h-5 w-5 rotate-45")}</button></div><form data-form="create-server-modal" class="space-y-4"><label class="block"><span class="${C.label} mb-3 block">Server Name</span><input name="name" data-modal-input="server-name" type="text" value="${escapeHtml(ui.modal.name ?? "")}" placeholder="Primary Server" autocomplete="off" autocapitalize="words" spellcheck="false" required class="${C.input} w-full text-2xl font-semibold tracking-tight text-white" /></label><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="${C.btnPrimary}">Add Server</button></div></form></div></div>`;
+    return `<div class="releu-modal-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="releu-modal-panel w-full max-w-xl border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6 flex items-start justify-between gap-4"><div><p class="${C.label} mb-2">Add Server</p><h2 class="text-3xl font-black tracking-tight text-white">Create a new Minecraft server.</h2><p class="mt-3 text-sm text-zinc-400">Releu creates the folder automatically, picks a free port automatically, and saves the server to disk right away.</p></div><button type="button" class="text-zinc-500 transition hover:text-white" data-action="close-modal" aria-label="Close">${icon("plus", "h-5 w-5 rotate-45")}</button></div><form data-form="create-server-modal" class="space-y-4"><label class="block"><span class="${C.label} mb-3 block">Server Name</span><input name="name" data-modal-input="server-name" type="text" value="${escapeHtml(ui.modal.name ?? "")}" placeholder="Primary Server" autocomplete="off" autocapitalize="words" spellcheck="false" required class="${C.input} w-full text-2xl font-semibold tracking-tight text-white" /></label><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="${C.btnPrimary}" data-busy-label="Creating...">Add Server</button></div></form></div></div>`;
   }
   if (ui.modal.type === "delete-server") {
     return `<div class="releu-modal-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="releu-modal-panel w-full max-w-lg border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6"><p class="${C.label} mb-2">Delete Server</p><h2 class="text-3xl font-black tracking-tight text-white">${escapeHtml(ui.modal.serverName)}</h2><p class="mt-3 text-sm text-zinc-400">This removes the server from Releu and deletes its local server files, panel data, and backups.</p></div><form data-form="delete-server-modal" class="space-y-4"><div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">This action cannot be undone.</div><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black">Delete Server</button></div></form></div></div>`;
@@ -862,7 +996,7 @@ function renderOverviewSection(server) {
       disabled ? "cursor-not-allowed opacity-40 hover:bg-inherit hover:text-inherit" : "",
     ].join(" ");
   const actionButton = (command, label, primary, disabled = false) =>
-    `<button type="button" class="${actionButtonClass(primary, disabled)}" data-action="server-control" data-server-command="${escapeHtml(command)}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>`;
+    `<button type="button" class="${actionButtonClass(primary, disabled)}" data-action="server-control" data-server-command="${escapeHtml(command)}" data-busy-label="${escapeHtml(label)}..." ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>`;
 
   const summaryTiles = [
     renderTile("Minecraft IP", joinState.value, joinState.detail),
@@ -890,8 +1024,11 @@ function renderOverviewSection(server) {
   const playerRows = players.length
     ? players
         .map(
-          (player) => `<div class="flex items-center justify-between font-mono text-[11px]">
-              <span class="text-white">${escapeHtml(player.name)}</span>
+          (player) => `<div class="flex items-center justify-between gap-3 font-mono text-[11px]">
+              <div class="flex items-center gap-3">
+                <img src="${escapeHtml(playerAvatarUrl(player))}" alt="${escapeHtml(player.name)}" class="h-8 w-8 border border-outline bg-black object-cover" loading="lazy" />
+                <span class="text-white">${escapeHtml(player.name)}</span>
+              </div>
               <span class="text-zinc-500">${player.op ? "OP" : player.whitelisted ? "WL" : "Player"}</span>
             </div>`,
         )
@@ -984,7 +1121,7 @@ function renderConsoleSection(server) {
 
 function renderPlayersSection(server) {
   const onlinePlayers = server.players.filter((entry) => entry.online).length;
-  return `<div class="flex flex-col gap-8"><div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><h1 class="mb-2 text-4xl font-black tracking-tight text-white">Player Database</h1><p class="max-w-3xl text-sm text-zinc-400">Manage known players, online players, and offline permission lists from one place.</p></div><div class="flex flex-wrap gap-2"><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${onlinePlayers} Active`)}</span></div><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full border border-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${server.players.length} Total`)}</span></div></div></div><form data-form="player-register" class="grid gap-4 border border-outline bg-surface p-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px]"><label class="flex flex-col gap-2"><span class="${C.label}">Player Name</span><input name="name" type="text" required class="${C.input}" placeholder="Steve" /></label><label class="flex flex-col gap-2"><span class="${C.label}">UUID (Optional)</span><input name="uuid" type="text" class="${C.input} font-mono" placeholder="00000000-0000-0000-0000-000000000000" /></label><button type="submit" class="self-end ${C.btnPrimary} py-3">Add Player</button></form><div class="overflow-hidden border border-outline bg-surface"><div class="overflow-x-auto"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-outline bg-surfaceAlt"><th class="p-4 ${C.label}">Status</th><th class="p-4 ${C.label}">Player</th><th class="p-4 ${C.label}">Flags</th><th class="p-4 ${C.label}">Last Seen</th><th class="p-4 text-right ${C.label}">Administrative Actions</th></tr></thead><tbody class="divide-y divide-zinc-900">${server.players.length ? server.players.map((player) => `<tr class="transition hover:bg-surfaceAlt" data-player-card><td class="p-4"><span class="block h-2 w-2 rounded-full ${player.online ? "bg-white shadow-[0_0_8px_rgba(255,255,255,0.4)]" : "border border-white"}"></span></td><td class="p-4"><div class="flex items-center gap-3"><div class="flex h-10 w-10 items-center justify-center border border-outline bg-black text-xs font-black text-white">${escapeHtml(initials(player.name))}</div><div><div class="text-sm font-semibold text-white">${escapeHtml(player.name)}</div><div class="font-mono text-xs text-zinc-500">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td class="p-4 font-mono text-xs text-white">${escapeHtml(renderPlayerFlags(player))}</td><td class="p-4 font-mono text-xs text-zinc-400">${escapeHtml(formatLastSeen(player.lastSeenAt))}</td><td class="p-4"><div class="ml-auto flex max-w-[540px] flex-wrap justify-end gap-2"><input name="reason" type="text" placeholder="Reason" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" /><select name="mode" class="border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none focus:border-white"><option value="survival">Survival</option><option value="creative">Creative</option><option value="adventure">Adventure</option><option value="spectator">Spectator</option></select><input name="destination" type="text" placeholder="Teleport target" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" />${renderPlayerButtons(player)}</div></td></tr>`).join("") : `<tr><td colspan="5" class="p-6 text-sm text-zinc-500">No players are registered yet.</td></tr>`}</tbody></table></div></div></div>`;
+  return `<div class="flex flex-col gap-8"><div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><h1 class="mb-2 text-4xl font-black tracking-tight text-white">Player Database</h1><p class="max-w-3xl text-sm text-zinc-400">Manage known players, online players, and offline permission lists from one place.</p></div><div class="flex flex-wrap gap-2"><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${onlinePlayers} Active`)}</span></div><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full border border-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${server.players.length} Total`)}</span></div></div></div><form data-form="player-register" class="grid gap-4 border border-outline bg-surface p-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px]"><label class="flex flex-col gap-2"><span class="${C.label}">Player Name</span><input name="name" type="text" required class="${C.input}" placeholder="Steve" /></label><label class="flex flex-col gap-2"><span class="${C.label}">UUID (Optional)</span><input name="uuid" type="text" class="${C.input} font-mono" placeholder="00000000-0000-0000-0000-000000000000" /></label><button type="submit" class="self-end ${C.btnPrimary} py-3" data-busy-label="Adding...">Add Player</button></form><div class="overflow-hidden border border-outline bg-surface"><div class="overflow-x-auto"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-outline bg-surfaceAlt"><th class="p-4 ${C.label}">Status</th><th class="p-4 ${C.label}">Player</th><th class="p-4 ${C.label}">Flags</th><th class="p-4 ${C.label}">Last Seen</th><th class="p-4 text-right ${C.label}">Administrative Actions</th></tr></thead><tbody class="divide-y divide-zinc-900">${server.players.length ? server.players.map((player) => `<tr class="transition hover:bg-surfaceAlt" data-player-card><td class="p-4"><span class="block h-2 w-2 rounded-full ${player.online ? "bg-white shadow-[0_0_8px_rgba(255,255,255,0.4)]" : "border border-white"}"></span></td><td class="p-4"><div class="flex items-center gap-3"><img src="${escapeHtml(playerAvatarUrl(player))}" alt="${escapeHtml(player.name)}" class="h-10 w-10 border border-outline bg-black object-cover" loading="lazy" /><div><div class="text-sm font-semibold text-white">${escapeHtml(player.name)}</div><div class="font-mono text-xs text-zinc-500">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td class="p-4 font-mono text-xs text-white">${escapeHtml(renderPlayerFlags(player))}</td><td class="p-4 font-mono text-xs text-zinc-400">${escapeHtml(formatLastSeen(player.lastSeenAt))}</td><td class="p-4"><div class="ml-auto flex max-w-[540px] flex-wrap justify-end gap-2"><input name="reason" type="text" placeholder="Reason" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" /><select name="mode" class="border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none focus:border-white"><option value="survival">Survival</option><option value="creative">Creative</option><option value="adventure">Adventure</option><option value="spectator">Spectator</option></select><input name="destination" type="text" placeholder="Teleport target" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" />${renderPlayerButtons(player)}</div></td></tr>`).join("") : `<tr><td colspan="5" class="p-6 text-sm text-zinc-500">No players are registered yet.</td></tr>`}</tbody></table></div></div></div>`;
 }
 
 function renderWorldsSection(server) {
@@ -992,15 +1129,91 @@ function renderWorldsSection(server) {
   return `<div class="space-y-8"><div class="grid grid-cols-1 gap-4 md:grid-cols-3"><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Worlds</h3><h2 class="text-2xl font-semibold uppercase text-white">Active World</h2></div><form data-form="world-select" class="flex flex-col gap-4"><label class="flex flex-col gap-2"><span class="${C.label}">World Name</span><select name="name" class="${C.input}">${server.worlds.map((entry) => `<option value="${escapeHtml(entry.name)}" ${entry.name === world ? "selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}</select></label><div class="flex flex-col gap-2"><button type="submit" class="${C.btnPrimary} py-3">Use This World</button><button type="button" class="${C.btnGhost} py-3" data-action="regenerate-active-world">Regenerate Active World</button></div></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Upload World</h3><h2 class="text-2xl font-semibold uppercase text-white">Import A Zip</h2></div><form data-form="world-archive-upload" class="flex flex-col gap-4"><input name="file" type="file" accept=".zip,.mcworld" required class="w-full border border-outline bg-black px-4 py-3 text-sm text-zinc-300 file:mr-4 file:border-0 file:bg-white file:px-3 file:py-2 file:text-[11px] file:font-bold file:uppercase file:tracking-[0.18em] file:text-black" /><input name="worldName" type="text" placeholder="survival-archive" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Upload World Archive</button></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Import Folder</h3><h2 class="text-2xl font-semibold uppercase text-white">Use A Local World Folder</h2></div><form data-form="world-folder-import" class="flex flex-col gap-4"><div class="flex gap-2"><input name="sourcePath" type="text" placeholder="C:\\Worlds\\MyWorld" class="${C.input} flex-1" />${isDesktopApp() ? `<button type="button" class="${C.btnGhost}" data-action="pick-world-folder">Browse</button>` : ""}</div><input name="worldName" type="text" placeholder="local-import-01" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Import World Folder</button></form></section></div><div class="grid grid-cols-1 gap-4 xl:grid-cols-2">${server.worlds.map((entry) => renderWorldCard(entry)).join("")}</div></div>`;
 }
 
+function renderAddonCompatibilityBanner(server, kind) {
+  const state = addonSupportState(server, kind);
+  const toneClass = state.supported
+    ? "border-outline bg-surfaceAlt text-zinc-400"
+    : "border-white bg-black text-zinc-300";
+  return `<div class="border ${toneClass} p-4"><p class="${state.supported ? C.label : C.labelOn} mb-2">${escapeHtml(state.title)}</p><p class="text-sm leading-7">${escapeHtml(state.detail)}</p></div>`;
+}
+
 function renderAddonColumn(kind, profiles, assets, resultSet) {
   const label = kind === "plugin" ? "Plugin" : "Mod";
+  const server = activeServer();
+  const support = addonSupportState(server, kind);
   const gameVersion = resultSet?.gameVersion ?? activeServer()?.catalog?.gameVersion ?? "";
   const profileId = resultSet?.profile?.id ?? activeServer()?.catalog?.defaults?.[kind] ?? profiles[0]?.id ?? "";
-  return `<section class="space-y-6 border border-outline bg-black p-6"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.labelOn}">${escapeHtml(label)} Catalog</h2></div><form data-form="catalog-search" data-kind="${escapeHtml(kind)}" class="space-y-4"><div class="flex gap-2"><input name="query" type="text" required placeholder="Enter ${escapeHtml(label.toLowerCase())} name..." class="${C.input} flex-1" /><button type="submit" class="${C.btnPrimary} py-3">Search</button></div><div class="grid grid-cols-1 gap-4 md:grid-cols-2"><select name="profileId" class="${C.input}">${profiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${profile.id === profileId ? "selected" : ""}>${escapeHtml(profile.label)}</option>`).join("")}</select><input name="gameVersion" type="text" value="${escapeHtml(gameVersion)}" class="${C.input}" /></div></form><div class="space-y-4">${renderCatalogResults(kind, resultSet)}</div><div class="grid grid-cols-1 gap-4 md:grid-cols-2"><form data-form="asset-upload" data-kind="${escapeHtml(kind)}" class="space-y-4 border border-outline p-5"><h3 class="${C.label}">Upload ${escapeHtml(label)}</h3><input name="file" type="file" required class="w-full border border-outline bg-black px-4 py-3 text-sm text-zinc-300 file:mr-4 file:border-0 file:bg-white file:px-3 file:py-2 file:text-[11px] file:font-bold file:uppercase file:tracking-[0.18em] file:text-black" /><button type="submit" class="w-full ${C.btnPrimary} py-3">Upload File</button></form><form data-form="asset-url" data-kind="${escapeHtml(kind)}" class="space-y-4 border border-outline p-5"><h3 class="${C.label}">Install From URL</h3><input name="url" type="url" required placeholder="https://example.com/file.jar" class="${C.input}" /><button type="submit" class="w-full ${C.btnGhost} py-3">Install File</button></form></div><div class="overflow-hidden border border-outline"><table class="w-full border-collapse text-left font-mono text-xs"><thead class="border-b border-outline bg-zinc-900/20"><tr><th class="px-6 py-4 ${C.label}">${escapeHtml(label)} Name</th><th class="px-6 py-4 ${C.label}">Size</th><th class="px-6 py-4 text-right ${C.label}">Action</th></tr></thead><tbody>${renderInstalledAssets(kind, assets)}</tbody></table></div></section>`;
+  return `<section class="space-y-6 border border-outline bg-black p-6">
+    <div class="border-b border-zinc-900 pb-4"><h2 class="${C.labelOn}">${escapeHtml(label)} Catalog</h2></div>
+    ${renderAddonCompatibilityBanner(server, kind)}
+    <form data-form="catalog-search" data-kind="${escapeHtml(kind)}" class="space-y-4">
+      <div class="flex gap-2">
+        <input name="query" type="text" required placeholder="Enter ${escapeHtml(label.toLowerCase())} name..." class="${C.input} flex-1" ${support.supported ? "" : "disabled"} />
+        <button type="submit" class="${C.btnPrimary} py-3" data-busy-label="Searching..." ${support.supported ? "" : "disabled"}>Search</button>
+      </div>
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <select name="profileId" class="${C.input}" ${support.supported ? "" : "disabled"}>${profiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${profile.id === profileId ? "selected" : ""}>${escapeHtml(profile.label)}</option>`).join("")}</select>
+        <input name="gameVersion" type="text" value="${escapeHtml(gameVersion)}" class="${C.input}" ${support.supported ? "" : "disabled"} />
+      </div>
+    </form>
+    <div class="space-y-4">${renderCatalogResults(kind, resultSet)}</div>
+    <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <form data-form="asset-upload" data-kind="${escapeHtml(kind)}" class="space-y-4 border border-outline p-5">
+        <h3 class="${C.label}">Upload ${escapeHtml(label)}</h3>
+        <input name="file" type="file" required class="w-full border border-outline bg-black px-4 py-3 text-sm text-zinc-300 file:mr-4 file:border-0 file:bg-white file:px-3 file:py-2 file:text-[11px] file:font-bold file:uppercase file:tracking-[0.18em] file:text-black" ${support.supported ? "" : "disabled"} />
+        <button type="submit" class="w-full ${C.btnPrimary} py-3" data-busy-label="Uploading..." ${support.supported ? "" : "disabled"}>Upload File</button>
+      </form>
+      <form data-form="asset-url" data-kind="${escapeHtml(kind)}" class="space-y-4 border border-outline p-5">
+        <h3 class="${C.label}">Install From URL</h3>
+        <input name="url" type="url" required placeholder="https://example.com/file.jar" class="${C.input}" ${support.supported ? "" : "disabled"} />
+        <button type="submit" class="w-full ${C.btnGhost} py-3" data-busy-label="Installing..." ${support.supported ? "" : "disabled"}>Install File</button>
+      </form>
+    </div>
+    <div class="overflow-hidden border border-outline">
+      <table class="w-full border-collapse text-left font-mono text-xs">
+        <thead class="border-b border-outline bg-zinc-900/20">
+          <tr><th class="px-6 py-4 ${C.label}">${escapeHtml(label)} Name</th><th class="px-6 py-4 ${C.label}">Size</th><th class="px-6 py-4 text-right ${C.label}">Action</th></tr>
+        </thead>
+        <tbody>${renderInstalledAssets(kind, assets)}</tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+function renderResourcePackSection(server) {
+  const props = server.server.properties ?? {};
+  return `<section class="space-y-6 border border-outline bg-black p-6 xl:col-span-2">
+    <div class="border-b border-zinc-900 pb-4">
+      <h2 class="${C.labelOn}">Resource Pack</h2>
+    </div>
+    <div class="border border-outline bg-surfaceAlt p-4">
+      <p class="${C.label} mb-2">Server Resource Pack</p>
+      <p class="text-sm leading-7 text-zinc-400">Send a resource pack URL through Minecraft itself. Players will see it after the next server restart.</p>
+    </div>
+    <form data-form="resource-pack-settings" class="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <label class="flex flex-col gap-2 md:col-span-2">
+        <span class="${C.label}">Resource Pack URL</span>
+        <input name="resource-pack" type="url" value="${escapeHtml(props["resource-pack"] ?? "")}" placeholder="https://example.com/pack.zip" class="${C.input}" />
+      </label>
+      <label class="flex flex-col gap-2">
+        <span class="${C.label}">SHA1 Hash</span>
+        <input name="resource-pack-sha1" type="text" value="${escapeHtml(props["resource-pack-sha1"] ?? "")}" placeholder="40-character sha1" class="${C.input} font-mono" />
+      </label>
+      <label class="flex flex-col gap-2">
+        <span class="${C.label}">Prompt</span>
+        <input name="resource-pack-prompt" type="text" value="${escapeHtml(props["resource-pack-prompt"] ?? "")}" placeholder="Recommended texture pack" class="${C.input}" />
+      </label>
+      <label class="flex items-center gap-3 md:col-span-2">
+        <input name="require-resource-pack" type="checkbox" class="h-4 w-4 accent-white" ${String(props["require-resource-pack"] ?? "false") === "true" ? "checked" : ""} />
+        <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Require Resource Pack</span>
+      </label>
+      <button type="submit" class="${C.btnPrimary} py-3 md:col-span-2" data-busy-label="Saving...">Save Resource Pack</button>
+    </form>
+  </section>`;
 }
 
 function renderAddonsSection(server) {
-  return `<div class="grid grid-cols-1 gap-8 xl:grid-cols-2">${renderAddonColumn("plugin", server.catalog.pluginProfiles, server.plugins, ui.catalog.plugin)}${renderAddonColumn("mod", server.catalog.modProfiles, server.mods, ui.catalog.mod)}</div>`;
+  return `<div class="grid grid-cols-1 gap-8 xl:grid-cols-2">${renderAddonColumn("plugin", server.catalog.pluginProfiles, server.plugins, ui.catalog.plugin)}${renderAddonColumn("mod", server.catalog.modProfiles, server.mods, ui.catalog.mod)}${renderResourcePackSection(server)}</div>`;
 }
 
 function renderBackupsSection(server) {
@@ -1195,12 +1408,6 @@ function render() {
     const currentLength = input?.value?.length ?? 0;
     input?.setSelectionRange?.(currentLength, currentLength);
     ui.modal.justOpened = false;
-  } else if (ui.modal?.type === "create-server") {
-    const input = document.querySelector('[data-modal-input="server-name"]');
-    if (input && document.activeElement !== input && typeof ui.modal.selectionStart === "number") {
-      input.focus();
-      input.setSelectionRange?.(ui.modal.selectionStart, ui.modal.selectionEnd ?? ui.modal.selectionStart);
-    }
   }
 }
 
@@ -1484,7 +1691,27 @@ async function handleAction(event) {
   if (!button) return;
   event.preventDefault();
   if (isUiLocked()) return;
-  try {
+  const action = button.dataset.action;
+  const busyActions = new Set([
+    "select-server",
+    "quick-server-control",
+    "server-control",
+    "copy-address",
+    "check-app-update",
+    "apply-app-update",
+    "open-path",
+    "pick-world-folder",
+    "use-world",
+    "regenerate-world",
+    "regenerate-active-world",
+    "playit-connect",
+    "refresh-playit-gate",
+    "remove-asset",
+    "install-catalog",
+    "player-action",
+  ]);
+
+  const run = async () => {
     switch (button.dataset.action) {
       case "go-manager":
         ui.screen = "manager";
@@ -1651,6 +1878,14 @@ async function handleAction(event) {
       default:
         break;
     }
+  };
+
+  try {
+    if (busyActions.has(action)) {
+      await withBusyElement(button, run);
+      return;
+    }
+    await run();
   } catch (error) {
     showError(error);
   }
@@ -1661,7 +1896,8 @@ async function handleSubmit(event) {
   if (!form) return;
   event.preventDefault();
   if (isUiLocked()) return;
-  try {
+  const submitter = event.submitter ?? form.querySelector('button[type="submit"]');
+  const run = async () => {
     switch (form.dataset.form) {
       case "create-server-modal": {
         await createServerFromName(form.elements.name.value);
@@ -1765,6 +2001,19 @@ async function handleSubmit(event) {
         await refreshState();
         await refreshLogs();
         break;
+      case "resource-pack-settings":
+        await api(activeServerPath("/settings/server-properties"), {
+          method: "POST",
+          body: {
+            "resource-pack": form.elements["resource-pack"].value,
+            "resource-pack-sha1": form.elements["resource-pack-sha1"].value,
+            "resource-pack-prompt": form.elements["resource-pack-prompt"].value,
+            "require-resource-pack": form.elements["require-resource-pack"].checked,
+          },
+        });
+        await refreshState();
+        await refreshLogs();
+        break;
       case "backup-settings":
         await api(activeServerPath("/settings/profile"), { method: "POST", body: { name: activeServer().name, autoBackups: form.elements.autoBackups.checked, backupIntervalMinutes: Number(form.elements.backupIntervalMinutes.value) || 60 } });
         await refreshState();
@@ -1811,6 +2060,10 @@ async function handleSubmit(event) {
       default:
         break;
     }
+  };
+
+  try {
+    await withBusyElement(submitter, run);
   } catch (error) {
     showError(error);
   }
