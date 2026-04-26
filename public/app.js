@@ -7,6 +7,7 @@ const DEPENDENCY_CHECK_MAX_MS = 6000;
 
 const runtime = { latestLogId: 0, consoleText: "", data: null, versionCache: new Map() };
 let playitGatePollTimer = null;
+let playitGateConnectPromise = null;
 let logsPollTimer = null;
 let statePollTimer = null;
 const ui = {
@@ -248,7 +249,9 @@ function appUpdateState() {
 }
 
 function playitLinkRequired() {
-  return !runtime.data?.playit?.secretConfigured;
+  const playit = runtime.data?.playit;
+  if (!playit) return false;
+  return !playit.secretConfigured || playit.claimWaiting || !playit.running;
 }
 
 function dependencyMissingLabels(dependencies) {
@@ -773,6 +776,26 @@ function startPlayitGatePolling() {
   }, 2500);
 }
 
+function maybeKickoffPlayitGateConnection() {
+  const playit = runtime.data?.playit;
+  if (!playit || playitGateConnectPromise) return;
+  if (playit.claimWaiting) return;
+  if (playit.secretConfigured && playit.running) return;
+
+  playitGateConnectPromise = api("/api/playit/connect", { method: "POST" })
+    .then((payload) => {
+      runtime.data = payload.state;
+      syncInstallDraft();
+      render();
+    })
+    .catch((error) => {
+      console.error(error);
+    })
+    .finally(() => {
+      playitGateConnectPromise = null;
+    });
+}
+
 function renderTile(label, value, detail = "") {
   return `<article class="${C.card}"><p class="${C.label} mb-3">${escapeHtml(label)}</p><div class="text-2xl font-black tracking-tight text-white">${escapeHtml(value)}</div>${detail ? `<p class="mt-2 text-xs leading-6 text-zinc-400">${escapeHtml(detail)}</p>` : ""}</article>`;
 }
@@ -908,19 +931,26 @@ function renderHeader() {
 function renderPlayitGateScreen() {
   const playit = runtime.data?.playit ?? {};
   const waiting = Boolean(playit.claimWaiting);
+  const startingLinkedAgent = Boolean(playit.secretConfigured && !playit.running && !waiting);
   const title = waiting
     ? "Finish Playit Agent Link To Continue"
-    : "Connect Playit Agent To Continue";
+    : startingLinkedAgent
+      ? "Connecting Playit Agent To Continue"
+      : "Connect Playit Agent To Continue";
   const detail = waiting
     ? "Complete the playit.gg browser link. Releu will move to the main menu automatically as soon as the agent is connected."
-    : "Link playit.gg once for this app. Releu will reuse that connection for every server you create on this PC.";
+    : startingLinkedAgent
+      ? "Releu is starting the linked playit.gg agent now. This page will continue automatically when the agent connects."
+      : "Link playit.gg once for this app. Releu will reuse that connection for every server you create on this PC.";
   const note =
     playit.lastError ||
     playit.statusMessage ||
     "You can relink or reset the agent later from Settings.";
   const primaryAction = waiting
     ? `<a class="${C.btnPrimary}" href="${escapeHtml(playit.claimUrl ?? playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Playit Link</a>`
-    : `<button type="button" class="${C.btnPrimary}" data-action="playit-connect">Connect Playit Agent</button>`;
+    : startingLinkedAgent
+      ? `<button type="button" class="${C.btnGhost}" data-action="refresh-playit-gate">Refresh Status</button>`
+      : `<button type="button" class="${C.btnPrimary}" data-action="playit-connect">Connect Playit Agent</button>`;
   const secondaryAction = waiting
     ? `<button type="button" class="${C.btnGhost}" data-action="refresh-playit-gate">Refresh Status</button>`
     : "";
@@ -1407,6 +1437,7 @@ function render() {
   }
   syncInstallDraft();
   if (playitLinkRequired()) {
+    maybeKickoffPlayitGateConnection();
     startPlayitGatePolling();
     app.innerHTML = `${renderPlayitGateScreen()}${renderModal()}`;
     return;
