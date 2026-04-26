@@ -30,6 +30,8 @@ const ui = {
   modal: null,
   operation: null,
   appUpdateAttemptedVersion: null,
+  playerDrafts: {},
+  consoleDrafts: {},
 };
 
 const sections = [
@@ -129,6 +131,39 @@ function formatStatus(status) {
   return "Offline";
 }
 
+function playerDraftKey(name) {
+  return String(name ?? "").trim().toLowerCase();
+}
+
+function syncPlayerDrafts() {
+  const players = activeServer()?.players ?? [];
+  const nextDrafts = {};
+  for (const player of players) {
+    const key = playerDraftKey(player.name);
+    const existing = ui.playerDrafts[key] ?? {};
+    nextDrafts[key] = {
+      reason: existing.reason ?? "",
+      destination: existing.destination ?? "",
+      mode: existing.mode ?? player.gamemode ?? "survival",
+    };
+  }
+  ui.playerDrafts = nextDrafts;
+}
+
+function ensurePlayerDraft(player) {
+  const key = playerDraftKey(player?.name);
+  if (!ui.playerDrafts[key]) {
+    ui.playerDrafts[key] = {
+      reason: "",
+      destination: "",
+      mode: player?.gamemode ?? "survival",
+    };
+  } else if (!ui.playerDrafts[key].mode) {
+    ui.playerDrafts[key].mode = player?.gamemode ?? "survival";
+  }
+  return ui.playerDrafts[key];
+}
+
 function serverStatusPresentation(server) {
   const operation = server?.server?.operation ?? server?.operation ?? null;
   if (operation?.active) {
@@ -220,6 +255,93 @@ function activeServerId() {
 
 function activeServerPath(suffix) {
   return `/api/servers/${encodeURIComponent(activeServerId())}${suffix}`;
+}
+
+function consoleDraftKey(serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? "default") {
+  return String(serverId ?? "default");
+}
+
+function getConsoleDraft(serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? null) {
+  const key = consoleDraftKey(serverId);
+  if (typeof ui.consoleDrafts[key] !== "string") {
+    ui.consoleDrafts[key] = "";
+  }
+  return ui.consoleDrafts[key];
+}
+
+function setConsoleDraft(value, serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? null) {
+  ui.consoleDrafts[consoleDraftKey(serverId)] = String(value ?? "");
+}
+
+function captureEditableFocus() {
+  const active = document.activeElement;
+  if (
+    !active ||
+    !(active instanceof HTMLInputElement || active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement)
+  ) {
+    return null;
+  }
+
+  if (active.dataset.modalInput) {
+    return {
+      selector: `[data-modal-input="${active.dataset.modalInput}"]`,
+      value: active.value,
+      selectionStart: active.selectionStart ?? null,
+      selectionEnd: active.selectionEnd ?? null,
+    };
+  }
+
+  const playerCard = active.closest?.("[data-player-card]");
+  if (playerCard?.dataset.playerKey && active.name) {
+    return {
+      selector: `[data-player-card][data-player-key="${playerCard.dataset.playerKey}"] [name="${active.name}"]`,
+      value: active.value,
+      selectionStart: active.selectionStart ?? null,
+      selectionEnd: active.selectionEnd ?? null,
+    };
+  }
+
+  const form = active.closest?.("form[data-form]");
+  if (form?.dataset.form && active.name) {
+    return {
+      selector: `form[data-form="${form.dataset.form}"] [name="${active.name}"]`,
+      value: active.value,
+      selectionStart: active.selectionStart ?? null,
+      selectionEnd: active.selectionEnd ?? null,
+    };
+  }
+
+  if (active.dataset.installField) {
+    return {
+      selector: `[data-install-field="${active.dataset.installField}"]`,
+      value: active.value,
+      selectionStart: active.selectionStart ?? null,
+      selectionEnd: active.selectionEnd ?? null,
+    };
+  }
+
+  return null;
+}
+
+function restoreEditableFocus(snapshot) {
+  if (!snapshot?.selector) {
+    return;
+  }
+
+  const target = document.querySelector(snapshot.selector);
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+
+  target.focus();
+  if ("value" in target && snapshot.value !== undefined) {
+    target.value = snapshot.value;
+  }
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    const start = snapshot.selectionStart ?? target.value.length;
+    const end = snapshot.selectionEnd ?? start;
+    target.setSelectionRange?.(start, end);
+  }
 }
 
 function getSoftwareOption(softwareId) {
@@ -459,6 +581,7 @@ async function maybeAutoApplyAppUpdate() {
 function resetLogs() {
   runtime.latestLogId = 0;
   runtime.consoleText = "";
+  setConsoleDraft("");
   updateConsoleElement();
 }
 
@@ -510,7 +633,7 @@ function addonSupportState(server, kind) {
     return {
       supported: false,
       title: `${software.name} Does Not Support Mods`,
-      detail: "Switch this server to Fabric before installing mod add-ons.",
+      detail: "Switch this server to Fabric, Forge, or NeoForge before installing mod add-ons.",
     };
   }
 
@@ -569,7 +692,7 @@ function syncInstallDraft() {
     return;
   }
   const host = runtime.data.host;
-  const software = server.install.software ?? server.install.installedSoftware ?? "purpur";
+  const software = server.install.installedSoftware ?? server.install.software ?? "purpur";
   const version = server.install.requestedVersion ?? server.install.installedVersion ?? "latest";
   if (ui.installDraft?.serverId !== server.id) {
     ui.installDraft = {
@@ -649,14 +772,29 @@ function closeModal() {
 }
 
 async function ensureVersions(softwareId) {
-  if (!softwareId || runtime.versionCache.has(softwareId)) return;
-  const payload = await api(`/api/software/versions?software=${encodeURIComponent(softwareId)}`);
-  runtime.versionCache.set(softwareId, ["latest", ...(payload.versions ?? [])]);
+  if (!softwareId) return;
+  if (!runtime.versionCache.has(softwareId)) {
+    const payload = await api(`/api/software/versions?software=${encodeURIComponent(softwareId)}`);
+    runtime.versionCache.set(softwareId, ["latest", ...(payload.versions ?? [])]);
+  }
+
+  const options = runtime.versionCache.get(softwareId) ?? ["latest"];
+  if (ui.installDraft?.software === softwareId) {
+    const installedVersion = activeServer()?.install?.installedVersion ?? null;
+    if (
+      ui.installDraft.version &&
+      ui.installDraft.version !== "latest" &&
+      !options.includes(ui.installDraft.version)
+    ) {
+      ui.installDraft.version =
+        installedVersion && options.includes(installedVersion) ? installedVersion : "latest";
+    }
+  }
 }
 
 function getVersionOptions(softwareId, selectedVersion = "latest") {
-  const options = runtime.versionCache.get(softwareId) ?? ["latest"];
-  return !selectedVersion || options.includes(selectedVersion) ? options : [selectedVersion, ...options];
+  void selectedVersion;
+  return runtime.versionCache.get(softwareId) ?? ["latest"];
 }
 
 function softwareChoices() {
@@ -812,6 +950,7 @@ function formatLastSeen(value) {
 function renderPlayerFlags(player) {
   return [
     player.online ? "ONLINE" : "OFFLINE",
+    player.gamemode ? `GM:${String(player.gamemode).toUpperCase()}` : null,
     player.op ? "OP" : null,
     player.whitelisted ? "WL" : null,
     player.banned ? "BANNED" : null,
@@ -829,6 +968,15 @@ function renderPlayerButtons(player) {
     .map(
       ([action, label]) =>
         `<button type="button" class="border border-outline px-2 py-1 text-[9px] font-bold uppercase tracking-[0.16em] text-white transition hover:bg-white hover:text-black" data-action="player-action" data-player-name="${escapeHtml(player.name)}" data-player-action="${escapeHtml(action)}" data-busy-label="Loading...">${escapeHtml(label)}</button>`,
+    )
+    .join("");
+}
+
+function renderPlayerModeOptions(selectedMode = "survival") {
+  return ["survival", "creative", "adventure", "spectator"]
+    .map(
+      (value) =>
+        `<option value="${escapeHtml(value)}" ${selectedMode === value ? "selected" : ""}>${escapeHtml(value[0].toUpperCase() + value.slice(1))}</option>`,
     )
     .join("");
 }
@@ -995,7 +1143,7 @@ function renderManagerScreen() {
       return `<article class="releu-panel relative overflow-hidden border border-outline bg-surface transition hover:border-zinc-500"><div class="absolute right-0 top-0 p-4"><div class="flex items-center gap-2"><div class="${escapeHtml(presentation.tone.dot)} h-2 w-2 rounded-full"></div><span class="text-[10px] font-bold uppercase tracking-[0.18em] ${escapeHtml(presentation.tone.text)}">${escapeHtml(presentation.label)}</span></div></div><div class="p-6"><div class="flex flex-col gap-4"><div><h3 class="mb-1 text-xl font-semibold tracking-tight text-white">${escapeHtml(server.name)}</h3><p class="font-mono text-[11px] text-zinc-500">${escapeHtml(server.serverDir)}</p></div><div class="flex flex-wrap gap-2"><span class="${C.chip}">Port ${escapeHtml(server.port)}</span><span class="${C.chip}">${escapeHtml(softwareLabel(software))}</span><span class="${C.chip}">${escapeHtml(version)}</span></div><div class="space-y-3 border-t border-zinc-900 pt-4"><div class="flex items-center justify-between"><span class="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">Resource Load</span><span class="font-mono text-[10px] text-white">${escapeHtml(formatPercent(loadWidth))}</span></div><div class="h-1 w-full bg-zinc-900"><div class="releu-progress-fill h-full bg-white" style="width:${Math.max(0, Math.min(100, loadWidth))}%"></div></div><p class="text-xs leading-6 text-zinc-400">${escapeHtml(presentation.detail)}</p></div></div></div><div class="grid grid-cols-3 border-t border-outline"><button type="button" class="releu-button border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black" data-action="select-server" data-server-id="${escapeHtml(server.id)}">${server.jarInstalled ? "Manage" : "Setup"}</button>${secondaryCommand ? `<button type="button" class="releu-button border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black" data-action="quick-server-control" data-server-id="${escapeHtml(server.id)}" data-server-command="${escapeHtml(secondaryCommand)}">${secondaryCommand === "restart" ? "Restart" : "Start"}</button>` : `<button type="button" class="releu-button border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:bg-white hover:text-black" data-action="select-server" data-server-id="${escapeHtml(server.id)}">Open</button>`}<button type="button" class="releu-button py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:bg-white hover:text-black" data-action="delete-server" data-server-id="${escapeHtml(server.id)}" data-server-name="${escapeHtml(server.name)}">Delete</button></div></article>`;
     })
     .join("");
-  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto w-full max-w-7xl p-8"><div class="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div class="space-y-2"><p class="${C.label}">Server Selector</p><h1 class="text-3xl font-black tracking-tight text-white">Choose a server or add a new one.</h1><p class="max-w-3xl text-sm text-zinc-400">New servers are created automatically in Local App Data, ports are assigned automatically, and server data is saved automatically to disk.</p></div><div class="flex gap-2"><button type="button" class="releu-button flex h-10 w-10 items-center justify-center border border-outline transition hover:bg-surfaceAlt ${ui.managerView === "grid" ? "bg-surface text-white" : "text-zinc-500"}" data-action="toggle-manager-view" data-view="grid">${icon("grid")}</button><button type="button" class="releu-button flex h-10 w-10 items-center justify-center border border-outline transition hover:bg-surfaceAlt ${ui.managerView === "list" ? "bg-surface text-white" : "text-zinc-500"}" data-action="toggle-manager-view" data-view="list">${icon("list")}</button></div></div><div class="${gridClass}">${cards}<button type="button" class="releu-panel group flex min-h-[290px] flex-col items-center justify-center border border-dashed border-outline p-12 text-center transition hover:border-white" data-action="add-server-prompt"><div class="mb-4 text-zinc-500 transition group-hover:text-white">${icon("plus", "h-9 w-9")}</div><span class="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500 transition group-hover:text-white">Add Server</span></button></div></main></div>`;
+  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto w-full max-w-7xl p-8"><div class="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div class="space-y-2"><p class="${C.label}">Server Selector</p><h1 class="text-3xl font-black tracking-tight text-white">Choose a server or add a new one.</h1><p class="max-w-3xl text-sm text-zinc-400">New servers are created automatically in the Releu data folder, ports are assigned automatically, and server data is saved automatically to disk.</p></div><div class="flex gap-2"><button type="button" class="releu-button flex h-10 w-10 items-center justify-center border border-outline transition hover:bg-surfaceAlt ${ui.managerView === "grid" ? "bg-surface text-white" : "text-zinc-500"}" data-action="toggle-manager-view" data-view="grid">${icon("grid")}</button><button type="button" class="releu-button flex h-10 w-10 items-center justify-center border border-outline transition hover:bg-surfaceAlt ${ui.managerView === "list" ? "bg-surface text-white" : "text-zinc-500"}" data-action="toggle-manager-view" data-view="list">${icon("list")}</button></div></div><div class="${gridClass}">${cards}<button type="button" class="releu-panel group flex min-h-[290px] flex-col items-center justify-center border border-dashed border-outline p-12 text-center transition hover:border-white" data-action="add-server-prompt"><div class="mb-4 text-zinc-500 transition group-hover:text-white">${icon("plus", "h-9 w-9")}</div><span class="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500 transition group-hover:text-white">Add Server</span></button></div></main></div>`;
 }
 
 function renderSetupScreen() {
@@ -1010,7 +1158,7 @@ function renderSetupScreen() {
         label: "Ready For Install",
         detail: "The server folder already exists, the port is reserved, and backups are ready. Install the selected software to open the full panel.",
       };
-  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-8"><header class="mb-10"><h1 class="text-3xl font-black uppercase tracking-tight text-white">Server Setup</h1><p class="mt-2 max-w-3xl text-sm text-zinc-400">Configure the software, resource limits, and launcher path. Releu accepts the Minecraft EULA automatically during install.</p></header><div class="grid grid-cols-1 gap-4 md:grid-cols-12"><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Selected Server</h2></div><div class="space-y-6"><div><label class="${C.label} mb-2 block">Server Name</label><p class="text-2xl font-semibold text-white">${escapeHtml(server.name)}</p></div><div><label class="${C.label} mb-2 block">Auto Folder</label><div class="border border-outline bg-black p-4 font-mono text-[11px] text-zinc-300">${escapeHtml(server.serverDir)}</div></div><div class="grid grid-cols-2 gap-4"><div><label class="${C.label} mb-1 block">Port</label><p class="text-sm text-white">${escapeHtml(server.server.properties["server-port"] ?? 25565)}</p></div><div><label class="${C.label} mb-1 block">Backups</label><p class="text-sm text-white">${server.backups.enabled ? `Every ${escapeHtml(server.backups.intervalMinutes)} minutes` : "Disabled"}</p></div></div><div class="space-y-2 border-t border-zinc-900 pt-4 text-xs text-zinc-400"><p>Folders are created in Local App Data automatically.</p></div></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Choose Software</h2></div><div class="grid grid-cols-2 gap-4 lg:grid-cols-4">${softwareChoices().map((option) => { const selected = option.id === ui.installDraft.software; return `<button type="button" class="releu-button flex min-h-[148px] flex-col justify-between border ${selected ? "border-white bg-white text-black" : "border-outline bg-black text-white hover:border-zinc-600"} p-4 text-left transition" data-action="pick-software" data-software-id="${escapeHtml(option.id)}"><div class="flex items-start justify-between gap-3"><div class="${selected ? "text-black" : "text-zinc-500"}">${icon(selected ? "server" : "layers", "h-5 w-5")}</div>${selected ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}</div><div class="space-y-2"><div class="text-sm font-bold tracking-tight">${escapeHtml(option.name)}</div><div class="text-[10px] uppercase tracking-[0.18em] ${selected ? "text-zinc-700" : "text-zinc-500"}">${escapeHtml(option.latestHint ?? option.releaseChannel ?? option.id)}</div></div></button>`; }).join("")}</div><label class="flex flex-col gap-2"><span class="${C.label}">Minecraft Version</span><select data-install-field="version" class="w-full border border-outline bg-black px-4 py-3 text-white outline-none transition focus:border-white">${versionOptions.map((version) => `<option value="${escapeHtml(version)}" ${version === ui.installDraft.version ? "selected" : ""}>${escapeHtml(version)}</option>`).join("")}</select></label></section><section class="${C.card} flex flex-col gap-8 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Server Resources</h2></div><div class="grid grid-cols-1 gap-x-12 gap-y-8 md:grid-cols-2"><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Max RAM Allocation</span><span class="font-mono text-sm text-white" data-output="maxRamMb">${escapeHtml(mbToRamString(ui.installDraft.maxRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(runtime.data.host.totalMemoryMb)}" step="256" value="${escapeHtml(ui.installDraft.maxRamMb)}" data-install-field="maxRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Min RAM Allocation</span><span class="font-mono text-sm text-white" data-output="minRamMb">${escapeHtml(mbToRamString(ui.installDraft.minRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(ui.installDraft.maxRamMb)}" step="256" value="${escapeHtml(ui.installDraft.minRamMb)}" data-install-field="minRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">CPU Core Limit</span><span class="font-mono text-sm text-white" data-output="cpuCores">${escapeHtml(ui.installDraft.cpuCores)}</span></div><input type="range" min="1" max="${escapeHtml(runtime.data.host.cpuCores)}" step="1" value="${escapeHtml(ui.installDraft.cpuCores)}" data-install-field="cpuCores" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">GPU Share</span><span class="font-mono text-sm text-white" data-output="gpuShare">${escapeHtml(`${ui.installDraft.gpuShare}%`)}</span></div><input type="range" min="0" max="100" step="5" value="${escapeHtml(ui.installDraft.gpuShare)}" data-install-field="gpuShare" class="w-full accent-white" /></label><label class="space-y-2 md:col-span-2"><span class="${C.label}">Java Executable Path</span><input data-install-field="javaPath" type="text" value="${escapeHtml(ui.installDraft.javaPath)}" class="${C.input} font-mono text-sm" /></label></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Install And Open</h2></div><div class="flex flex-1 flex-col justify-between gap-6"><div class="space-y-4 text-sm text-zinc-300"><p>${escapeHtml(installState.detail)}</p><div class="flex items-center gap-3"><div class="h-2 w-2 rounded-full ${server.server.operation?.active ? "bg-zinc-300" : "bg-white"}"></div><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">${escapeHtml(installState.label)}</span></div></div><button type="button" data-action="install-setup" class="w-full border border-white bg-white py-6 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition hover:bg-zinc-200">${escapeHtml(server.server.operation?.active ? (server.server.operation.shortLabel ?? "Installing") : "Install Server")}</button></div></section></div></main></div>`;
+  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-8"><header class="mb-10"><h1 class="text-3xl font-black uppercase tracking-tight text-white">Server Setup</h1><p class="mt-2 max-w-3xl text-sm text-zinc-400">Configure the software, resource limits, and launcher path. Releu accepts the Minecraft EULA automatically during install.</p></header><div class="grid grid-cols-1 gap-4 md:grid-cols-12"><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Selected Server</h2></div><div class="space-y-6"><div><label class="${C.label} mb-2 block">Server Name</label><p class="text-2xl font-semibold text-white">${escapeHtml(server.name)}</p></div><div><label class="${C.label} mb-2 block">Auto Folder</label><div class="border border-outline bg-black p-4 font-mono text-[11px] text-zinc-300">${escapeHtml(server.serverDir)}</div></div><div class="grid grid-cols-2 gap-4"><div><label class="${C.label} mb-1 block">Port</label><p class="text-sm text-white">${escapeHtml(server.server.properties["server-port"] ?? 25565)}</p></div><div><label class="${C.label} mb-1 block">Backups</label><p class="text-sm text-white">${server.backups.enabled ? `Every ${escapeHtml(server.backups.intervalMinutes)} minutes` : "Disabled"}</p></div></div><div class="space-y-2 border-t border-zinc-900 pt-4 text-xs text-zinc-400"><p>Folders are created automatically in the Releu data folder.</p></div></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Choose Software</h2></div><div class="grid grid-cols-2 gap-4 lg:grid-cols-4">${softwareChoices().map((option) => { const selected = option.id === ui.installDraft.software; return `<button type="button" class="releu-button flex min-h-[148px] flex-col justify-between border ${selected ? "border-white bg-white text-black" : "border-outline bg-black text-white hover:border-zinc-600"} p-4 text-left transition" data-action="pick-software" data-software-id="${escapeHtml(option.id)}"><div class="flex items-start justify-between gap-3"><div class="${selected ? "text-black" : "text-zinc-500"}">${icon(selected ? "server" : "layers", "h-5 w-5")}</div>${selected ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}</div><div class="space-y-2"><div class="text-sm font-bold tracking-tight">${escapeHtml(option.name)}</div><div class="text-[10px] uppercase tracking-[0.18em] ${selected ? "text-zinc-700" : "text-zinc-500"}">${escapeHtml(option.latestHint ?? option.releaseChannel ?? option.id)}</div></div></button>`; }).join("")}</div><label class="flex flex-col gap-2"><span class="${C.label}">Minecraft Version</span><select data-install-field="version" class="w-full border border-outline bg-black px-4 py-3 text-white outline-none transition focus:border-white">${versionOptions.map((version) => `<option value="${escapeHtml(version)}" ${version === ui.installDraft.version ? "selected" : ""}>${escapeHtml(version)}</option>`).join("")}</select></label></section><section class="${C.card} flex flex-col gap-8 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Server Resources</h2></div><div class="grid grid-cols-1 gap-x-12 gap-y-8 md:grid-cols-2"><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Max RAM Allocation</span><span class="font-mono text-sm text-white" data-output="maxRamMb">${escapeHtml(mbToRamString(ui.installDraft.maxRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(runtime.data.host.totalMemoryMb)}" step="256" value="${escapeHtml(ui.installDraft.maxRamMb)}" data-install-field="maxRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Min RAM Allocation</span><span class="font-mono text-sm text-white" data-output="minRamMb">${escapeHtml(mbToRamString(ui.installDraft.minRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(ui.installDraft.maxRamMb)}" step="256" value="${escapeHtml(ui.installDraft.minRamMb)}" data-install-field="minRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">CPU Core Limit</span><span class="font-mono text-sm text-white" data-output="cpuCores">${escapeHtml(ui.installDraft.cpuCores)}</span></div><input type="range" min="1" max="${escapeHtml(runtime.data.host.cpuCores)}" step="1" value="${escapeHtml(ui.installDraft.cpuCores)}" data-install-field="cpuCores" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">GPU Share</span><span class="font-mono text-sm text-white" data-output="gpuShare">${escapeHtml(`${ui.installDraft.gpuShare}%`)}</span></div><input type="range" min="0" max="100" step="5" value="${escapeHtml(ui.installDraft.gpuShare)}" data-install-field="gpuShare" class="w-full accent-white" /></label><label class="space-y-2 md:col-span-2"><span class="${C.label}">Java Executable Path</span><input data-install-field="javaPath" type="text" value="${escapeHtml(ui.installDraft.javaPath)}" class="${C.input} font-mono text-sm" /></label></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Install And Open</h2></div><div class="flex flex-1 flex-col justify-between gap-6"><div class="space-y-4 text-sm text-zinc-300"><p>${escapeHtml(installState.detail)}</p><div class="flex items-center gap-3"><div class="h-2 w-2 rounded-full ${server.server.operation?.active ? "bg-zinc-300" : "bg-white"}"></div><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">${escapeHtml(installState.label)}</span></div></div><button type="button" data-action="install-setup" class="w-full border border-white bg-white py-6 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition hover:bg-zinc-200">${escapeHtml(server.server.operation?.active ? (server.server.operation.shortLabel ?? "Installing") : "Install Server")}</button></div></section></div></main></div>`;
 }
 
 function renderOverviewSection(server) {
@@ -1162,12 +1310,13 @@ function renderConsoleSection(server) {
   const metrics = server.server.metrics ?? {};
   const ramMaxMb = Number(metrics.ramMaxMb ?? ramStringToMb(server.launcher.maxRam, 4096));
   const ramUsedMb = Number(metrics.ramUsedMb ?? 0);
-  return `<main class="flex min-h-[calc(100vh-180px)] flex-col overflow-hidden bg-black"><div class="mb-4 flex items-center justify-between px-2"><div class="flex items-center gap-4"><div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="${C.labelOn}">${escapeHtml(server.name)}</span></div><span class="font-mono text-[11px] text-zinc-600">|</span><span class="font-mono text-[11px] text-zinc-500">LAST START: ${escapeHtml(formatTimestamp(server.server.lastStartedAt))}</span></div></div><div class="flex flex-1 flex-col overflow-hidden border border-outline bg-black"><div class="flex-1 overflow-y-auto p-6 font-mono text-xs text-zinc-300"><pre data-role="console-output" class="whitespace-pre-wrap">${escapeHtml(runtime.consoleText || "Console output will appear here once the server starts.")}</pre></div><form data-form="console-command" class="flex items-center gap-3 border-t border-outline bg-black p-4"><span class="text-zinc-500">${icon("terminal")}</span><input name="command" type="text" placeholder="Enter server command..." class="flex-1 border-none bg-transparent font-mono text-sm text-white outline-none placeholder:text-zinc-700" /></form></div><div class="mt-4 flex flex-wrap gap-6 px-2 pb-2"><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">CPU Load</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, Number(metrics.cpuPercent ?? 0)))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(formatPercent(metrics.cpuPercent ?? 0))}</span></div><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">RAM Alloc</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(`${formatMemoryFromMb(ramUsedMb)} / ${formatMemoryFromMb(ramMaxMb)}`)}</span></div><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">Players</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, (Number(server.server.playerCount ?? 0) / playerCapacity(server)) * 100))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(`${server.server.playerCount} / ${playerCapacity(server)}`)}</span></div><div class="ml-auto flex items-center gap-3"><button type="button" class="${C.btnPrimary}" data-action="server-control" data-server-command="restart">Restart Server</button><button type="button" class="${C.btnGhost}" data-action="server-control" data-server-command="backup">Backup Now</button></div></div></main>`;
+  const commandDraft = getConsoleDraft(server.id);
+  return `<main class="flex min-h-[calc(100vh-180px)] flex-col overflow-hidden bg-black"><div class="mb-4 flex items-center justify-between px-2"><div class="flex items-center gap-4"><div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="${C.labelOn}">${escapeHtml(server.name)}</span></div><span class="font-mono text-[11px] text-zinc-600">|</span><span class="font-mono text-[11px] text-zinc-500">LAST START: ${escapeHtml(formatTimestamp(server.server.lastStartedAt))}</span></div></div><div class="flex flex-1 flex-col overflow-hidden border border-outline bg-black"><div class="flex-1 overflow-y-auto p-6 font-mono text-xs text-zinc-300"><pre data-role="console-output" class="whitespace-pre-wrap">${escapeHtml(runtime.consoleText || "Console output will appear here once the server starts.")}</pre></div><form data-form="console-command" class="flex items-center gap-3 border-t border-outline bg-black p-4"><span class="text-zinc-500">${icon("terminal")}</span><input name="command" type="text" value="${escapeHtml(commandDraft)}" autocomplete="off" spellcheck="false" placeholder="Enter server command..." class="flex-1 border-none bg-transparent font-mono text-sm text-white outline-none placeholder:text-zinc-700" /></form></div><div class="mt-4 flex flex-wrap gap-6 px-2 pb-2"><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">CPU Load</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, Number(metrics.cpuPercent ?? 0)))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(formatPercent(metrics.cpuPercent ?? 0))}</span></div><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">RAM Alloc</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(`${formatMemoryFromMb(ramUsedMb)} / ${formatMemoryFromMb(ramMaxMb)}`)}</span></div><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">Players</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, (Number(server.server.playerCount ?? 0) / playerCapacity(server)) * 100))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(`${server.server.playerCount} / ${playerCapacity(server)}`)}</span></div><div class="ml-auto flex items-center gap-3"><button type="button" class="${C.btnPrimary}" data-action="server-control" data-server-command="restart">Restart Server</button><button type="button" class="${C.btnGhost}" data-action="server-control" data-server-command="backup">Backup Now</button></div></div></main>`;
 }
 
 function renderPlayersSection(server) {
   const onlinePlayers = server.players.filter((entry) => entry.online).length;
-  return `<div class="flex flex-col gap-8"><div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><h1 class="mb-2 text-4xl font-black tracking-tight text-white">Player Database</h1><p class="max-w-3xl text-sm text-zinc-400">Manage known players, online players, and offline permission lists from one place.</p></div><div class="flex flex-wrap gap-2"><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${onlinePlayers} Active`)}</span></div><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full border border-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${server.players.length} Total`)}</span></div></div></div><form data-form="player-register" class="grid gap-4 border border-outline bg-surface p-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px]"><label class="flex flex-col gap-2"><span class="${C.label}">Player Name</span><input name="name" type="text" required class="${C.input}" placeholder="Steve" /></label><label class="flex flex-col gap-2"><span class="${C.label}">UUID (Optional)</span><input name="uuid" type="text" class="${C.input} font-mono" placeholder="00000000-0000-0000-0000-000000000000" /></label><button type="submit" class="self-end ${C.btnPrimary} py-3" data-busy-label="Adding...">Add Player</button></form><div class="overflow-hidden border border-outline bg-surface"><div class="overflow-x-auto"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-outline bg-surfaceAlt"><th class="p-4 ${C.label}">Status</th><th class="p-4 ${C.label}">Player</th><th class="p-4 ${C.label}">Flags</th><th class="p-4 ${C.label}">Last Seen</th><th class="p-4 text-right ${C.label}">Administrative Actions</th></tr></thead><tbody class="divide-y divide-zinc-900">${server.players.length ? server.players.map((player) => `<tr class="transition hover:bg-surfaceAlt" data-player-card><td class="p-4"><span class="block h-2 w-2 rounded-full ${player.online ? "bg-white shadow-[0_0_8px_rgba(255,255,255,0.4)]" : "border border-white"}"></span></td><td class="p-4"><div class="flex items-center gap-3"><img src="${escapeHtml(playerAvatarUrl(player))}" alt="${escapeHtml(player.name)}" class="h-10 w-10 border border-outline bg-black object-cover" loading="lazy" /><div><div class="text-sm font-semibold text-white">${escapeHtml(player.name)}</div><div class="font-mono text-xs text-zinc-500">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td class="p-4 font-mono text-xs text-white">${escapeHtml(renderPlayerFlags(player))}</td><td class="p-4 font-mono text-xs text-zinc-400">${escapeHtml(formatLastSeen(player.lastSeenAt))}</td><td class="p-4"><div class="ml-auto flex max-w-[540px] flex-wrap justify-end gap-2"><input name="reason" type="text" placeholder="Reason" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" /><select name="mode" class="border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none focus:border-white"><option value="survival">Survival</option><option value="creative">Creative</option><option value="adventure">Adventure</option><option value="spectator">Spectator</option></select><input name="destination" type="text" placeholder="Teleport target" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" />${renderPlayerButtons(player)}</div></td></tr>`).join("") : `<tr><td colspan="5" class="p-6 text-sm text-zinc-500">No players are registered yet.</td></tr>`}</tbody></table></div></div></div>`;
+  return `<div class="flex flex-col gap-8"><div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><h1 class="mb-2 text-4xl font-black tracking-tight text-white">Player Database</h1><p class="max-w-3xl text-sm text-zinc-400">Manage known players, online players, and offline permission lists from one place.</p></div><div class="flex flex-wrap gap-2"><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${onlinePlayers} Active`)}</span></div><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full border border-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${server.players.length} Total`)}</span></div></div></div><form data-form="player-register" class="grid gap-4 border border-outline bg-surface p-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px]"><label class="flex flex-col gap-2"><span class="${C.label}">Player Name</span><input name="name" type="text" required class="${C.input}" placeholder="Steve" /></label><label class="flex flex-col gap-2"><span class="${C.label}">UUID (Optional)</span><input name="uuid" type="text" class="${C.input} font-mono" placeholder="00000000-0000-0000-0000-000000000000" /></label><button type="submit" class="self-end ${C.btnPrimary} py-3" data-busy-label="Adding...">Add Player</button></form><div class="overflow-hidden border border-outline bg-surface"><div class="overflow-x-auto"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-outline bg-surfaceAlt"><th class="p-4 ${C.label}">Status</th><th class="p-4 ${C.label}">Player</th><th class="p-4 ${C.label}">Flags</th><th class="p-4 ${C.label}">Last Seen</th><th class="p-4 text-right ${C.label}">Administrative Actions</th></tr></thead><tbody class="divide-y divide-zinc-900">${server.players.length ? server.players.map((player) => { const draft = ensurePlayerDraft(player); const key = playerDraftKey(player.name); return `<tr class="transition hover:bg-surfaceAlt" data-player-card data-player-key="${escapeHtml(key)}"><td class="p-4"><span class="block h-2 w-2 rounded-full ${player.online ? "bg-white shadow-[0_0_8px_rgba(255,255,255,0.4)]" : "border border-white"}"></span></td><td class="p-4"><div class="flex items-center gap-3"><img src="${escapeHtml(playerAvatarUrl(player))}" alt="${escapeHtml(player.name)}" class="h-10 w-10 border border-outline bg-black object-cover" loading="lazy" /><div><div class="text-sm font-semibold text-white">${escapeHtml(player.name)}</div><div class="font-mono text-xs text-zinc-500">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td class="p-4 font-mono text-xs text-white">${escapeHtml(renderPlayerFlags(player))}</td><td class="p-4 font-mono text-xs text-zinc-400">${escapeHtml(formatLastSeen(player.lastSeenAt))}</td><td class="p-4"><div class="ml-auto flex max-w-[540px] flex-wrap justify-end gap-2"><input name="reason" type="text" value="${escapeHtml(draft.reason)}" placeholder="Reason" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" /><select name="mode" class="border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none focus:border-white">${renderPlayerModeOptions(String(draft.mode ?? player.gamemode ?? "survival").toLowerCase())}</select><input name="destination" type="text" value="${escapeHtml(draft.destination)}" placeholder="Teleport target" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" />${renderPlayerButtons(player)}</div></td></tr>`; }).join("") : `<tr><td colspan="5" class="p-6 text-sm text-zinc-500">No players are registered yet.</td></tr>`}</tbody></table></div></div></div>`;
 }
 
 function renderWorldsSection(server) {
@@ -1423,16 +1572,19 @@ function renderPanelScreen() {
 }
 
 function render() {
+  const focusSnapshot = captureEditableFocus();
   let page;
   if (ui.bootstrap.active) {
     stopPlayitGatePolling();
     app.innerHTML = renderBootstrapScreen();
+    restoreEditableFocus(focusSnapshot);
     return;
   }
   if (!runtime.data) {
     stopPlayitGatePolling();
     page = `<div class="min-h-screen bg-black text-white"><div class="mx-auto max-w-5xl p-8"><section class="${C.card}"><h2 class="text-2xl font-semibold text-white">Loading panel...</h2></section></div></div>`;
     app.innerHTML = `${page}${renderModal()}`;
+    restoreEditableFocus(focusSnapshot);
     return;
   }
   syncInstallDraft();
@@ -1440,6 +1592,7 @@ function render() {
     maybeKickoffPlayitGateConnection();
     startPlayitGatePolling();
     app.innerHTML = `${renderPlayitGateScreen()}${renderModal()}`;
+    restoreEditableFocus(focusSnapshot);
     return;
   }
   stopPlayitGatePolling();
@@ -1449,6 +1602,7 @@ function render() {
   else page = renderPanelScreen(server);
   app.innerHTML = `${page}${renderModal()}${renderOperationOverlay()}`;
   updateConsoleElement();
+  restoreEditableFocus(focusSnapshot);
   if (ui.modal?.type === "create-server" && ui.modal.justOpened) {
     const input = document.querySelector('[data-modal-input="server-name"]');
     input?.focus();
@@ -1511,6 +1665,7 @@ async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activ
   const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
   const payload = await api(`/api/state${query}`);
   runtime.data = payload.state;
+  syncPlayerDrafts();
   syncInstallDraft();
   if (ui.installDraft?.software) await ensureVersions(ui.installDraft.software);
   const handledAppUpdate = await maybeAutoApplyAppUpdate();
@@ -2012,6 +2167,7 @@ async function handleSubmit(event) {
         break;
       case "console-command":
         await api(activeServerPath("/server/command"), { method: "POST", body: { command: form.elements.command.value } });
+        setConsoleDraft("");
         form.reset();
         await refreshLogs();
         break;
@@ -2121,6 +2277,20 @@ function handleInput(event) {
     ui.modal.name = event.target.value;
     ui.modal.selectionStart = event.target.selectionStart ?? ui.modal.name.length;
     ui.modal.selectionEnd = event.target.selectionEnd ?? ui.modal.name.length;
+  }
+  const commandForm = event.target?.closest?.('form[data-form="console-command"]');
+  if (commandForm && event.target?.name === "command") {
+    setConsoleDraft(event.target.value);
+  }
+  const playerCard = event.target?.closest?.("[data-player-card]");
+  if (playerCard && ["reason", "mode", "destination"].includes(event.target?.name ?? "")) {
+    const key = playerCard.dataset.playerKey;
+    if (key) {
+      if (!ui.playerDrafts[key]) {
+        ui.playerDrafts[key] = { reason: "", destination: "", mode: "survival" };
+      }
+      ui.playerDrafts[key][event.target.name] = event.target.value;
+    }
   }
   updateInstallDraftField(event.target);
 }

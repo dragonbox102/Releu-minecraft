@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -30,6 +31,7 @@ import {
   downloadServerJar,
   fetchSoftwareVersions,
   getRequiredJavaMajor,
+  resolveSoftwareVersion,
   serverSoftwareOptions,
 } from "./server-software.js";
 import {
@@ -76,6 +78,13 @@ function stripMinecraftLogPrefix(value) {
 
 function normalizePlayerName(name) {
   return stripMinecraftLogPrefix(name);
+}
+
+function normalizeGamemode(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return ["survival", "creative", "adventure", "spectator"].includes(normalized)
+    ? normalized
+    : null;
 }
 
 function playerKey(name) {
@@ -220,6 +229,15 @@ function pathEqualsOrInside(targetPath, basePath) {
 
 function trimArchiveExtension(fileName) {
   return path.basename(String(fileName ?? "").trim()).replace(/\.(zip|mcworld)$/i, "");
+}
+
+function hasPath(targetPath) {
+  try {
+    fsSync.accessSync(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export class MinecraftPanelService {
@@ -749,12 +767,13 @@ if (-not $sample) { exit 0 }
 
   getCatalogProfiles(serverId) {
     const context = this.getServerContext(serverId);
+    const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
     return {
       pluginProfiles: pluginCatalogProfiles,
       modProfiles: modCatalogProfiles,
       defaults: {
-        plugin: getDefaultCatalogProfileId("plugin", context.config.install.software),
-        mod: getDefaultCatalogProfileId("mod", context.config.install.software),
+        plugin: getDefaultCatalogProfileId("plugin", effectiveSoftware),
+        mod: getDefaultCatalogProfileId("mod", effectiveSoftware),
       },
     };
   }
@@ -774,11 +793,42 @@ if (-not $sample) { exit 0 }
     });
   }
 
+  async resolveInstallerArgFile(context, softwareId) {
+    const argFileName = isLinux ? "unix_args.txt" : "win_args.txt";
+    const version = String(context.config.install.installedVersion ?? "").trim();
+    const candidateBases =
+      softwareId === "forge"
+        ? [path.join(context.paths.serverDir, "libraries", "net", "minecraftforge", "forge")]
+        : [path.join(context.paths.serverDir, "libraries", "net", "neoforged", "neoforge")];
+
+    for (const baseDir of candidateBases) {
+      if (version) {
+        const directPath = path.join(baseDir, version, argFileName);
+        if (await fileExists(directPath)) {
+          return directPath;
+        }
+      }
+
+      try {
+        const entries = await fs.readdir(baseDir, { withFileTypes: true });
+        const matches = entries
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => path.join(baseDir, entry.name, argFileName));
+        for (const candidate of matches) {
+          if (await fileExists(candidate)) {
+            return candidate;
+          }
+        }
+      } catch {
+        // Ignore missing installer directories and fall back to jar discovery.
+      }
+    }
+
+    return null;
+  }
+
   async hasInstalledJar(context) {
-    return (
-      (await fileExists(context.paths.serverJar)) ||
-      (await fileExists(context.paths.legacyServerJar))
-    );
+    return Boolean(await this.resolveLaunchTarget(context));
   }
 
   async resolveInstalledJar(context) {
@@ -788,6 +838,69 @@ if (-not $sample) { exit 0 }
 
     if (await fileExists(context.paths.legacyServerJar)) {
       return context.paths.legacyServerJar;
+    }
+
+    const softwareId = this.getEffectiveServerSoftwareId(context);
+    const jarPattern =
+      softwareId === "neoforge" ? /^neoforge-.*(?:server|universal)?\.jar$/i : /^forge-.*(?:server|universal)?\.jar$/i;
+
+    try {
+      const rootEntries = await fs.readdir(context.paths.serverDir, { withFileTypes: true });
+      const rootJar = rootEntries
+        .filter((entry) => entry.isFile() && jarPattern.test(entry.name) && !entry.name.includes("-installer"))
+        .map((entry) => path.join(context.paths.serverDir, entry.name))
+        .at(0);
+      if (rootJar) {
+        return rootJar;
+      }
+    } catch {
+      // Ignore root jar lookup errors.
+    }
+
+    const libraryBase =
+      softwareId === "neoforge"
+        ? path.join(context.paths.serverDir, "libraries", "net", "neoforged", "neoforge")
+        : path.join(context.paths.serverDir, "libraries", "net", "minecraftforge", "forge");
+    try {
+      const versionDirs = await fs.readdir(libraryBase, { withFileTypes: true });
+      for (const entry of versionDirs.filter((value) => value.isDirectory())) {
+        const candidateDir = path.join(libraryBase, entry.name);
+        const files = await fs.readdir(candidateDir, { withFileTypes: true });
+        const match = files
+          .filter((file) => file.isFile() && jarPattern.test(file.name) && !file.name.includes("-installer"))
+          .map((file) => path.join(candidateDir, file.name))
+          .at(0);
+        if (match) {
+          return match;
+        }
+      }
+    } catch {
+      // Ignore library jar lookup errors.
+    }
+
+    return null;
+  }
+
+  async resolveLaunchTarget(context) {
+    const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
+    if (effectiveSoftware === "forge" || effectiveSoftware === "neoforge") {
+      const argFile = await this.resolveInstallerArgFile(context, effectiveSoftware);
+      if (argFile) {
+        return {
+          mode: "argfile",
+          argFile,
+          softwareId: effectiveSoftware,
+        };
+      }
+    }
+
+    const jarPath = await this.resolveInstalledJar(context);
+    if (jarPath) {
+      return {
+        mode: "jar",
+        jarPath,
+        softwareId: effectiveSoftware,
+      };
     }
 
     return null;
@@ -813,7 +926,7 @@ if (-not $sample) { exit 0 }
   async listBackups(serverId, limit = 6) {
     const context = this.getServerContext(serverId);
     try {
-      const entries = await fs.readdir(context.paths.backupsDir, { withFileTypes: true });
+    const entries = await fs.readdir(context.paths.backupsDir, { withFileTypes: true });
       const directories = entries
         .filter((entry) => entry.isDirectory())
         .sort((left, right) => right.name.localeCompare(left.name))
@@ -837,6 +950,7 @@ if (-not $sample) { exit 0 }
 
   async serializeServerSummary(context) {
     const metrics = await this.refreshServerMetrics(context);
+    const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
     return {
       id: context.record.id,
       name: context.record.name,
@@ -851,7 +965,10 @@ if (-not $sample) { exit 0 }
       jarInstalled: await this.hasInstalledJar(context),
       lastStartedAt: context.state.lastStartedAt,
       lastStoppedAt: context.state.lastStoppedAt,
-      install: context.config.install,
+      install: {
+        ...context.config.install,
+        installedSoftware: effectiveSoftware,
+      },
       backups: {
         ...context.config.backups,
         nextBackupAt: this.getNextBackupAt(context),
@@ -863,6 +980,7 @@ if (-not $sample) { exit 0 }
     context.cachedProperties = await readServerProperties(context.paths);
     const jarInstalled = await this.hasInstalledJar(context);
     const metrics = await this.refreshServerMetrics(context);
+    const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
     return {
       id: context.record.id,
       name: context.record.name,
@@ -870,7 +988,10 @@ if (-not $sample) { exit 0 }
       dataDir: context.paths.dataDir,
       setupComplete: jarInstalled,
       launcher: context.config.launcher,
-      install: context.config.install,
+      install: {
+        ...context.config.install,
+        installedSoftware: effectiveSoftware,
+      },
       backups: {
         ...context.config.backups,
         nextBackupAt: this.getNextBackupAt(context),
@@ -905,6 +1026,7 @@ if (-not $sample) { exit 0 }
   async getState(serverId = this.activeServerId) {
     const context = this.getServerContext(serverId);
     this.reconcileRuntimeState(context);
+    await this.syncDetectedInstalledSoftware(context);
     await this.ensurePlayitInitialized();
     const playitSnapshot = this.playit.snapshot();
     const shouldForceTunnelRefresh =
@@ -1312,19 +1434,29 @@ if (-not $sample) { exit 0 }
     const context = this.getServerContext(serverId);
     const selectedSoftware = software ?? context.config.install.software ?? "purpur";
     const selectedVersion = requestedVersion ?? "latest";
+    const resolvedVersion = await resolveSoftwareVersion(selectedSoftware, selectedVersion);
+    const requiredJavaMajor = getRequiredJavaMajor(resolvedVersion);
+
+    if (this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
+      await this.dependencies.ensureJavaMajor(requiredJavaMajor).catch(() => null);
+    }
+
+    const installerJavaPath =
+      this.getPreferredManagedJavaPath(resolvedVersion) ?? context.config.launcher.javaPath;
     this.setServerOperation(context, {
       type: "install",
       title: "Installing Server Software",
       shortLabel: "Installing",
-      detail: `Downloading ${selectedSoftware} ${selectedVersion}.`,
+      detail: `Downloading ${selectedSoftware} ${resolvedVersion}.`,
     });
 
     try {
-      this.appendLog(serverId, "panel", `Downloading ${selectedSoftware} (${selectedVersion})...`);
+      this.appendLog(serverId, "panel", `Downloading ${selectedSoftware} (${resolvedVersion})...`);
       const installMeta = await downloadServerJar({
         software: selectedSoftware,
-        requestedVersion: selectedVersion,
+        requestedVersion: resolvedVersion,
         destinationPath: context.paths.serverJar,
+        javaPath: installerJavaPath,
       });
 
       this.setServerOperation(context, {
@@ -1337,7 +1469,7 @@ if (-not $sample) { exit 0 }
       context.state.installMeta = installMeta;
       context.config.install = {
         software: selectedSoftware,
-        requestedVersion: selectedVersion,
+        requestedVersion: resolvedVersion,
         installedSoftware: installMeta.software,
         installedVersion: installMeta.version,
         installedBuild: installMeta.build,
@@ -1447,21 +1579,18 @@ if (-not $sample) { exit 0 }
       return this.getState(serverId);
     }
 
-    const jarPath = await this.resolveInstalledJar(context);
-    if (!jarPath) {
-      throw new Error("No server jar is installed yet.");
+    await this.syncDetectedInstalledSoftware(context);
+
+    const launchTarget = await this.resolveLaunchTarget(context);
+    if (!launchTarget) {
+      throw new Error("No server runtime is installed yet.");
     }
 
     if (!(await this.readEula(serverId))) {
       throw new Error("You must accept the Minecraft EULA before starting the server.");
     }
 
-    const javaRuntime = await this.inspectJavaRuntime(context.config.launcher.javaPath);
-    if (!javaRuntime.major) {
-      throw new Error(
-        `Could not determine the Java version for "${context.config.launcher.javaPath}".`,
-      );
-    }
+    await this.validateServerStartup(context);
 
     const installedVersion =
       context.config.install.installedVersion ?? context.state.installMeta?.version ?? null;
@@ -1470,6 +1599,25 @@ if (-not $sample) { exit 0 }
       formatSoftwareName(context.config.install.installedSoftware) ??
       "This server";
     const requiredJavaMajor = getRequiredJavaMajor(installedVersion);
+
+    if (this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
+      await this.dependencies.ensureJavaMajor(requiredJavaMajor).catch(() => null);
+      const preferredJavaPath = this.getPreferredManagedJavaPath(installedVersion);
+      if (preferredJavaPath && context.config.launcher.javaPath !== preferredJavaPath) {
+        context.config.launcher = {
+          ...context.config.launcher,
+          javaPath: preferredJavaPath,
+        };
+        await this.saveContextConfig(context);
+      }
+    }
+
+    const javaRuntime = await this.inspectJavaRuntime(context.config.launcher.javaPath);
+    if (!javaRuntime.major) {
+      throw new Error(
+        `Could not determine the Java version for "${context.config.launcher.javaPath}".`,
+      );
+    }
 
     if (javaRuntime.major < requiredJavaMajor) {
       throw new Error(
@@ -1488,7 +1636,14 @@ if (-not $sample) { exit 0 }
       args.push(`-XX:ActiveProcessorCount=${Number(context.config.launcher.cpuCores)}`);
     }
 
-    args.push("-jar", path.basename(jarPath), "--nogui");
+    if (launchTarget.mode === "argfile") {
+      const relativeArgsPath = path
+        .relative(context.paths.serverDir, launchTarget.argFile)
+        .replaceAll("\\", "/");
+      args.push(`@${relativeArgsPath}`, "nogui");
+    } else {
+      args.push("-jar", path.basename(launchTarget.jarPath), "--nogui");
+    }
 
     const child = spawn(context.config.launcher.javaPath, args, {
       cwd: context.paths.serverDir,
@@ -1652,6 +1807,18 @@ if (-not $sample) { exit 0 }
       this.rememberPlayer(serverId, player, { lastSeenAt: currentTimestamp() }).catch(
         () => {},
       );
+    }
+
+    const gamemodeMatch = payload.match(/^Set (.+?)'s game mode to (.+?) Mode$/i);
+    if (gamemodeMatch) {
+      const player = normalizePlayerName(gamemodeMatch[1]);
+      const gamemode = normalizeGamemode(gamemodeMatch[2]);
+      if (gamemode) {
+        this.rememberPlayer(serverId, player, {
+          gamemode,
+          lastSeenAt: currentTimestamp(),
+        }).catch(() => {});
+      }
     }
   }
 
@@ -2119,19 +2286,88 @@ if (-not $sample) { exit 0 }
   }
 
   getServerSoftwareOption(context) {
+    const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
     return (
       serverSoftwareOptions.find(
         (entry) =>
-          entry.id ===
-          (context.config.install.installedSoftware ?? context.config.install.software),
+          entry.id === effectiveSoftware,
       ) ?? null
     );
   }
 
+  getDetectedServerSoftwareId(context) {
+    const serverDir = context.paths.serverDir;
+    if (
+      hasPath(path.join(serverDir, "libraries", "net", "neoforged", "neoforge")) ||
+      hasPath(path.join(serverDir, "neoforge.mods.toml"))
+    ) {
+      return "neoforge";
+    }
+
+    if (
+      hasPath(path.join(serverDir, "libraries", "net", "minecraftforge", "forge")) ||
+      hasPath(path.join(serverDir, "forge-server-launcher.jar"))
+    ) {
+      return "forge";
+    }
+
+    if (
+      hasPath(path.join(serverDir, ".fabric", "server")) ||
+      hasPath(path.join(serverDir, "libraries", "net", "fabricmc", "fabric-loader"))
+    ) {
+      return "fabric";
+    }
+
+    if (hasPath(path.join(serverDir, "purpur.yml"))) {
+      return "purpur";
+    }
+
+    if (
+      hasPath(path.join(serverDir, "paper.yml")) ||
+      hasPath(path.join(serverDir, "paper-global.yml")) ||
+      hasPath(path.join(serverDir, "config", "paper-global.yml"))
+    ) {
+      return "paper";
+    }
+
+    return null;
+  }
+
+  getEffectiveServerSoftwareId(context) {
+    return (
+      this.getDetectedServerSoftwareId(context) ??
+      context.config.install.installedSoftware ??
+      context.config.install.software ??
+      "vanilla"
+    );
+  }
+
+  async syncDetectedInstalledSoftware(context) {
+    const detectedSoftware = this.getDetectedServerSoftwareId(context);
+    if (!detectedSoftware) {
+      return null;
+    }
+
+    if (context.config.install.installedSoftware === detectedSoftware) {
+      return detectedSoftware;
+    }
+
+    context.config.install = {
+      ...context.config.install,
+      installedSoftware: detectedSoftware,
+    };
+    await this.saveContextConfig(context);
+    this.appendLog(
+      context.record.id,
+      "panel",
+      `Releu detected ${formatSoftwareName(detectedSoftware) ?? detectedSoftware} server files and updated this server profile automatically.`,
+    );
+    return detectedSoftware;
+  }
+
   assertAssetCompatibility(context, kind, options = {}) {
     const label = kindLabel(kind);
-    const softwareId =
-      context.config.install.installedSoftware ?? context.config.install.software ?? "vanilla";
+    const softwareId = this.getEffectiveServerSoftwareId(context);
     const softwareOption = this.getServerSoftwareOption(context);
     const softwareName = softwareOption?.name ?? formatSoftwareName(softwareId) ?? softwareId;
 
@@ -2143,7 +2379,7 @@ if (-not $sample) { exit 0 }
 
     if (label === "mod" && !softwareOption?.supportsMods) {
       throw new Error(
-        `${softwareName} does not load mods. Switch this server to Fabric before installing mod add-ons.`,
+        `${softwareName} does not load mods. Switch this server to Fabric, Forge, or NeoForge before installing mod add-ons.`,
       );
     }
 
@@ -2233,6 +2469,87 @@ if (-not $sample) { exit 0 }
     }
   }
 
+  async listAssetFileNames(context, kind) {
+    try {
+      const entries = await fs.readdir(this.getAssetDirectory(context, kind), {
+        withFileTypes: true,
+      });
+      return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+    } catch {
+      return [];
+    }
+  }
+
+  async ensureKnownModDependencies(serverId, context) {
+    const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
+    if (effectiveSoftware !== "fabric") {
+      return;
+    }
+
+    const modFiles = await this.listAssetFileNames(context, "mod");
+    const normalizedFiles = modFiles.map((entry) => entry.toLowerCase());
+    if (!normalizedFiles.some((entry) => entry.includes("geyser-fabric"))) {
+      return;
+    }
+    if (normalizedFiles.some((entry) => entry.includes("fabric-api"))) {
+      return;
+    }
+
+    const selection = await resolveCatalogInstall({
+      projectId: "fabric-api",
+      kind: "mod",
+      profileId: "fabric",
+      serverSoftware: "fabric",
+      gameVersion: this.getServerGameVersion(serverId),
+    });
+
+    await this.installAssetFromUrl(serverId, "mod", selection.fileUrl, {
+      displayName: selection.projectTitle ?? selection.fileName,
+      source: "catalog",
+      iconUrl: selection.iconUrl,
+      projectId: selection.projectId,
+      projectSlug: selection.projectSlug,
+      versionId: selection.versionId,
+      versionNumber: selection.versionNumber,
+      versionName: selection.versionName,
+      profileId: selection.profile?.id ?? "fabric",
+      gameVersions: selection.gameVersions,
+      loaders: selection.loaders,
+      dependencyOf: "geyser-fabric",
+    });
+
+    this.appendLog(
+      serverId,
+      "panel",
+      "Installed required Fabric API dependency automatically for Geyser-Fabric.",
+    );
+  }
+
+  async validateServerStartup(context) {
+    const serverId = context.record.id;
+    const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
+    const softwareOption =
+      serverSoftwareOptions.find((entry) => entry.id === effectiveSoftware) ?? null;
+    const softwareName =
+      softwareOption?.name ?? formatSoftwareName(effectiveSoftware) ?? effectiveSoftware;
+    const modFiles = await this.listAssetFileNames(context, "mod");
+    const pluginFiles = await this.listAssetFileNames(context, "plugin");
+
+    if (modFiles.length && !softwareOption?.supportsMods) {
+      throw new Error(
+        `${softwareName} does not load mods, but this server folder still has ${modFiles.length} mod file(s). Switch the server to Fabric, Forge, or NeoForge, or remove those mods before starting.`,
+      );
+    }
+
+    if (pluginFiles.length && !softwareOption?.supportsPlugins) {
+      throw new Error(
+        `${softwareName} does not load plugins, but this server folder still has ${pluginFiles.length} plugin file(s). Switch the server to Paper or Purpur before starting.`,
+      );
+    }
+
+    await this.ensureKnownModDependencies(serverId, context);
+  }
+
   async rememberPlayer(serverId, name, updates = {}) {
     const normalized = normalizePlayerName(name);
     if (!normalized) {
@@ -2245,6 +2562,7 @@ if (-not $sample) { exit 0 }
       name: normalized,
       uuid: updates.uuid ?? index[key]?.uuid ?? null,
       lastSeenAt: updates.lastSeenAt ?? index[key]?.lastSeenAt ?? null,
+      gamemode: updates.gamemode ?? index[key]?.gamemode ?? null,
     };
     await this.savePlayerIndex(serverId, index);
     return index[key];
@@ -2288,6 +2606,7 @@ if (-not $sample) { exit 0 }
           name: normalized,
           uuid: null,
           lastSeenAt: null,
+          gamemode: null,
           online: false,
           whitelisted: false,
           op: false,
@@ -2400,6 +2719,11 @@ if (-not $sample) { exit 0 }
       throw new Error(`Player action "${action}" requires the server to be running.`);
     }
 
+    const identity = requiresRunningServer.has(action)
+      ? await this.resolvePlayerIdentity(serverId, normalized)
+      : { name: normalized, uuid: null };
+    const liveCommandTarget = identity.uuid ?? identity.name ?? normalized;
+
     switch (action) {
       case "op":
         if (context.serverProcess) {
@@ -2472,25 +2796,29 @@ if (-not $sample) { exit 0 }
       case "kick":
         await this.sendCommand(
           serverId,
-          `kick ${normalized} ${String(payload.reason ?? "Removed by panel")}`,
+          `kick ${liveCommandTarget} ${String(payload.reason ?? "Removed by panel")}`,
         );
         break;
       case "gamemode":
-        await this.sendCommand(
-          serverId,
-          `gamemode ${String(payload.mode ?? "survival")} ${normalized}`,
-        );
+        {
+          const mode = normalizeGamemode(payload.mode) ?? "survival";
+          await this.sendCommand(serverId, `gamemode ${mode} ${liveCommandTarget}`);
+          await this.rememberPlayer(serverId, normalized, {
+            gamemode: mode,
+            lastSeenAt: currentTimestamp(),
+          });
+        }
         break;
       case "heal":
         await this.sendCommand(
           serverId,
-          `effect give ${normalized} minecraft:instant_health 1 1 true`,
+          `effect give ${liveCommandTarget} minecraft:instant_health 1 1 true`,
         );
         break;
       case "feed":
         await this.sendCommand(
           serverId,
-          `effect give ${normalized} minecraft:saturation 1 1 true`,
+          `effect give ${liveCommandTarget} minecraft:saturation 1 1 true`,
         );
         break;
       case "teleport":
@@ -2499,7 +2827,7 @@ if (-not $sample) { exit 0 }
         }
         await this.sendCommand(
           serverId,
-          `tp ${normalized} ${String(payload.destination).trim()}`,
+          `tp ${liveCommandTarget} ${String(payload.destination).trim()}`,
         );
         break;
       default:
@@ -2523,7 +2851,7 @@ if (-not $sample) { exit 0 }
       kind,
       query: payload.query,
       profileId: String(payload.profileId ?? "").trim() || null,
-      serverSoftware: context.config.install.software,
+      serverSoftware: this.getEffectiveServerSoftwareId(context),
       gameVersion,
       limit: Math.max(1, Math.min(24, Number(payload.limit ?? 12) || 12)),
       index: String(payload.index ?? "relevance"),
@@ -2571,7 +2899,7 @@ if (-not $sample) { exit 0 }
         projectId: targetProjectId,
         kind,
         profileId: String(payload.profileId ?? "").trim() || null,
-        serverSoftware: context.config.install.software,
+        serverSoftware: this.getEffectiveServerSoftwareId(context),
         gameVersion,
       });
 

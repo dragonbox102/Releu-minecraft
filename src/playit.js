@@ -306,9 +306,11 @@ export class PlayitManager {
     if (cleaned.includes("tunnel running")) {
       this.state.checkingTunnelStatus = false;
       this.state.statusMessage =
-        this.state.configuredTunnelCount > 0
-          ? `Playit is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
-          : "Playit is online.";
+        this.state.configuredTunnelCount > 0 && !this.state.tunnels.length
+          ? this.describeUnreadyTunnel()
+          : this.state.configuredTunnelCount > 0
+            ? `Playit is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
+            : "Playit is online.";
       this.announceTunnelState();
     }
   }

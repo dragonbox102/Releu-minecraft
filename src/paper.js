@@ -8,6 +8,7 @@ const versionSorter = new Intl.Collator(undefined, {
   numeric: true,
   sensitivity: "base",
 });
+const stableBuildAvailabilityCache = new Map();
 
 async function fetchJson(url) {
   const response = await fetch(url, {
@@ -31,7 +32,28 @@ export async function fetchPaperVersions() {
     .filter((version) => !String(version).includes("-"))
     .sort((left, right) => versionSorter.compare(right, left));
 
-  return versions;
+  const stableChecks = await Promise.all(
+    versions.map(async (version) => {
+      if (stableBuildAvailabilityCache.has(version)) {
+        return [version, stableBuildAvailabilityCache.get(version)];
+      }
+
+      try {
+        await fetchLatestStableBuild(version);
+        stableBuildAvailabilityCache.set(version, true);
+        return [version, true];
+      } catch {
+        stableBuildAvailabilityCache.set(version, false);
+        return [version, false];
+      }
+    }),
+  );
+
+  const stableVersions = stableChecks
+    .filter(([, available]) => available)
+    .map(([version]) => version);
+
+  return stableVersions.length ? stableVersions : versions.filter((version) => version.startsWith("1."));
 }
 
 export async function resolvePaperVersion(requestedVersion = "latest") {
@@ -49,7 +71,9 @@ export async function fetchLatestStableBuild(version) {
     `https://fill.papermc.io/v3/projects/paper/versions/${encodeURIComponent(version)}/builds`,
   );
 
-  const builds = Array.isArray(payload) ? payload : payload.value ?? [];
+  const builds = (Array.isArray(payload) ? payload : payload.value ?? []).sort(
+    (left, right) => Number(right.id ?? 0) - Number(left.id ?? 0),
+  );
   const stableBuild = builds.find(
     (build) => build.channel === "STABLE" && build.downloads?.["server:default"]?.url,
   );
