@@ -1487,4 +1487,3 @@ boot().catch((error) => {
   console.error(error);
   showError(error);
 });
-
