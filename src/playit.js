@@ -86,6 +86,11 @@ export class PlayitManager {
     this.getServerPort = getServerPort;
     this.agentProcess = null;
     this.exchangeProcess = null;
+    this.probeProcess = null;
+    this.refreshPromise = null;
+    this.probePromise = null;
+    this.lastAnnouncedPublicAddress = null;
+    this.lastAnnouncedTunnelState = null;
     this.state = {
       installed: false,
       version: null,
@@ -98,6 +103,7 @@ export class PlayitManager {
       tunnels: [],
       configuredTunnelCount: 0,
       detectedTunnelCount: 0,
+      checkingTunnelStatus: false,
       needsWebSetup: false,
       statusMessage: null,
       dashboardTunnelUrl: "https://playit.gg/account/tunnels",
@@ -136,10 +142,12 @@ export class PlayitManager {
         : "needs-claim"
       : "not-installed";
     if (this.state.secretConfigured) {
-      await this.refreshTunnels({ force: true });
-      if (this.state.needsWebSetup) {
-        this.state.status = "needs-tunnel-setup";
-      }
+      this.state.checkingTunnelStatus = true;
+      this.state.statusMessage = "Checking linked playit agent and tunnel status.";
+      this.refreshTunnels({ force: true }).catch((error) => {
+        this.state.lastError = error.message;
+        this.state.checkingTunnelStatus = false;
+      });
     }
   }
 
@@ -154,6 +162,34 @@ export class PlayitManager {
     return `No playit tunnel is assigned to this agent yet. Create or assign a Minecraft Java tunnel for 127.0.0.1:${this.getServerPort()} in the playit dashboard.`;
   }
 
+  describeUnreadyTunnel() {
+    return `Playit found a tunnel for this agent, but it has not finished setup yet, so no public join address is available. Open the playit dashboard and finish assigning or configuring the tunnel for 127.0.0.1:${this.getServerPort()}.`;
+  }
+
+  announceTunnelState() {
+    const publicAddress = this.state.tunnels.find((entry) => entry.publicAddress)?.publicAddress ?? null;
+    if (publicAddress && publicAddress !== this.lastAnnouncedPublicAddress) {
+      this.lastAnnouncedPublicAddress = publicAddress;
+      this.appendLog("playit", `Minecraft public address ready: ${publicAddress}`);
+    }
+
+    const stateKey = [
+      publicAddress ?? "",
+      this.state.configuredTunnelCount,
+      this.state.needsWebSetup ? "setup" : "ready",
+      this.state.statusMessage ?? "",
+    ].join("|");
+
+    if (stateKey === this.lastAnnouncedTunnelState) {
+      return;
+    }
+    this.lastAnnouncedTunnelState = stateKey;
+
+    if (!publicAddress && this.state.configuredTunnelCount > 0 && this.state.needsWebSetup) {
+      this.appendLog("playit", this.describeUnreadyTunnel(), "warn");
+    }
+  }
+
   observeLine(rawLine) {
     const cleaned = sanitizeLogLine(rawLine);
     if (!cleaned) {
@@ -162,6 +198,7 @@ export class PlayitManager {
 
     const tunnel = parseTunnelLine(cleaned);
     if (tunnel) {
+      this.state.checkingTunnelStatus = false;
       const existingIndex = this.state.tunnels.findIndex((entry) => entry.id === tunnel.id);
       if (existingIndex >= 0) {
         this.state.tunnels.splice(existingIndex, 1, tunnel);
@@ -177,11 +214,16 @@ export class PlayitManager {
         this.state.tunnels.length,
       );
       this.state.needsWebSetup = false;
-      this.state.statusMessage = `Detected ${this.state.tunnels.length} playit tunnel(s).`;
+      this.state.statusMessage =
+        tunnel.publicAddress
+          ? `Detected ${this.state.tunnels.length} playit tunnel(s). Public address: ${tunnel.publicAddress}`
+          : `Detected ${this.state.tunnels.length} playit tunnel(s).`;
+      this.announceTunnelState();
     }
 
     const tunnelCount = extractTunnelCount(cleaned);
     if (tunnelCount !== null) {
+      this.state.checkingTunnelStatus = false;
       this.state.configuredTunnelCount = Math.max(
         this.state.configuredTunnelCount,
         tunnelCount,
@@ -193,13 +235,15 @@ export class PlayitManager {
       if (tunnelCount === 0) {
         this.state.needsWebSetup = true;
         this.state.statusMessage = this.describeMissingTunnel();
+        this.announceTunnelState();
       }
     }
 
     if (cleaned.includes("SessionNotSetup")) {
+      this.state.checkingTunnelStatus = false;
       this.state.needsWebSetup = true;
-      this.state.statusMessage =
-        "Playit connected, but this agent still needs web-side tunnel setup or assignment.";
+      this.state.statusMessage = this.describeUnreadyTunnel();
+      this.announceTunnelState();
     }
 
     if (cleaned.includes("secret key valid")) {
@@ -211,10 +255,12 @@ export class PlayitManager {
     }
 
     if (cleaned.includes("tunnel running")) {
+      this.state.checkingTunnelStatus = false;
       this.state.statusMessage =
         this.state.configuredTunnelCount > 0
           ? `Playit is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
           : "Playit is online.";
+      this.announceTunnelState();
     }
   }
 
@@ -456,6 +502,10 @@ export class PlayitManager {
       return this.snapshot();
     }
 
+    if (this.probeProcess && !this.probeProcess.killed) {
+      this.probeProcess.kill();
+    }
+
     const child = spawn(
       paths.playitBinary,
       ["--secret_path", paths.playitSecretFile, "--stdout", "start"],
@@ -467,6 +517,8 @@ export class PlayitManager {
     this.agentProcess = child;
     this.state.running = true;
     this.state.status = "running";
+    this.state.checkingTunnelStatus = true;
+    this.state.statusMessage = "Checking linked playit agent and tunnel status.";
     this.state.lastStartedAt = currentTimestamp();
     this.state.lastError = null;
 
@@ -541,6 +593,7 @@ export class PlayitManager {
       this.state.tunnels = [];
       this.state.configuredTunnelCount = 0;
       this.state.detectedTunnelCount = 0;
+      this.state.checkingTunnelStatus = false;
       this.state.needsWebSetup = false;
       this.state.statusMessage = null;
       return this.snapshot();
@@ -550,55 +603,76 @@ export class PlayitManager {
     if (!force && now - this.lastRefreshAtMs < 8000) {
       return this.snapshot();
     }
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
     this.lastRefreshAtMs = now;
     this.state.lastRefreshAt = currentTimestamp();
-
-    try {
-      const result = await this.runCommand(
-        ["tunnels", "list"],
-        { includeSecretPath: true, timeoutMs: 15000 },
-      );
-
-      const tunnels = result.stdout
-        .split(/\r?\n/)
-        .map(parseTunnelLine)
-        .filter(Boolean);
-
-      this.state.tunnels = tunnels;
-      if (tunnels.length) {
-        this.state.configuredTunnelCount = Math.max(
-          this.state.configuredTunnelCount,
-          tunnels.length,
+    this.state.checkingTunnelStatus = true;
+    this.refreshPromise = (async () => {
+      try {
+        const result = await this.runCommand(
+          ["tunnels", "list"],
+          { includeSecretPath: true, timeoutMs: 15000 },
         );
-        this.state.detectedTunnelCount = Math.max(
-          this.state.detectedTunnelCount,
-          tunnels.length,
+
+        const tunnels = result.stdout
+          .split(/\r?\n/)
+          .map(parseTunnelLine)
+          .filter(Boolean);
+
+        this.state.tunnels = tunnels;
+        if (tunnels.length) {
+          this.state.configuredTunnelCount = Math.max(
+            this.state.configuredTunnelCount,
+            tunnels.length,
+          );
+          this.state.detectedTunnelCount = Math.max(
+            this.state.detectedTunnelCount,
+            tunnels.length,
+          );
+          this.state.needsWebSetup = false;
+          const publicAddress =
+            tunnels.find((entry) => entry.publicAddress)?.publicAddress ?? null;
+          this.state.statusMessage = publicAddress
+            ? `Detected ${tunnels.length} playit tunnel(s). Public address: ${publicAddress}`
+            : `Detected ${tunnels.length} playit tunnel(s).`;
+          this.announceTunnelState();
+        } else {
+          this.state.needsWebSetup = true;
+          this.state.statusMessage = this.describeMissingTunnel();
+          this.announceTunnelState();
+          await this.probeTunnelStatus({ force });
+        }
+      } catch (error) {
+        if (String(error.message).includes("NotImplemented")) {
+          this.state.lastError = null;
+          await this.probeTunnelStatus({ force });
+        } else {
+          this.state.lastError = error.message;
+        }
+      } finally {
+        this.state.checkingTunnelStatus = Boolean(
+          this.state.running &&
+            !this.state.tunnels.length &&
+            Number(this.state.configuredTunnelCount ?? 0) === 0 &&
+            !this.state.needsWebSetup,
         );
-        this.state.needsWebSetup = false;
-        this.state.statusMessage = `Detected ${tunnels.length} playit tunnel(s).`;
-      } else {
-        this.state.needsWebSetup = true;
-        this.state.statusMessage = this.describeMissingTunnel();
-        await this.probeTunnelStatus({ force });
+        if (!this.state.running) {
+          this.state.status = this.state.secretConfigured
+            ? this.state.needsWebSetup
+              ? "needs-tunnel-setup"
+              : "ready"
+            : "needs-claim";
+        }
       }
-    } catch (error) {
-      if (String(error.message).includes("NotImplemented")) {
-        this.state.lastError = null;
-        await this.probeTunnelStatus({ force });
-      } else {
-        this.state.lastError = error.message;
-      }
-    }
 
-    if (!this.state.running) {
-      this.state.status = this.state.secretConfigured
-        ? this.state.needsWebSetup
-          ? "needs-tunnel-setup"
-          : "ready"
-        : "needs-claim";
-    }
+      return this.snapshot();
+    })().finally(() => {
+      this.refreshPromise = null;
+    });
 
-    return this.snapshot();
+    return this.refreshPromise;
   }
 
   async probeTunnelStatus({ force = false } = {}) {
@@ -610,11 +684,14 @@ export class PlayitManager {
     if (!force && now - this.lastProbeAtMs < 30000) {
       return this.snapshot();
     }
+    if (this.probePromise) {
+      return this.probePromise;
+    }
 
     this.lastProbeAtMs = now;
     this.state.lastProbeAt = currentTimestamp();
-
-    return new Promise((resolve) => {
+    this.state.checkingTunnelStatus = true;
+    this.probePromise = new Promise((resolve) => {
       const child = spawn(
         paths.playitBinary,
         ["--secret_path", paths.playitSecretFile, "--stdout", "start"],
@@ -622,12 +699,13 @@ export class PlayitManager {
           cwd: paths.playitDataDir,
         }),
       );
+      this.probeProcess = child;
 
       const timer = setTimeout(() => {
         if (!child.killed) {
           child.kill();
         }
-      }, 11000);
+      }, 22000);
 
       const consume = (chunk) => {
         for (const line of String(chunk).split(/\r?\n/)) {
@@ -646,18 +724,25 @@ export class PlayitManager {
       });
       child.on("exit", () => {
         clearTimeout(timer);
+        this.probeProcess = null;
         if (!this.state.tunnels.length) {
           if (this.state.configuredTunnelCount > 0) {
+            this.state.needsWebSetup = true;
             this.state.statusMessage =
               this.state.statusMessage ??
-              `Playit reports ${this.state.configuredTunnelCount} configured tunnel(s), but this CLI cannot list the public address yet. Releu will keep checking while the server is online.`;
+              this.describeUnreadyTunnel();
           } else {
             this.state.needsWebSetup = true;
             this.state.statusMessage = this.describeMissingTunnel();
           }
         }
+        this.state.checkingTunnelStatus = false;
+        this.announceTunnelState();
         resolve(this.snapshot());
       });
+    });
+    return this.probePromise.finally(() => {
+      this.probePromise = null;
     });
   }
 
@@ -682,8 +767,11 @@ export class PlayitManager {
     this.state.tunnels = [];
     this.state.configuredTunnelCount = 0;
     this.state.detectedTunnelCount = 0;
+    this.state.checkingTunnelStatus = false;
     this.state.needsWebSetup = false;
     this.state.statusMessage = null;
+    this.lastAnnouncedPublicAddress = null;
+    this.lastAnnouncedTunnelState = null;
     this.state.status = this.state.installed ? "needs-claim" : "not-installed";
     return this.snapshot();
   }

@@ -62,11 +62,11 @@ textarea::placeholder {
 }
 
 .releu-screen {
-  animation: releu-screen-in 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: none;
 }
 
 .releu-panel {
-  animation: releu-fade-up 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: none;
 }
 
 .releu-button {
