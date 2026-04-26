@@ -1,17 +1,24 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { spawn } from "node:child_process";
+
 import {
   fetchLatestStableBuild,
   fetchPaperVersions,
   resolvePaperVersion,
 } from "./paper.js";
+import { withHiddenConsole } from "./platform.js";
 
-const PURPUR_USER_AGENT =
+const SOFTWARE_USER_AGENT =
   "localhost-minecraft-panel/1.0 (https://localhost.example/minecraft-panel)";
 const versionSorter = new Intl.Collator(undefined, {
   numeric: true,
   sensitivity: "base",
 });
+const FORGE_METADATA_URL =
+  "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
+const NEOFORGE_METADATA_URL =
+  "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
 
 export const serverSoftwareOptions = [
   {
@@ -46,32 +53,33 @@ export const serverSoftwareOptions = [
     supportsPlugins: false,
     supportsMods: true,
   },
+  {
+    id: "forge",
+    name: "Forge",
+    releaseChannel: "stable",
+    latestHint: "Official Forge mod loader server",
+    supportsPlugins: false,
+    supportsMods: true,
+  },
+  {
+    id: "neoforge",
+    name: "NeoForge",
+    releaseChannel: "stable",
+    latestHint: "Official NeoForge mod loader server",
+    supportsPlugins: false,
+    supportsMods: true,
+  },
 ];
 
 function sortVersionsDescending(versions) {
-  return [...versions].sort((left, right) => versionSorter.compare(right, left));
-}
-
-async function fetchPurpurJson(url) {
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      "User-Agent": PURPUR_USER_AGENT,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Purpur download request failed (${response.status}).`);
-  }
-
-  return response.json();
+  return [...new Set(versions)].sort((left, right) => versionSorter.compare(right, left));
 }
 
 async function fetchSoftwareJson(url) {
   const response = await fetch(url, {
     headers: {
       Accept: "application/json",
-      "User-Agent": PURPUR_USER_AGENT,
+      "User-Agent": SOFTWARE_USER_AGENT,
     },
   });
 
@@ -82,10 +90,25 @@ async function fetchSoftwareJson(url) {
   return response.json();
 }
 
+async function fetchSoftwareText(url) {
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/xml, text/xml, text/plain",
+      "User-Agent": SOFTWARE_USER_AGENT,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Software metadata request failed (${response.status}).`);
+  }
+
+  return response.text();
+}
+
 async function fetchBinary(url) {
   const response = await fetch(url, {
     headers: {
-      "User-Agent": PURPUR_USER_AGENT,
+      "User-Agent": SOFTWARE_USER_AGENT,
     },
   });
 
@@ -96,8 +119,117 @@ async function fetchBinary(url) {
   return Buffer.from(await response.arrayBuffer());
 }
 
+async function writeBinary(url, destinationPath) {
+  const data = await fetchBinary(url);
+  await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+  await fs.writeFile(destinationPath, data);
+  return data;
+}
+
+function parseXmlVersions(xml) {
+  return Array.from(String(xml ?? "").matchAll(/<version>([^<]+)<\/version>/g)).map(
+    (match) => match[1].trim(),
+  );
+}
+
+function parseXmlTag(xml, tagName) {
+  return String(xml ?? "").match(new RegExp(`<${tagName}>([^<]+)</${tagName}>`, "i"))?.[1] ?? null;
+}
+
+function isSupportedForgeVersion(version) {
+  return /^\d+(?:\.\d+){1,2}-\d+(?:\.\d+){1,3}$/i.test(String(version ?? "").trim());
+}
+
+function isSupportedNeoForgeVersion(version) {
+  const normalized = String(version ?? "").trim();
+  if (!/^\d+(?:\.\d+){2,3}(?:-[0-9A-Za-z.]+)?$/i.test(normalized)) {
+    return false;
+  }
+  if (normalized.includes("+snapshot")) {
+    return false;
+  }
+  if (/alpha/i.test(normalized)) {
+    return false;
+  }
+  return true;
+}
+
+async function runJavaInstaller(javaPath, installerPath, destinationDir, installerArgs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(javaPath, ["-jar", installerPath, ...installerArgs], {
+      cwd: destinationDir,
+      ...withHiddenConsole(),
+    });
+
+    let output = "";
+    let settled = false;
+
+    const finish = (error = null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(output);
+    };
+
+    child.stdout.on("data", (chunk) => {
+      output += String(chunk);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      output += String(chunk);
+    });
+
+    child.on("error", (error) => {
+      finish(error);
+    });
+
+    child.on("exit", (code) => {
+      if (code && code !== 0) {
+        const lines = output
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .slice(-20);
+        finish(
+          new Error(
+            lines.length
+              ? lines.join(" ")
+              : `The server installer exited with code ${code}.`,
+          ),
+        );
+        return;
+      }
+      finish();
+    });
+  });
+}
+
+function normalizeMinecraftVersion(version) {
+  const baseVersion = String(version ?? "").trim().split("-")[0];
+  if (/^\d+(?:\.\d+){2,3}$/i.test(baseVersion) && !baseVersion.startsWith("1.")) {
+    const pieces = baseVersion.split(".");
+    const first = Number(pieces[0]);
+    if (first >= 26 && pieces.length >= 3) {
+      return pieces.slice(0, 3).join(".");
+    }
+    if (pieces.length >= 2) {
+      return `1.${pieces[0]}.${pieces[1]}`;
+    }
+  }
+  return baseVersion;
+}
+
+function extractForgeMinecraftVersion(version) {
+  return String(version ?? "").trim().split("-")[0];
+}
+
 export async function fetchPurpurVersions() {
-  const payload = await fetchPurpurJson("https://api.purpurmc.org/v2/purpur/");
+  const payload = await fetchSoftwareJson("https://api.purpurmc.org/v2/purpur/");
   return sortVersionsDescending(payload.versions ?? []);
 }
 
@@ -107,11 +239,11 @@ export async function resolvePurpurVersion(requestedVersion = "latest") {
   }
 
   const versions = await fetchPurpurVersions();
-  return versions[0];
+  return versions[0] ?? null;
 }
 
 export async function fetchLatestPurpurBuild(version) {
-  const payload = await fetchPurpurJson(
+  const payload = await fetchSoftwareJson(
     `https://api.purpurmc.org/v2/purpur/${encodeURIComponent(version)}`,
   );
 
@@ -205,6 +337,63 @@ export async function fetchLatestFabricInstaller() {
   return preferred.version;
 }
 
+export async function fetchForgeVersions() {
+  const payload = await fetchSoftwareText(FORGE_METADATA_URL);
+  return sortVersionsDescending(parseXmlVersions(payload).filter(isSupportedForgeVersion));
+}
+
+export async function resolveForgeVersion(requestedVersion = "latest") {
+  if (requestedVersion && requestedVersion !== "latest") {
+    return requestedVersion;
+  }
+
+  const payload = await fetchSoftwareText(FORGE_METADATA_URL);
+  const release = parseXmlTag(payload, "release");
+  if (release && isSupportedForgeVersion(release)) {
+    return release;
+  }
+  const versions = parseXmlVersions(payload).filter(isSupportedForgeVersion);
+  return sortVersionsDescending(versions)[0] ?? null;
+}
+
+export async function fetchNeoForgeVersions() {
+  const payload = await fetchSoftwareText(NEOFORGE_METADATA_URL);
+  return sortVersionsDescending(parseXmlVersions(payload).filter(isSupportedNeoForgeVersion));
+}
+
+export async function resolveNeoForgeVersion(requestedVersion = "latest") {
+  if (requestedVersion && requestedVersion !== "latest") {
+    return requestedVersion;
+  }
+
+  const payload = await fetchSoftwareText(NEOFORGE_METADATA_URL);
+  const release = parseXmlTag(payload, "release");
+  if (release && isSupportedNeoForgeVersion(release)) {
+    return release;
+  }
+  const versions = parseXmlVersions(payload).filter(isSupportedNeoForgeVersion);
+  return sortVersionsDescending(versions)[0] ?? null;
+}
+
+export async function resolveSoftwareVersion(software = "purpur", requestedVersion = "latest") {
+  switch (software) {
+    case "vanilla":
+      return resolveVanillaVersion(requestedVersion);
+    case "paper":
+      return resolvePaperVersion(requestedVersion);
+    case "purpur":
+      return resolvePurpurVersion(requestedVersion);
+    case "fabric":
+      return resolveFabricVersion(requestedVersion);
+    case "forge":
+      return resolveForgeVersion(requestedVersion);
+    case "neoforge":
+      return resolveNeoForgeVersion(requestedVersion);
+    default:
+      throw new Error(`Unsupported server software: ${software}`);
+  }
+}
+
 export async function fetchSoftwareVersions(software = "purpur") {
   switch (software) {
     case "vanilla":
@@ -215,26 +404,68 @@ export async function fetchSoftwareVersions(software = "purpur") {
       return fetchPurpurVersions();
     case "fabric":
       return fetchFabricVersions();
+    case "forge":
+      return fetchForgeVersions();
+    case "neoforge":
+      return fetchNeoForgeVersions();
     default:
       throw new Error(`Unsupported server software: ${software}`);
   }
+}
+
+async function installForgeFamily({
+  software,
+  version,
+  destinationDir,
+  javaPath,
+}) {
+  const installerName = `${software}-${version}-installer.jar`;
+  const installerPath = path.join(destinationDir, installerName);
+  const downloadUrl =
+    software === "forge"
+      ? `https://maven.minecraftforge.net/net/minecraftforge/forge/${encodeURIComponent(version)}/forge-${encodeURIComponent(version)}-installer.jar`
+      : `https://maven.neoforged.net/releases/net/neoforged/neoforge/${encodeURIComponent(version)}/neoforge-${encodeURIComponent(version)}-installer.jar`;
+
+  const data = await writeBinary(downloadUrl, installerPath);
+  await runJavaInstaller(
+    javaPath,
+    installerPath,
+    destinationDir,
+    software === "forge" ? ["--installServer", destinationDir] : ["--install-server", destinationDir],
+  );
+  await fs.rm(installerPath, { force: true }).catch(() => {});
+
+  return {
+    software,
+    softwareName: software === "forge" ? "Forge" : "NeoForge",
+    version,
+    build: null,
+    channel: String(version).includes("beta") ? "beta" : "stable",
+    fileName: installerName,
+    size: data.length,
+    sha256: null,
+    downloadedTo: destinationDir,
+  };
 }
 
 export async function downloadServerJar({
   software = "purpur",
   requestedVersion = "latest",
   destinationPath,
+  javaPath = "java",
 }) {
   if (!destinationPath) {
     throw new Error("A destination path for the server jar is required.");
   }
+
+  const destinationDir = path.dirname(destinationPath);
 
   switch (software) {
     case "vanilla": {
       const version = await resolveVanillaVersion(requestedVersion);
       const download = await fetchVanillaServerDownload(version);
       const data = await fetchBinary(download.url);
-      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      await fs.mkdir(destinationDir, { recursive: true });
       await fs.writeFile(destinationPath, data);
 
       return {
@@ -254,7 +485,7 @@ export async function downloadServerJar({
       const build = await fetchLatestStableBuild(version);
       const download = build.downloads["server:default"];
       const data = await fetchBinary(download.url);
-      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      await fs.mkdir(destinationDir, { recursive: true });
       await fs.writeFile(destinationPath, data);
 
       return {
@@ -273,7 +504,7 @@ export async function downloadServerJar({
       const version = await resolvePurpurVersion(requestedVersion);
       const build = await fetchLatestPurpurBuild(version);
       const data = await fetchBinary(build.downloadUrl);
-      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      await fs.mkdir(destinationDir, { recursive: true });
       await fs.writeFile(destinationPath, data);
 
       return {
@@ -296,7 +527,7 @@ export async function downloadServerJar({
         `https://meta.fabricmc.net/v2/versions/loader/${encodeURIComponent(version)}/` +
         `${encodeURIComponent(loaderVersion)}/${encodeURIComponent(installerVersion)}/server/jar`;
       const data = await fetchBinary(downloadUrl);
-      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      await fs.mkdir(destinationDir, { recursive: true });
       await fs.writeFile(destinationPath, data);
 
       return {
@@ -312,13 +543,31 @@ export async function downloadServerJar({
         downloadedTo: destinationPath,
       };
     }
+    case "forge": {
+      const version = await resolveForgeVersion(requestedVersion);
+      return installForgeFamily({
+        software,
+        version,
+        destinationDir,
+        javaPath,
+      });
+    }
+    case "neoforge": {
+      const version = await resolveNeoForgeVersion(requestedVersion);
+      return installForgeFamily({
+        software,
+        version,
+        destinationDir,
+        javaPath,
+      });
+    }
     default:
       throw new Error(`Unsupported server software: ${software}`);
   }
 }
 
 export function getRequiredJavaMajor(version) {
-  const value = String(version ?? "");
+  const value = normalizeMinecraftVersion(version);
   if (value.startsWith("26.")) {
     return 25;
   }
@@ -329,6 +578,17 @@ export function getRequiredJavaMajor(version) {
 
   if (value.startsWith("1.17") || value.startsWith("1.18") || value.startsWith("1.19")) {
     return 17;
+  }
+
+  if (/^1\.(?:[0-9]|1[0-6])(?:\.|$)/.test(value)) {
+    return 8;
+  }
+
+  if (
+    isSupportedForgeVersion(String(version ?? "")) &&
+    /^1\.(?:[0-9]|1[0-6])(?:\.|$)/.test(extractForgeMinecraftVersion(version))
+  ) {
+    return 8;
   }
 
   return 17;

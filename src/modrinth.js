@@ -70,6 +70,18 @@ export function getDefaultCatalogProfileId(kind, serverSoftware) {
     return "auto";
   }
 
+  if (serverSoftware === "forge") {
+    return "forge";
+  }
+
+  if (serverSoftware === "neoforge") {
+    return "neoforge";
+  }
+
+  if (serverSoftware === "quilt") {
+    return "quilt";
+  }
+
   return "fabric";
 }
 
@@ -164,6 +176,27 @@ function sortVersionsDescending(left, right) {
   return Date.parse(right.date_published ?? 0) - Date.parse(left.date_published ?? 0);
 }
 
+function filterVersionsForGameVersion(versions, gameVersion) {
+  const normalized = String(gameVersion ?? "").trim();
+  if (!normalized) {
+    return [...versions];
+  }
+
+  const exactMatches = versions.filter((entry) =>
+    (entry.game_versions ?? []).includes(normalized),
+  );
+  if (exactMatches.length) {
+    return exactMatches;
+  }
+
+  const relaxedPrefix =
+    normalized.includes(".") ? normalized.split(".").slice(0, -1).join(".") : normalized;
+  const relaxedMatches = versions.filter((entry) =>
+    (entry.game_versions ?? []).some((value) => String(value).startsWith(relaxedPrefix)),
+  );
+  return relaxedMatches.length ? relaxedMatches : [...versions];
+}
+
 export async function resolveCatalogInstall({
   projectId,
   kind,
@@ -177,21 +210,11 @@ export async function resolveCatalogInstall({
     `/project/${encodeURIComponent(projectId)}/version`,
     {
       loaders: JSON.stringify(profile.installLoaders),
-      game_versions: gameVersion ? JSON.stringify([gameVersion]) : undefined,
       include_changelog: "false",
     },
   );
 
-  let candidates = [...versions];
-  if (!candidates.length) {
-    candidates = await fetchModrinthJson(
-      `/project/${encodeURIComponent(projectId)}/version`,
-      {
-        loaders: JSON.stringify(profile.installLoaders),
-        include_changelog: "false",
-      },
-    );
-  }
+  let candidates = filterVersionsForGameVersion(versions, gameVersion);
 
   candidates = candidates
     .filter((entry) => entry.status === "listed" || entry.status === "archived" || !entry.status)

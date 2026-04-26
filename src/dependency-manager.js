@@ -20,10 +20,11 @@ const DOWNLOAD_USER_AGENT = "releu-minecraft/1.0";
 
 const JAVA_EXECUTABLE_NAME = getJavaExecutableName();
 const JAVA_ARCHIVE_EXTENSION = isWindows ? "zip" : "tar.gz";
-const JAVA_DEPENDENCIES = [21, 25].map((major) => ({
+const JAVA_DEPENDENCIES = [8, 17, 21, 25].map((major) => ({
   id: `java${major}`,
   name: `Microsoft OpenJDK ${major}`,
   major,
+  requiredOnBootstrap: major >= 17,
   archivePath: path.join(paths.toolsDir, `microsoft-jdk-${major}.${JAVA_ARCHIVE_EXTENSION}`),
   installDir: path.join(paths.toolsDir, `microsoft-jdk-${major}`),
   downloadUrl: getMicrosoftJdkDownloadUrl(major),
@@ -210,6 +211,10 @@ export class DependencyManager {
     return target?.present ? target.path : null;
   }
 
+  getJavaDefinition(major) {
+    return JAVA_DEPENDENCIES.find((entry) => entry.major === Number(major)) ?? null;
+  }
+
   async check() {
     if (this.state.running) {
       return this.snapshot();
@@ -224,6 +229,7 @@ export class DependencyManager {
         id: entry.id,
         name: entry.name,
         type: "java",
+        requiredOnBootstrap: entry.requiredOnBootstrap,
         present: Boolean(javaPath),
         path: javaPath,
         version: javaInfo.version,
@@ -243,7 +249,7 @@ export class DependencyManager {
     };
 
     const missing = Object.values(dependencyState)
-      .filter((entry) => !entry.present)
+      .filter((entry) => entry.requiredOnBootstrap !== false && !entry.present)
       .map((entry) => entry.id);
 
     this.state = {
@@ -275,6 +281,45 @@ export class DependencyManager {
       this.ensurePromise = null;
     });
     return this.ensurePromise;
+  }
+
+  async ensureJavaMajor(major) {
+    const definition = this.getJavaDefinition(major);
+    if (!definition) {
+      throw new Error(`Releu does not manage Java ${major}.`);
+    }
+
+    if (this.ensurePromise) {
+      await this.ensurePromise;
+    }
+
+    await this.check();
+    const current = this.state.dependencies[definition.id];
+    if (current?.present) {
+      return current;
+    }
+
+    this.state.running = true;
+    this.state.stage = "downloading";
+
+    try {
+      this.updateActivity({
+        dependencyId: definition.id,
+        task: "prepare",
+        label: `Preparing ${definition.name}`,
+        downloadedBytes: 0,
+        totalBytes: null,
+        speedBytesPerSecond: 0,
+      });
+      this.appendLog("panel", `Installing ${definition.name}...`);
+      await this.ensureJavaRuntime(definition);
+    } finally {
+      this.state.running = false;
+    }
+
+    await this.check();
+    this.state.ensuredAt = currentTimestamp();
+    return this.state.dependencies[definition.id];
   }
 
   async runEnsureAll() {
