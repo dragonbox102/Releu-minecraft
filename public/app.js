@@ -10,7 +10,9 @@ const ui = {
   bootstrap: {
     active: true,
     stage: "checking",
+    title: "Checking For Dependencies",
     detail: "Checking Java runtimes and playit.gg tools.",
+    warning: "",
     metaLeft: "System Node_01",
     metaRight: "",
     progressWidth: 45,
@@ -218,11 +220,65 @@ function updateBootstrapFromDependencies(dependencies, fallbackStage = "checking
   }
 
   ui.bootstrap.stage = stage;
+  ui.bootstrap.title =
+    stage === "downloading" ? "Installing Dependencies" : "Checking For Dependencies";
   ui.bootstrap.detail = detail;
+  ui.bootstrap.warning = "";
   ui.bootstrap.metaLeft =
     dependencies?.currentDependencyId
       ? dependencies?.dependencies?.[dependencies.currentDependencyId]?.name ?? "Dependency"
       : "System Node_01";
+  ui.bootstrap.metaRight = metaRight;
+  ui.bootstrap.progressWidth = progressWidth;
+}
+
+function updateBootstrapFromAppUpdate(appUpdate, mode = "install") {
+  const version =
+    appUpdate?.stagedVersion ??
+    appUpdate?.latestVersion ??
+    appUpdate?.currentVersion ??
+    "next";
+  const downloadedBytes = Number(appUpdate?.downloadedBytes ?? 0);
+  const totalBytes = Number(appUpdate?.totalBytes ?? 0);
+  const speedBytesPerSecond = Number(appUpdate?.speedBytesPerSecond ?? 0);
+  const progressWidth =
+    mode === "download" && totalBytes > 0
+      ? Math.max(10, Math.min(100, (downloadedBytes / totalBytes) * 100))
+      : mode === "install"
+        ? 100
+        : 45;
+
+  let detail =
+    appUpdate?.statusMessage ??
+    (mode === "download"
+      ? `Downloading Releu update ${version}.`
+      : `Installing Releu update ${version}.`);
+
+  if (mode === "download" && downloadedBytes > 0 && totalBytes > 0) {
+    detail += ` (${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)})`;
+  }
+
+  let metaRight = "";
+  if (mode === "download" && speedBytesPerSecond > 0) {
+    metaRight = `${formatBytes(speedBytesPerSecond)}/s`;
+  } else if (mode === "download" && downloadedBytes > 0 && totalBytes > 0) {
+    metaRight = `${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`;
+  } else if (mode === "install") {
+    metaRight = "Restarting";
+  }
+
+  ui.bootstrap.active = true;
+  ui.bootstrap.stage = mode === "download" ? "app-update-download" : "app-update-install";
+  ui.bootstrap.title =
+    mode === "download"
+      ? `Downloading Releu Update ${version}`
+      : `Installing Releu Update ${version}`;
+  ui.bootstrap.detail = detail;
+  ui.bootstrap.warning =
+    mode === "download"
+      ? `Do not close Releu while update ${version} is downloading.`
+      : `Releu will close and reopen automatically when update ${version} finishes installing.`;
+  ui.bootstrap.metaLeft = `Releu ${version}`;
   ui.bootstrap.metaRight = metaRight;
   ui.bootstrap.progressWidth = progressWidth;
 }
@@ -253,11 +309,19 @@ async function pickLocalDirectory() {
 
 async function maybeAutoApplyAppUpdate() {
   const appUpdate = appUpdateState();
+  if (appUpdate?.downloading) {
+    updateBootstrapFromAppUpdate(appUpdate, "download");
+    render();
+    return false;
+  }
   if (!isDesktopApp() || !window.desktop?.installAppUpdate) return false;
   if (!appUpdate?.canAutoApply || !appUpdate?.stagedFilePath || !appUpdate?.stagedVersion) return false;
   if (ui.appUpdateAttemptedVersion === appUpdate.stagedVersion) return false;
 
   ui.appUpdateAttemptedVersion = appUpdate.stagedVersion;
+  updateBootstrapFromAppUpdate(appUpdate, "install");
+  render();
+  await sleep(600);
   await api("/api/app-update/applying", { method: "POST" });
   await window.desktop.installAppUpdate(appUpdate.stagedFilePath);
   return true;
@@ -554,11 +618,11 @@ function renderHeader() {
 }
 
 function renderBootstrapScreen() {
-  if (ui.bootstrap.stage === "downloading") {
-    return `<div class="min-h-screen bg-black text-white"><main class="flex min-h-screen items-center justify-center bg-black"><div class="flex w-full max-w-md flex-col items-center px-8"><h1 class="mb-4 text-center text-4xl font-black uppercase tracking-[0.18em] text-white">Downloading Dependencies</h1><div class="relative h-px w-full overflow-hidden bg-zinc-800"><div class="absolute inset-y-0 left-0 bg-white transition-all duration-200" style="width:${Math.max(8, Math.min(100, ui.bootstrap.progressWidth))}%"></div></div><div class="mt-3 flex w-full items-center justify-between opacity-60"><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-400">${escapeHtml(ui.bootstrap.metaLeft)}</span><span class="font-mono text-[13px] text-zinc-400">${escapeHtml(ui.bootstrap.metaRight || "Preparing")}</span></div><p class="mt-4 text-center text-sm text-zinc-400">${escapeHtml(ui.bootstrap.detail)}</p></div></main><div aria-hidden="true" class="pointer-events-none fixed bottom-8 right-8 opacity-20"><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">System Boot // Core_v2.0.4</span></div></div>`;
+  if (ui.bootstrap.stage === "downloading" || ui.bootstrap.stage.startsWith("app-update-")) {
+    return `<div class="min-h-screen bg-black text-white"><main class="flex min-h-screen items-center justify-center bg-black"><div class="flex w-full max-w-md flex-col items-center px-8"><h1 class="mb-4 text-center text-4xl font-black uppercase tracking-[0.18em] text-white">${escapeHtml(ui.bootstrap.title || "Installing Dependencies")}</h1><div class="relative h-px w-full overflow-hidden bg-zinc-800"><div class="absolute inset-y-0 left-0 bg-white transition-all duration-200" style="width:${Math.max(8, Math.min(100, ui.bootstrap.progressWidth))}%"></div></div><div class="mt-3 flex w-full items-center justify-between opacity-60"><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-400">${escapeHtml(ui.bootstrap.metaLeft)}</span><span class="font-mono text-[13px] text-zinc-400">${escapeHtml(ui.bootstrap.metaRight || "Preparing")}</span></div><p class="mt-4 text-center text-sm text-zinc-400">${escapeHtml(ui.bootstrap.detail)}</p>${ui.bootstrap.warning ? `<p class="mt-3 text-center text-[12px] font-bold uppercase tracking-[0.16em] text-zinc-500">${escapeHtml(ui.bootstrap.warning)}</p>` : ""}</div></main><div aria-hidden="true" class="pointer-events-none fixed bottom-8 right-8 opacity-20"><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">System Boot // Core_v2.0.4</span></div></div>`;
   }
 
-  return `<div class="min-h-screen bg-black text-white"><main class="flex min-h-screen items-center justify-center bg-black"><div class="flex w-full max-w-md flex-col items-center space-y-6 px-6"><h1 class="select-none text-center text-4xl font-semibold uppercase tracking-[0.15em] text-white">Checking For Dependencies</h1><div class="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white"></div><p class="text-center text-sm text-zinc-400">${escapeHtml(ui.bootstrap.detail)}</p></div></main><div aria-hidden="true" class="pointer-events-none fixed bottom-8 right-8 opacity-20"><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">System Boot // Core_v2.0.4</span></div></div>`;
+  return `<div class="min-h-screen bg-black text-white"><main class="flex min-h-screen items-center justify-center bg-black"><div class="flex w-full max-w-md flex-col items-center space-y-6 px-6"><h1 class="select-none text-center text-4xl font-semibold uppercase tracking-[0.15em] text-white">${escapeHtml(ui.bootstrap.title || "Checking For Dependencies")}</h1><div class="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white"></div><p class="text-center text-sm text-zinc-400">${escapeHtml(ui.bootstrap.detail)}</p>${ui.bootstrap.warning ? `<p class="text-center text-[12px] font-bold uppercase tracking-[0.16em] text-zinc-500">${escapeHtml(ui.bootstrap.warning)}</p>` : ""}</div></main><div aria-hidden="true" class="pointer-events-none fixed bottom-8 right-8 opacity-20"><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">System Boot // Core_v2.0.4</span></div></div>`;
 }
 
 function renderModal() {
@@ -886,8 +950,49 @@ async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activ
   runtime.data = payload.state;
   syncInstallDraft();
   if (ui.installDraft?.software) await ensureVersions(ui.installDraft.software);
-  render();
-  await maybeAutoApplyAppUpdate();
+  const handledAppUpdate = await maybeAutoApplyAppUpdate();
+  if (!handledAppUpdate) {
+    if (ui.bootstrap.stage.startsWith("app-update-") && !appUpdateState()?.downloading) {
+      ui.bootstrap.active = false;
+    }
+    render();
+  }
+}
+
+async function runStartupAppUpdateCheck() {
+  const currentUpdate = appUpdateState();
+  if (!isDesktopApp() || !currentUpdate?.enabled || !currentUpdate?.autoInstall) {
+    return false;
+  }
+
+  let checkError = null;
+  api("/api/app-update/check", {
+    method: "POST",
+  }).catch((error) => {
+    checkError = error;
+  });
+
+  for (;;) {
+    await sleep(350);
+    if (checkError) throw checkError;
+
+    const serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? null;
+    const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
+    const payload = await api(`/api/state${query}`);
+    runtime.data = payload.state;
+    syncInstallDraft();
+    if (ui.installDraft?.software) await ensureVersions(ui.installDraft.software);
+
+    const appUpdate = appUpdateState();
+    if (appUpdate?.downloading) {
+      updateBootstrapFromAppUpdate(appUpdate, "download");
+      render();
+    }
+
+    if (!appUpdate?.checking && !appUpdate?.downloading) {
+      return maybeAutoApplyAppUpdate();
+    }
+  }
 }
 
 async function refreshLogs(serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? null) {
@@ -1320,6 +1425,7 @@ async function boot() {
   await sleep(250);
   await ensureDependenciesReady();
   await refreshState();
+  await runStartupAppUpdateCheck();
   window.setInterval(() => {
     refreshLogs().catch((error) => console.error(error));
   }, LOG_POLL_MS);
