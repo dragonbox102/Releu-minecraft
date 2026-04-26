@@ -5,6 +5,11 @@ import { once } from "node:events";
 import { Readable } from "node:stream";
 
 import { currentTimestamp, fileExists, paths, readJsonFile } from "./config.js";
+import {
+  getDefaultUpdaterAssetName,
+  isLinux,
+  isWindows,
+} from "./platform.js";
 
 const GITHUB_API_ROOT = "https://api.github.com/repos";
 
@@ -57,7 +62,16 @@ function pickReleaseAsset(release, preferredAssetName) {
     return preferred;
   }
 
-  return assets.find((asset) => String(asset.name ?? "").toLowerCase().endsWith(".exe")) ?? null;
+  const fallbackExtension = isWindows ? ".exe" : isLinux ? ".appimage" : "";
+  if (fallbackExtension) {
+    return (
+      assets.find((asset) =>
+        String(asset.name ?? "").toLowerCase().endsWith(fallbackExtension),
+      ) ?? null
+    );
+  }
+
+  return null;
 }
 
 export class AppUpdater {
@@ -66,7 +80,7 @@ export class AppUpdater {
     this.getPanelConfig = getPanelConfig;
     this.hasRunningServers = hasRunningServers;
     this.state = {
-      supported: process.platform === "win32",
+      supported: isWindows || isLinux,
       currentVersion: "0.0.0",
       configured: false,
       enabled: false,
@@ -107,7 +121,9 @@ export class AppUpdater {
     this.state.autoInstall = Boolean(config.autoInstall ?? true);
     this.state.githubOwner = String(config.githubOwner ?? "").trim();
     this.state.githubRepo = String(config.githubRepo ?? "").trim();
-    this.state.assetName = String(config.assetName ?? "Releu-minecraft.exe").trim() || "Releu-minecraft.exe";
+    this.state.assetName =
+      String(config.assetName ?? getDefaultUpdaterAssetName()).trim() ||
+      getDefaultUpdaterAssetName();
     this.state.configured = Boolean(this.state.githubOwner && this.state.githubRepo);
     if (!this.state.configured) {
       this.state.available = false;
@@ -172,7 +188,8 @@ export class AppUpdater {
   async checkForUpdates() {
     this.syncConfig();
     if (!this.state.supported) {
-      this.state.statusMessage = "Self-update is supported only on Windows desktop builds.";
+      this.state.statusMessage =
+        "Self-update is supported on Windows portable builds and Linux AppImage builds.";
       return this.snapshot();
     }
 
@@ -339,6 +356,9 @@ export class AppUpdater {
       });
 
       await fs.rename(tempPath, finalPath);
+      if (isLinux) {
+        await fs.chmod(finalPath, 0o755).catch(() => {});
+      }
       this.state.updateReady = true;
       this.state.stagedVersion = normalizedVersion;
       this.state.stagedFilePath = finalPath;

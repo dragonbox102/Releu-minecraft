@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+import extractZip from "extract-zip";
+
 import {
   currentTimestamp,
   defaultServerProperties,
@@ -47,6 +49,11 @@ import {
   saveServerRegistry,
   slugifyServerId,
 } from "./server-registry.js";
+import {
+  getDefaultUpdaterAssetName,
+  isLinux,
+  withHiddenConsole,
+} from "./platform.js";
 
 async function ensureJsonFile(targetPath, defaultValue) {
   if (await fileExists(targetPath)) {
@@ -162,10 +169,6 @@ function ensureChildPath(parentDir, targetDir) {
     throw new Error("Resolved path is outside the server directory.");
   }
   return target;
-}
-
-function escapePowerShellLiteral(value) {
-  return String(value ?? "").replace(/'/g, "''");
 }
 
 function pathEqualsOrInside(targetPath, basePath) {
@@ -464,9 +467,7 @@ if (-not $sample) { exit 0 }
       const child = spawn(
         "powershell",
         ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
-        {
-          windowsHide: true,
-        },
+        withHiddenConsole(),
       );
 
       let stdout = "";
@@ -514,6 +515,82 @@ if (-not $sample) { exit 0 }
     });
   }
 
+  async readLinuxProcessMetrics(processId) {
+    if (!processId || !isLinux) {
+      return null;
+    }
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(
+        "ps",
+        ["-p", String(Number(processId)), "-o", "%cpu=,rss="],
+        withHiddenConsole(),
+      );
+
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+
+      child.on("error", (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error);
+      });
+
+      child.on("exit", (code) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (code && code !== 0) {
+          reject(new Error(sanitizeLogLine(stderr) || "Unable to read process metrics.")); 
+          return;
+        }
+
+        const trimmed = stdout.trim();
+        if (!trimmed) {
+          resolve(null);
+          return;
+        }
+
+        const [cpuToken, rssToken] = trimmed.split(/\s+/);
+        const cpuPercent = Number(cpuToken);
+        const rssKb = Number(rssToken);
+        if (!Number.isFinite(cpuPercent) || !Number.isFinite(rssKb)) {
+          resolve(null);
+          return;
+        }
+
+        resolve({
+          cpuPercent,
+          ramBytes: rssKb * 1024,
+        });
+      });
+    });
+  }
+
+  async readProcessMetrics(processId) {
+    if (process.platform === "win32") {
+      return this.readWindowsProcessMetrics(processId);
+    }
+
+    if (isLinux) {
+      return this.readLinuxProcessMetrics(processId);
+    }
+
+    return null;
+  }
+
   async refreshServerMetrics(context) {
     const ramMaxMb = ramStringToMb(context.config.launcher.maxRam, 4096);
     const ramMinMb = ramStringToMb(context.config.launcher.minRam, 2048);
@@ -533,7 +610,7 @@ if (-not $sample) { exit 0 }
     }
 
     try {
-      const sample = await this.readWindowsProcessMetrics(context.state.serverPid);
+      const sample = await this.readProcessMetrics(context.state.serverPid);
       if (!sample) {
         context.state.resourceMetrics = offlineMetrics;
         return context.state.resourceMetrics;
@@ -1013,8 +1090,11 @@ if (-not $sample) { exit 0 }
       githubRepo:
         String(payload.githubRepo ?? this.panelConfig.updater.githubRepo ?? "").trim(),
       assetName:
-        String(payload.assetName ?? this.panelConfig.updater.assetName ?? "Releu-minecraft.exe").trim() ||
-        "Releu-minecraft.exe",
+        String(
+          payload.assetName ??
+            this.panelConfig.updater.assetName ??
+            getDefaultUpdaterAssetName(),
+        ).trim() || getDefaultUpdaterAssetName(),
       allowPrerelease: Boolean(
         payload.allowPrerelease ?? this.panelConfig.updater.allowPrerelease,
       ),
@@ -1195,9 +1275,7 @@ if (-not $sample) { exit 0 }
 
   async inspectJavaRuntime(javaPath) {
     return new Promise((resolve, reject) => {
-      const child = spawn(javaPath, ["-version"], {
-        windowsHide: true,
-      });
+      const child = spawn(javaPath, ["-version"], withHiddenConsole());
 
       let output = "";
       let settled = false;
@@ -1287,7 +1365,7 @@ if (-not $sample) { exit 0 }
 
     const child = spawn(context.config.launcher.javaPath, args, {
       cwd: context.paths.serverDir,
-      windowsHide: true,
+      ...withHiddenConsole(),
     });
 
     context.serverProcess = child;
@@ -1707,46 +1785,12 @@ if (-not $sample) { exit 0 }
   }
 
   async extractArchiveToDirectory(archivePath, targetDir) {
-    const command = `Expand-Archive -LiteralPath '${escapePowerShellLiteral(
-      archivePath,
-    )}' -DestinationPath '${escapePowerShellLiteral(targetDir)}' -Force`;
-
-    return new Promise((resolve, reject) => {
-      const child = spawn(
-        "powershell",
-        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
-        {
-          windowsHide: true,
-        },
-      );
-
-      let stderr = "";
-      let settled = false;
-
-      child.stderr.on("data", (chunk) => {
-        stderr += String(chunk);
-      });
-
-      child.on("error", (error) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        reject(error);
-      });
-
-      child.on("exit", (code) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        if (code && code !== 0) {
-          reject(new Error(sanitizeLogLine(stderr) || "Unable to extract the world archive."));
-          return;
-        }
-        resolve(true);
-      });
+    await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+    await fs.mkdir(targetDir, { recursive: true });
+    await extractZip(archivePath, {
+      dir: targetDir,
     });
+    return true;
   }
 
   async importResolvedWorld(serverId, sourcePath, payload = {}) {

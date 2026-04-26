@@ -1,0 +1,54 @@
+name: Desktop CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            build_script: build:exe
+            artifact_name: releu-windows-portable
+            artifact_path: dist/*.exe
+          - os: ubuntu-latest
+            build_script: build:linux
+            artifact_name: releu-linux-appimage
+            artifact_path: dist/*.AppImage
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run syntax checks
+        run: npm test
+
+      - name: Build desktop package
+        run: npm run ${{ matrix.build_script }}
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
