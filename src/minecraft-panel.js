@@ -68,6 +68,40 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const minecraftVersionSorter = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: "base",
+});
+
+function normalizeComparableMinecraftVersion(version) {
+  const normalized = String(version ?? "").trim().split("-")[0];
+  if (!normalized) {
+    return null;
+  }
+
+  if (/^\d+(?:\.\d+){2,3}$/i.test(normalized) && !normalized.startsWith("1.")) {
+    const parts = normalized.split(".");
+    const first = Number(parts[0]);
+    if (first >= 26 && parts.length >= 3) {
+      return parts.slice(0, 3).join(".");
+    }
+    if (parts.length >= 2) {
+      return `1.${parts[0]}.${parts[1]}`;
+    }
+  }
+
+  return normalized;
+}
+
+function isPotentialMinecraftDowngrade(currentVersion, nextVersion) {
+  const current = normalizeComparableMinecraftVersion(currentVersion);
+  const next = normalizeComparableMinecraftVersion(nextVersion);
+  if (!current || !next || current === next) {
+    return false;
+  }
+  return minecraftVersionSorter.compare(current, next) > 0;
+}
+
 function stripMinecraftLogPrefix(value) {
   return sanitizeLogLine(value)
     .replace(/^\[[0-9:.]+\]\s+\[[^\]]+\]:\s*/i, "")
@@ -345,6 +379,9 @@ export class MinecraftPanelService {
       backupInProgress: false,
       onlinePlayers: new Set(),
       cachedProperties: structuredClone(defaultServerProperties),
+      pendingSafeModeRecovery: false,
+      pendingDowngradeWorldFailure: false,
+      startingWithSafeMode: false,
       state: {
         serverStatus: "stopped",
         serverReady: false,
@@ -1435,6 +1472,19 @@ if (-not $sample) { exit 0 }
     const selectedSoftware = software ?? context.config.install.software ?? "purpur";
     const selectedVersion = requestedVersion ?? "latest";
     const resolvedVersion = await resolveSoftwareVersion(selectedSoftware, selectedVersion);
+    const installedVersion =
+      context.config.install.installedVersion ?? context.state.installMeta?.version ?? null;
+    const worldHasContent = await this.serverHasBackupContent(context);
+    if (
+      installedVersion &&
+      worldHasContent &&
+      isPotentialMinecraftDowngrade(installedVersion, resolvedVersion)
+    ) {
+      throw new Error(
+        `This server already has world data from Minecraft ${installedVersion}. Releu will not downgrade that world to ${resolvedVersion} because Minecraft world data is not safely reversible. Create a new server, restore an older backup, or regenerate the world before switching to an older version.`,
+      );
+    }
+
     const requiredJavaMajor = getRequiredJavaMajor(resolvedVersion);
 
     if (this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
@@ -1451,6 +1501,9 @@ if (-not $sample) { exit 0 }
     });
 
     try {
+      if (installedVersion && installedVersion !== resolvedVersion && worldHasContent) {
+        await this.createBackup(serverId, "pre-install-version-change");
+      }
       this.appendLog(serverId, "panel", `Downloading ${selectedSoftware} (${resolvedVersion})...`);
       const installMeta = await downloadServerJar({
         software: selectedSoftware,
@@ -1573,11 +1626,13 @@ if (-not $sample) { exit 0 }
     });
   }
 
-  async startServer(serverId) {
+  async startServer(serverId, options = {}) {
     const context = this.getServerContext(serverId);
     if (context.serverProcess) {
       return this.getState(serverId);
     }
+
+    const safeMode = Boolean(options.safeMode);
 
     await this.syncDetectedInstalledSoftware(context);
 
@@ -1627,6 +1682,9 @@ if (-not $sample) { exit 0 }
     }
 
     context.cachedProperties = await readServerProperties(context.paths);
+    context.pendingSafeModeRecovery = false;
+    context.pendingDowngradeWorldFailure = false;
+    context.startingWithSafeMode = safeMode;
     const args = [
       `-Xms${context.config.launcher.minRam}`,
       `-Xmx${context.config.launcher.maxRam}`,
@@ -1640,9 +1698,17 @@ if (-not $sample) { exit 0 }
       const relativeArgsPath = path
         .relative(context.paths.serverDir, launchTarget.argFile)
         .replaceAll("\\", "/");
-      args.push(`@${relativeArgsPath}`, "nogui");
+      args.push(`@${relativeArgsPath}`);
+      if (safeMode) {
+        args.push("--safeMode");
+      }
+      args.push("nogui");
     } else {
-      args.push("-jar", path.basename(launchTarget.jarPath), "--nogui");
+      args.push("-jar", path.basename(launchTarget.jarPath));
+      if (safeMode) {
+        args.push("--safeMode");
+      }
+      args.push("--nogui");
     }
 
     const child = spawn(context.config.launcher.javaPath, args, {
@@ -1660,7 +1726,7 @@ if (-not $sample) { exit 0 }
     this.appendLog(
       serverId,
       "panel",
-      `Starting Minecraft server with ${context.config.launcher.javaPath}.`,
+      `Starting Minecraft server with ${context.config.launcher.javaPath}${safeMode ? " in safe mode" : ""}.`,
     );
 
     const handleOutput = (source, chunk) => {
@@ -1683,6 +1749,8 @@ if (-not $sample) { exit 0 }
     });
 
     child.on("exit", async (code) => {
+      const shouldRetryInSafeMode =
+        context.pendingSafeModeRecovery && !context.startingWithSafeMode && !context.restartRequested;
       context.serverProcess = null;
       context.state.serverStatus = "stopped";
       context.state.serverReady = false;
@@ -1697,6 +1765,27 @@ if (-not $sample) { exit 0 }
         "panel",
         `Minecraft server exited with code ${code ?? "unknown"}.`,
       );
+
+      if (shouldRetryInSafeMode) {
+        context.pendingSafeModeRecovery = false;
+        this.appendLog(
+          serverId,
+          "panel",
+          "Detected a datapack or worldgen startup failure. Retrying once with --safeMode.",
+          "warn",
+        );
+        await this.startServer(serverId, { safeMode: true });
+        return;
+      }
+
+      if (context.pendingDowngradeWorldFailure) {
+        this.appendLog(
+          serverId,
+          "panel",
+          `This world appears to have been opened in a newer Minecraft version than ${installedVersion ?? "the currently installed server"}. Restore an older backup, switch back to a matching newer version, or regenerate the world before starting again.`,
+          "error",
+        );
+      }
 
       if (context.restartRequested) {
         context.restartRequested = false;
@@ -1819,6 +1908,17 @@ if (-not $sample) { exit 0 }
           lastSeenAt: currentTimestamp(),
         }).catch(() => {});
       }
+    }
+
+    if (
+      payload.includes("Failed to load datapacks, can't proceed with server load") ||
+      payload.includes("No key dimensions in MapLike[{}]; No key seed in MapLike[{}]")
+    ) {
+      context.pendingSafeModeRecovery = true;
+    }
+
+    if (payload.includes("Server attempted to load chunk saved with newer version of minecraft")) {
+      context.pendingDowngradeWorldFailure = true;
     }
   }
 
