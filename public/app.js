@@ -7,6 +7,8 @@ const DEPENDENCY_CHECK_MAX_MS = 6000;
 
 const runtime = { latestLogId: 0, consoleText: "", data: null, versionCache: new Map() };
 let playitGatePollTimer = null;
+let logsPollTimer = null;
+let statePollTimer = null;
 const ui = {
   bootstrap: {
     active: true,
@@ -25,11 +27,12 @@ const ui = {
   installDraft: null,
   catalog: { plugin: null, mod: null },
   modal: null,
+  operation: null,
   appUpdateAttemptedVersion: null,
 };
 
 const sections = [
-  { id: "server", label: "Server" },
+  { id: "server", label: "Overview" },
   { id: "software", label: "Software" },
   { id: "console", label: "Console" },
   { id: "players", label: "Players" },
@@ -40,18 +43,18 @@ const sections = [
 ];
 
 const C = {
-  card: "border border-outline bg-surface p-6",
-  cardAlt: "border border-outline bg-black p-6",
+  card: "releu-panel border border-outline bg-surface p-6",
+  cardAlt: "releu-panel border border-outline bg-black p-6",
   label: "text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500",
   labelOn: "text-[11px] font-bold uppercase tracking-[0.18em] text-white",
   input:
     "border border-outline bg-black px-4 py-3 text-white outline-none transition placeholder:text-zinc-700 focus:border-white",
   btn:
-    "border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] transition",
+    "releu-button border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] transition",
   btnPrimary:
-    "border border-white bg-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition hover:bg-zinc-200",
+    "releu-button border border-white bg-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition hover:bg-zinc-200",
   btnGhost:
-    "border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-zinc-900",
+    "releu-button border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-zinc-900",
   chip: "border border-outline px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400",
 };
 
@@ -125,6 +128,56 @@ function formatStatus(status) {
   return "Offline";
 }
 
+function serverStatusPresentation(server) {
+  const operation = server?.server?.operation ?? server?.operation ?? null;
+  if (operation?.active) {
+    return {
+      label: operation.shortLabel ?? operation.title ?? "Working",
+      detail: operation.detail ?? "Releu is working on this server.",
+      tone: { dot: "bg-white", text: "text-white" },
+    };
+  }
+
+  const setupComplete = Boolean(
+    server?.setupComplete ?? server?.server?.jarInstalled ?? server?.jarInstalled,
+  );
+  if (!setupComplete) {
+    return {
+      label: "Setup Required",
+      detail: "Install server software to finish setup.",
+      tone: { dot: "border border-white", text: "text-zinc-400" },
+    };
+  }
+
+  const normalized = String(server?.server?.status ?? server?.status ?? "stopped").toLowerCase();
+  if (normalized === "running") {
+    return {
+      label: "Online",
+      detail: "The Minecraft server is online and accepting connections.",
+      tone: { dot: "bg-white", text: "text-white" },
+    };
+  }
+  if (normalized === "starting") {
+    return {
+      label: "Starting",
+      detail: "Minecraft is booting and the public address may appear shortly.",
+      tone: { dot: "bg-zinc-300", text: "text-zinc-200" },
+    };
+  }
+  if (normalized === "stopping") {
+    return {
+      label: "Stopping",
+      detail: "Minecraft is shutting down cleanly.",
+      tone: { dot: "bg-zinc-500", text: "text-zinc-300" },
+    };
+  }
+  return {
+    label: "Offline",
+    detail: "The server is installed but not running.",
+    tone: { dot: "border border-white", text: "text-zinc-500" },
+  };
+}
+
 function ramStringToMb(value, fallback = 4096) {
   const raw = String(value ?? "").trim().toUpperCase();
   if (!raw) return fallback;
@@ -144,6 +197,18 @@ function mbToRamString(value) {
 
 function activeServer() {
   return runtime.data?.activeServer ?? null;
+}
+
+function activeServerStatus() {
+  return String(activeServer()?.server?.status ?? "").toLowerCase();
+}
+
+function isUiLocked() {
+  return Boolean(ui.operation?.active);
+}
+
+function isCreateServerModalOpen() {
+  return ui.modal?.type === "create-server";
 }
 
 function activeServerId() {
@@ -194,6 +259,62 @@ function dependencyMissingLabels(dependencies) {
 
 function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function setUiOperation(operation) {
+  ui.operation = {
+    active: true,
+    tone: "working",
+    title: "Working",
+    detail: "Please wait.",
+    startedAt: Date.now(),
+    ...operation,
+  };
+  render();
+}
+
+function clearUiOperation() {
+  if (!ui.operation) return;
+  ui.operation = null;
+  render();
+}
+
+function currentStatePollMs() {
+  if (ui.bootstrap.active) return 1200;
+  if (isUiLocked()) return 900;
+  if (isCreateServerModalOpen()) return 30000;
+
+  const server = activeServer();
+  const status = activeServerStatus();
+  const playit = runtime.data?.playit;
+  if (
+    playit?.secretConfigured &&
+    !playitMinecraftIp() &&
+    (status === "starting" || status === "running" || Number(playit?.configuredTunnelCount ?? 0) > 0)
+  ) {
+    return 2500;
+  }
+
+  if (status === "starting" || status === "stopping") {
+    return 2500;
+  }
+
+  if (server?.server?.operation?.active) {
+    return 1200;
+  }
+
+  return STATE_POLL_MS;
+}
+
+function currentLogPollMs() {
+  if (isCreateServerModalOpen()) {
+    return 12000;
+  }
+  const status = activeServerStatus();
+  if (status === "starting" || status === "running" || status === "stopping") {
+    return 1500;
+  }
+  return LOG_POLL_MS;
 }
 
 function updateBootstrapFromDependencies(dependencies, fallbackStage = "checking") {
@@ -410,7 +531,7 @@ async function createServerFromName(name) {
 function openCreateServerModal() {
   ui.modal = {
     type: "create-server",
-    name: "Primary Server",
+    name: "",
     justOpened: true,
   };
   render();
@@ -475,7 +596,8 @@ function initials(value) {
 function statusTone(status) {
   const normalized = String(status ?? "").toLowerCase();
   if (normalized === "running") return { dot: "bg-white", text: "text-white" };
-  if (normalized === "starting" || normalized === "stopping") return { dot: "bg-zinc-500", text: "text-zinc-200" };
+  if (normalized === "starting") return { dot: "bg-zinc-300", text: "text-zinc-200" };
+  if (normalized === "stopping") return { dot: "bg-zinc-500", text: "text-zinc-300" };
   return { dot: "border border-white", text: "text-zinc-500" };
 }
 
@@ -503,6 +625,12 @@ function playitAddressState(server = activeServer()) {
     return {
       value: "Finish Playit Link",
       detail: "Complete the browser link. Releu will continue automatically after the agent is connected.",
+    };
+  }
+  if (playit?.needsWebSetup || Number(playit?.configuredTunnelCount ?? 0) === 0) {
+    return {
+      value: "No Tunnel Assigned Yet",
+      detail: `Create or assign a Minecraft Java tunnel for ${playit?.recommendedTunnelTarget ?? "127.0.0.1:25565"} in Settings.`,
     };
   }
   if (!running) {
@@ -544,18 +672,13 @@ function startPlayitGatePolling() {
   }, 2500);
 }
 
-function buildLoadBars(value) {
-  const normalized = Math.max(8, Math.min(92, Number(value) || 12));
-  return Array.from({ length: 15 }, (_, index) => {
-    const wave = ((index * 11) % 35) / 100;
-    const height = Math.max(18, Math.min(92, Math.round(normalized * (0.55 + wave))));
-    const active = index % 5 === 0 || height >= normalized;
-    return `<div class="${active ? "bg-white" : "bg-zinc-800"} w-full" style="height:${height}%"></div>`;
-  }).join("");
+function renderTile(label, value, detail = "") {
+  return `<article class="${C.card}"><p class="${C.label} mb-3">${escapeHtml(label)}</p><div class="text-2xl font-black tracking-tight text-white">${escapeHtml(value)}</div>${detail ? `<p class="mt-2 text-xs leading-6 text-zinc-400">${escapeHtml(detail)}</p>` : ""}</article>`;
 }
 
-function renderTile(label, value, detail = "") {
-  return `<article class="${C.card}"><p class="${C.label} mb-3">${escapeHtml(label)}</p><div class="text-2xl font-black tracking-tight text-white">${escapeHtml(value)}</div>${detail ? `<p class="mt-2 text-xs text-zinc-400">${escapeHtml(detail)}</p>` : ""}</article>`;
+function renderOperationOverlay() {
+  if (!isUiLocked()) return "";
+  return `<div class="releu-modal-backdrop fixed inset-0 z-[80] flex items-center justify-center bg-black/82 p-4"><section class="releu-modal-panel w-full max-w-xl border border-outline bg-surface p-7 text-center shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><p class="${C.label} mb-4">${escapeHtml(ui.operation?.tone === "install" ? "Server Install" : "Working")}</p><div class="mx-auto mb-5 h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white"></div><h2 class="text-3xl font-black tracking-tight text-white">${escapeHtml(ui.operation?.title ?? "Working")}</h2><p class="mx-auto mt-4 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(ui.operation?.detail ?? "Please wait while Releu finishes this task.")}</p><div class="mx-auto mt-6 max-w-md border border-outline bg-black px-4 py-3 text-left text-xs text-zinc-500">All other actions are temporarily disabled until this finishes.</div></section></div>`;
 }
 
 function formatLastSeen(value) {
@@ -614,20 +737,22 @@ function icon(name, className = "h-4 w-4") {
 
 function renderHeader() {
   const server = activeServer();
+  const navButtonClass = (active) =>
+    `${active ? "releu-nav-active text-white" : "text-zinc-500 hover:text-white"} pb-4 text-[11px] font-bold uppercase tracking-[0.18em] transition`;
   const nav = ui.screen === "manager"
     ? []
     : ui.screen === "setup"
     ? [
-        `<button type="button" data-action="go-manager" class="border-b-2 border-white pb-4 text-[11px] font-bold uppercase tracking-[0.18em] text-white">Servers</button>`,
-        `<span class="border-b-2 border-white pb-4 text-[11px] font-bold uppercase tracking-[0.18em] text-white">Setup</span>`,
+        `<button type="button" data-action="go-manager" class="${navButtonClass(true)}">Servers</button>`,
+        `<span class="${navButtonClass(true)}">Setup</span>`,
       ]
     : [
-        `<button type="button" data-action="go-manager" class="border-b-2 ${ui.screen === "manager" ? "border-white text-white" : "border-transparent text-zinc-500 hover:text-white"} pb-4 text-[11px] font-bold uppercase tracking-[0.18em] transition">Servers</button>`,
+        `<button type="button" data-action="go-manager" class="${navButtonClass(false)}">Servers</button>`,
         ...sections.map(
-          (item) => `<button type="button" data-action="switch-section" data-section="${escapeHtml(item.id)}" class="border-b-2 ${ui.section === item.id && ui.screen !== "manager" ? "border-white text-white" : "border-transparent text-zinc-500 hover:text-white"} pb-4 text-[11px] font-bold uppercase tracking-[0.18em] transition">${escapeHtml(item.label)}</button>`,
+          (item) => `<button type="button" data-action="switch-section" data-section="${escapeHtml(item.id)}" class="${navButtonClass(ui.section === item.id && ui.screen !== "manager")}">${escapeHtml(item.label)}</button>`,
         ),
       ];
-  return `<header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-outline bg-black px-6"><div class="flex min-w-0 items-center gap-8"><div class="text-xl font-black tracking-tight text-white">Releu</div>${nav.length ? `<nav class="hidden items-center gap-6 md:flex">${nav.join("")}</nav>` : ""}</div><div class="flex items-center gap-3">${server && ui.screen !== "manager" ? `<div class="hidden items-center gap-2 border border-outline px-3 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-400 lg:flex"><span class="${escapeHtml(statusTone(server.server.status).dot)} h-2 w-2 rounded-full"></span><span>${escapeHtml(server.name)}</span></div>` : ""}<button type="button" class="${C.btnPrimary}" data-action="add-server-prompt">Add Server</button></div></header>`;
+  return `<header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-outline bg-black px-6"><div class="flex min-w-0 items-center gap-8"><div class="text-xl font-black tracking-tight text-white">Releu</div>${nav.length ? `<nav class="hidden items-center gap-8 md:flex">${nav.join("")}</nav>` : ""}</div><div class="flex items-center gap-3">${server && ui.screen !== "manager" ? `<div class="hidden items-center gap-2 border border-outline px-3 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-400 lg:flex"><span class="${escapeHtml(serverStatusPresentation(server).tone.dot)} h-2 w-2 rounded-full"></span><span>${escapeHtml(server.name)}</span></div>` : ""}<button type="button" class="${C.btnPrimary}" data-action="add-server-prompt">Add Server</button></div></header>`;
 }
 
 function renderPlayitGateScreen() {
@@ -649,7 +774,7 @@ function renderPlayitGateScreen() {
   const secondaryAction = waiting
     ? `<button type="button" class="${C.btnGhost}" data-action="refresh-playit-gate">Refresh Status</button>`
     : "";
-  return `<div class="min-h-screen bg-black text-white"><header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-outline bg-black px-6"><div class="text-xl font-black tracking-tight text-white">Releu</div></header><main class="mx-auto flex min-h-[calc(100vh-64px)] max-w-3xl items-center justify-center p-8"><section class="w-full border border-outline bg-surface p-8 text-center"><p class="${C.label} mb-4">Playit Agent</p><h1 class="mx-auto max-w-2xl text-4xl font-black uppercase tracking-tight text-white">${escapeHtml(title)}</h1><p class="mx-auto mt-4 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(detail)}</p><div class="mx-auto mt-8 max-w-2xl border border-outline bg-black px-5 py-4 text-left text-sm text-zinc-400"><div class="${C.label} mb-2">Status</div><p>${escapeHtml(note)}</p></div><div class="mt-8 flex flex-wrap justify-center gap-3">${primaryAction}${secondaryAction}</div></section></main></div>`;
+  return `<div class="releu-screen min-h-screen bg-black text-white"><header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-outline bg-black px-6"><div class="text-xl font-black tracking-tight text-white">Releu</div></header><main class="mx-auto flex min-h-[calc(100vh-64px)] max-w-3xl items-center justify-center p-8"><section class="releu-panel w-full border border-outline bg-surface p-8 text-center"><p class="${C.label} mb-4">Playit Agent</p><h1 class="mx-auto max-w-2xl text-4xl font-black uppercase tracking-tight text-white">${escapeHtml(title)}</h1><p class="mx-auto mt-4 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(detail)}</p><div class="mx-auto mt-8 max-w-2xl border border-outline bg-black px-5 py-4 text-left text-sm text-zinc-400"><div class="${C.label} mb-2">Status</div><p>${escapeHtml(note)}</p></div><div class="mt-8 flex flex-wrap justify-center gap-3">${primaryAction}${secondaryAction}</div></section></main></div>`;
 }
 
 function renderBootstrapScreen() {
@@ -663,13 +788,13 @@ function renderBootstrapScreen() {
 function renderModal() {
   if (!ui.modal) return "";
   if (ui.modal.type === "create-server") {
-    return `<div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="w-full max-w-xl border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6 flex items-start justify-between gap-4"><div><p class="${C.label} mb-2">Add Server</p><h2 class="text-3xl font-black tracking-tight text-white">Create a new Minecraft server.</h2><p class="mt-3 text-sm text-zinc-400">Releu creates the folder automatically, picks a free port automatically, and saves the server to disk right away.</p></div><button type="button" class="text-zinc-500 transition hover:text-white" data-action="close-modal" aria-label="Close">${icon("plus", "h-5 w-5 rotate-45")}</button></div><form data-form="create-server-modal" class="space-y-4"><label class="block"><span class="${C.label} mb-3 block">Server Name</span><input name="name" data-modal-input="server-name" type="text" value="${escapeHtml(ui.modal.name ?? "Primary Server")}" required class="${C.input} w-full text-2xl font-semibold tracking-tight text-white" /></label><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="${C.btnPrimary}">Add Server</button></div></form></div></div>`;
+    return `<div class="releu-modal-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="releu-modal-panel w-full max-w-xl border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6 flex items-start justify-between gap-4"><div><p class="${C.label} mb-2">Add Server</p><h2 class="text-3xl font-black tracking-tight text-white">Create a new Minecraft server.</h2><p class="mt-3 text-sm text-zinc-400">Releu creates the folder automatically, picks a free port automatically, and saves the server to disk right away.</p></div><button type="button" class="text-zinc-500 transition hover:text-white" data-action="close-modal" aria-label="Close">${icon("plus", "h-5 w-5 rotate-45")}</button></div><form data-form="create-server-modal" class="space-y-4"><label class="block"><span class="${C.label} mb-3 block">Server Name</span><input name="name" data-modal-input="server-name" type="text" value="${escapeHtml(ui.modal.name ?? "")}" placeholder="Primary Server" autocomplete="off" autocapitalize="words" spellcheck="false" required class="${C.input} w-full text-2xl font-semibold tracking-tight text-white" /></label><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="${C.btnPrimary}">Add Server</button></div></form></div></div>`;
   }
   if (ui.modal.type === "delete-server") {
-    return `<div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="w-full max-w-lg border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6"><p class="${C.label} mb-2">Delete Server</p><h2 class="text-3xl font-black tracking-tight text-white">${escapeHtml(ui.modal.serverName)}</h2><p class="mt-3 text-sm text-zinc-400">This removes the server from Releu and deletes its local server files, panel data, and backups.</p></div><form data-form="delete-server-modal" class="space-y-4"><div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">This action cannot be undone.</div><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black">Delete Server</button></div></form></div></div>`;
+    return `<div class="releu-modal-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="releu-modal-panel w-full max-w-lg border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6"><p class="${C.label} mb-2">Delete Server</p><h2 class="text-3xl font-black tracking-tight text-white">${escapeHtml(ui.modal.serverName)}</h2><p class="mt-3 text-sm text-zinc-400">This removes the server from Releu and deletes its local server files, panel data, and backups.</p></div><form data-form="delete-server-modal" class="space-y-4"><div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">This action cannot be undone.</div><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black">Delete Server</button></div></form></div></div>`;
   }
   if (ui.modal.type === "playit-reset") {
-    return `<div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="w-full max-w-lg border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6"><p class="${C.label} mb-2">Reset Agent</p><h2 class="text-3xl font-black tracking-tight text-white">Reset playit.gg agent link</h2><p class="mt-3 text-sm text-zinc-400">This stops the local playit agent, clears the saved playit account link, and removes the current tunnel session from Releu. You can link a different playit.gg account again right after this.</p></div><form data-form="playit-reset-modal" class="space-y-4"><div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">If the agent file is missing, Releu will reinstall it automatically the next time you link playit.gg.</div><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black">Reset Agent</button></div></form></div></div>`;
+    return `<div class="releu-modal-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="releu-modal-panel w-full max-w-lg border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6"><p class="${C.label} mb-2">Reset Agent</p><h2 class="text-3xl font-black tracking-tight text-white">Reset playit.gg agent link</h2><p class="mt-3 text-sm text-zinc-400">This stops the local playit agent, clears the saved playit account link, and removes the current tunnel session from Releu. You can link a different playit.gg account again right after this.</p></div><form data-form="playit-reset-modal" class="space-y-4"><div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">If the agent file is missing, Releu will reinstall it automatically the next time you link playit.gg.</div><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black">Reset Agent</button></div></form></div></div>`;
   }
   return "";
 }
@@ -679,8 +804,7 @@ function renderManagerScreen() {
   const gridClass = ui.managerView === "list" ? "grid grid-cols-1 gap-6" : "grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3";
   const cards = servers
     .map((server) => {
-      const status = formatStatus(server.status);
-      const tone = statusTone(server.status);
+      const presentation = serverStatusPresentation(server);
       const software = server.install.installedSoftware ?? server.install.software ?? "purpur";
       const version = server.install.installedVersion ?? server.install.requestedVersion ?? "latest";
       const cpuPercent = Number(server.metrics?.cpuPercent ?? 0);
@@ -688,16 +812,25 @@ function renderManagerScreen() {
       const ramUsedMb = Number(server.metrics?.ramUsedMb ?? 0);
       const loadWidth = Math.max(cpuPercent, ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0);
       const secondaryCommand = server.jarInstalled ? (server.status === "running" ? "restart" : "start") : null;
-      return `<article class="relative overflow-hidden border border-outline bg-surface transition hover:border-zinc-500"><div class="absolute right-0 top-0 p-4"><div class="flex items-center gap-2"><div class="${escapeHtml(tone.dot)} h-2 w-2 rounded-full"></div><span class="text-[10px] font-bold uppercase tracking-[0.18em] ${escapeHtml(tone.text)}">${escapeHtml(status)}</span></div></div><div class="p-6"><div class="flex flex-col gap-4"><div><h3 class="mb-1 text-xl font-semibold tracking-tight text-white">${escapeHtml(server.name)}</h3><p class="font-mono text-[11px] text-zinc-500">${escapeHtml(server.serverDir)}</p></div><div class="flex flex-wrap gap-2"><span class="${C.chip}">Port ${escapeHtml(server.port)}</span><span class="${C.chip}">${escapeHtml(softwareLabel(software))}</span><span class="${C.chip}">${escapeHtml(version)}</span></div><div class="space-y-3 border-t border-zinc-900 pt-4"><div class="flex items-center justify-between"><span class="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">Server Load</span><span class="font-mono text-[10px] text-white">${escapeHtml(formatPercent(loadWidth))}</span></div><div class="h-1 w-full bg-zinc-900"><div class="h-full bg-white transition-all" style="width:${Math.max(0, Math.min(100, loadWidth))}%"></div></div></div></div></div><div class="grid grid-cols-3 border-t border-outline"><button type="button" class="border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black" data-action="select-server" data-server-id="${escapeHtml(server.id)}">${server.jarInstalled ? "Manage" : "Setup"}</button>${secondaryCommand ? `<button type="button" class="border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black" data-action="quick-server-control" data-server-id="${escapeHtml(server.id)}" data-server-command="${escapeHtml(secondaryCommand)}">${secondaryCommand === "restart" ? "Restart" : "Start"}</button>` : `<button type="button" class="border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:bg-white hover:text-black" data-action="select-server" data-server-id="${escapeHtml(server.id)}">Open</button>`}<button type="button" class="py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:bg-white hover:text-black" data-action="delete-server" data-server-id="${escapeHtml(server.id)}" data-server-name="${escapeHtml(server.name)}">Delete</button></div></article>`;
+      return `<article class="releu-panel relative overflow-hidden border border-outline bg-surface transition hover:border-zinc-500"><div class="absolute right-0 top-0 p-4"><div class="flex items-center gap-2"><div class="${escapeHtml(presentation.tone.dot)} h-2 w-2 rounded-full"></div><span class="text-[10px] font-bold uppercase tracking-[0.18em] ${escapeHtml(presentation.tone.text)}">${escapeHtml(presentation.label)}</span></div></div><div class="p-6"><div class="flex flex-col gap-4"><div><h3 class="mb-1 text-xl font-semibold tracking-tight text-white">${escapeHtml(server.name)}</h3><p class="font-mono text-[11px] text-zinc-500">${escapeHtml(server.serverDir)}</p></div><div class="flex flex-wrap gap-2"><span class="${C.chip}">Port ${escapeHtml(server.port)}</span><span class="${C.chip}">${escapeHtml(softwareLabel(software))}</span><span class="${C.chip}">${escapeHtml(version)}</span></div><div class="space-y-3 border-t border-zinc-900 pt-4"><div class="flex items-center justify-between"><span class="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">Resource Load</span><span class="font-mono text-[10px] text-white">${escapeHtml(formatPercent(loadWidth))}</span></div><div class="h-1 w-full bg-zinc-900"><div class="releu-progress-fill h-full bg-white" style="width:${Math.max(0, Math.min(100, loadWidth))}%"></div></div><p class="text-xs leading-6 text-zinc-400">${escapeHtml(presentation.detail)}</p></div></div></div><div class="grid grid-cols-3 border-t border-outline"><button type="button" class="releu-button border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black" data-action="select-server" data-server-id="${escapeHtml(server.id)}">${server.jarInstalled ? "Manage" : "Setup"}</button>${secondaryCommand ? `<button type="button" class="releu-button border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black" data-action="quick-server-control" data-server-id="${escapeHtml(server.id)}" data-server-command="${escapeHtml(secondaryCommand)}">${secondaryCommand === "restart" ? "Restart" : "Start"}</button>` : `<button type="button" class="releu-button border-r border-outline py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:bg-white hover:text-black" data-action="select-server" data-server-id="${escapeHtml(server.id)}">Open</button>`}<button type="button" class="releu-button py-3 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:bg-white hover:text-black" data-action="delete-server" data-server-id="${escapeHtml(server.id)}" data-server-name="${escapeHtml(server.name)}">Delete</button></div></article>`;
     })
     .join("");
-  return `<div class="min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto w-full max-w-7xl p-8"><div class="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div class="space-y-2"><p class="${C.label}">Server Selector</p><h1 class="text-3xl font-black tracking-tight text-white">Choose a server or add a new one.</h1><p class="max-w-3xl text-sm text-zinc-400">New servers are created automatically in Local App Data, ports are assigned automatically, and server data is saved automatically to disk.</p></div><div class="flex gap-2"><button type="button" class="flex h-10 w-10 items-center justify-center border border-outline transition hover:bg-surfaceAlt ${ui.managerView === "grid" ? "bg-surface text-white" : "text-zinc-500"}" data-action="toggle-manager-view" data-view="grid">${icon("grid")}</button><button type="button" class="flex h-10 w-10 items-center justify-center border border-outline transition hover:bg-surfaceAlt ${ui.managerView === "list" ? "bg-surface text-white" : "text-zinc-500"}" data-action="toggle-manager-view" data-view="list">${icon("list")}</button></div></div><div class="${gridClass}">${cards}<button type="button" class="group flex min-h-[290px] flex-col items-center justify-center border border-dashed border-outline p-12 text-center transition hover:border-white" data-action="add-server-prompt"><div class="mb-4 text-zinc-500 transition group-hover:text-white">${icon("plus", "h-9 w-9")}</div><span class="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500 transition group-hover:text-white">Add Server</span></button></div></main></div>`;
+  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto w-full max-w-7xl p-8"><div class="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div class="space-y-2"><p class="${C.label}">Server Selector</p><h1 class="text-3xl font-black tracking-tight text-white">Choose a server or add a new one.</h1><p class="max-w-3xl text-sm text-zinc-400">New servers are created automatically in Local App Data, ports are assigned automatically, and server data is saved automatically to disk.</p></div><div class="flex gap-2"><button type="button" class="releu-button flex h-10 w-10 items-center justify-center border border-outline transition hover:bg-surfaceAlt ${ui.managerView === "grid" ? "bg-surface text-white" : "text-zinc-500"}" data-action="toggle-manager-view" data-view="grid">${icon("grid")}</button><button type="button" class="releu-button flex h-10 w-10 items-center justify-center border border-outline transition hover:bg-surfaceAlt ${ui.managerView === "list" ? "bg-surface text-white" : "text-zinc-500"}" data-action="toggle-manager-view" data-view="list">${icon("list")}</button></div></div><div class="${gridClass}">${cards}<button type="button" class="releu-panel group flex min-h-[290px] flex-col items-center justify-center border border-dashed border-outline p-12 text-center transition hover:border-white" data-action="add-server-prompt"><div class="mb-4 text-zinc-500 transition group-hover:text-white">${icon("plus", "h-9 w-9")}</div><span class="text-[10px] font-bold uppercase tracking-[0.22em] text-zinc-500 transition group-hover:text-white">Add Server</span></button></div></main></div>`;
 }
 
 function renderSetupScreen() {
   const server = activeServer();
   const versionOptions = getVersionOptions(ui.installDraft.software, ui.installDraft.version);
-  return `<div class="min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-8"><header class="mb-10"><h1 class="text-3xl font-black uppercase tracking-tight text-white">Server Setup</h1><p class="mt-2 max-w-3xl text-sm text-zinc-400">Configure the software, resource limits, and launcher path. Releu accepts the Minecraft EULA automatically during install.</p></header><div class="grid grid-cols-1 gap-4 md:grid-cols-12"><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Selected Server</h2></div><div class="space-y-6"><div><label class="${C.label} mb-2 block">Server Name</label><p class="text-2xl font-semibold text-white">${escapeHtml(server.name)}</p></div><div><label class="${C.label} mb-2 block">Auto Folder</label><div class="border border-outline bg-black p-4 font-mono text-[11px] text-zinc-300">${escapeHtml(server.serverDir)}</div></div><div class="grid grid-cols-2 gap-4"><div><label class="${C.label} mb-1 block">Port</label><p class="text-sm text-white">${escapeHtml(server.server.properties["server-port"] ?? 25565)}</p></div><div><label class="${C.label} mb-1 block">Backups</label><p class="text-sm text-white">${server.backups.enabled ? `Every ${escapeHtml(server.backups.intervalMinutes)} minutes` : "Disabled"}</p></div></div><div class="space-y-2 border-t border-zinc-900 pt-4 text-xs text-zinc-400"><p>Folders are created in Local App Data automatically.</p></div></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Choose Software</h2></div><div class="grid grid-cols-2 gap-4 lg:grid-cols-4">${softwareChoices().map((option) => { const selected = option.id === ui.installDraft.software; return `<button type="button" class="flex min-h-[148px] flex-col justify-between border ${selected ? "border-white bg-white text-black" : "border-outline bg-black text-white hover:border-zinc-600"} p-4 text-left transition" data-action="pick-software" data-software-id="${escapeHtml(option.id)}"><div class="flex items-start justify-between gap-3"><div class="${selected ? "text-black" : "text-zinc-500"}">${icon(selected ? "server" : "layers", "h-5 w-5")}</div>${selected ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}</div><div class="space-y-2"><div class="text-sm font-bold tracking-tight">${escapeHtml(option.name)}</div><div class="text-[10px] uppercase tracking-[0.18em] ${selected ? "text-zinc-700" : "text-zinc-500"}">${escapeHtml(option.latestHint ?? option.releaseChannel ?? option.id)}</div></div></button>`; }).join("")}</div><label class="flex flex-col gap-2"><span class="${C.label}">Minecraft Version</span><select data-install-field="version" class="w-full border border-outline bg-black px-4 py-3 text-white outline-none transition focus:border-white">${versionOptions.map((version) => `<option value="${escapeHtml(version)}" ${version === ui.installDraft.version ? "selected" : ""}>${escapeHtml(version)}</option>`).join("")}</select></label></section><section class="${C.card} flex flex-col gap-8 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Server Resources</h2></div><div class="grid grid-cols-1 gap-x-12 gap-y-8 md:grid-cols-2"><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Max RAM Allocation</span><span class="font-mono text-sm text-white" data-output="maxRamMb">${escapeHtml(mbToRamString(ui.installDraft.maxRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(runtime.data.host.totalMemoryMb)}" step="256" value="${escapeHtml(ui.installDraft.maxRamMb)}" data-install-field="maxRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Min RAM Allocation</span><span class="font-mono text-sm text-white" data-output="minRamMb">${escapeHtml(mbToRamString(ui.installDraft.minRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(ui.installDraft.maxRamMb)}" step="256" value="${escapeHtml(ui.installDraft.minRamMb)}" data-install-field="minRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">CPU Core Limit</span><span class="font-mono text-sm text-white" data-output="cpuCores">${escapeHtml(ui.installDraft.cpuCores)}</span></div><input type="range" min="1" max="${escapeHtml(runtime.data.host.cpuCores)}" step="1" value="${escapeHtml(ui.installDraft.cpuCores)}" data-install-field="cpuCores" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">GPU Share</span><span class="font-mono text-sm text-white" data-output="gpuShare">${escapeHtml(`${ui.installDraft.gpuShare}%`)}</span></div><input type="range" min="0" max="100" step="5" value="${escapeHtml(ui.installDraft.gpuShare)}" data-install-field="gpuShare" class="w-full accent-white" /></label><label class="space-y-2 md:col-span-2"><span class="${C.label}">Java Executable Path</span><input data-install-field="javaPath" type="text" value="${escapeHtml(ui.installDraft.javaPath)}" class="${C.input} font-mono text-sm" /></label></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Install And Open</h2></div><div class="flex flex-1 flex-col justify-between gap-6"><div class="space-y-4 text-sm text-zinc-300"><p>The server folder already exists, the port is reserved, and backups are ready. Install the selected software to open the full panel.</p><div class="flex items-center gap-3"><div class="h-2 w-2 rounded-full bg-white"></div><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Ready For Install</span></div></div><button type="button" data-action="install-setup" class="w-full border border-white bg-white py-6 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition hover:bg-zinc-200">Install Server</button></div></section></div></main></div>`;
+  const installState = server.server.operation?.active
+    ? {
+        label: server.server.operation.shortLabel ?? server.server.operation.title ?? "Installing",
+        detail: server.server.operation.detail ?? "Releu is installing server software.",
+      }
+    : {
+        label: "Ready For Install",
+        detail: "The server folder already exists, the port is reserved, and backups are ready. Install the selected software to open the full panel.",
+      };
+  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-8"><header class="mb-10"><h1 class="text-3xl font-black uppercase tracking-tight text-white">Server Setup</h1><p class="mt-2 max-w-3xl text-sm text-zinc-400">Configure the software, resource limits, and launcher path. Releu accepts the Minecraft EULA automatically during install.</p></header><div class="grid grid-cols-1 gap-4 md:grid-cols-12"><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Selected Server</h2></div><div class="space-y-6"><div><label class="${C.label} mb-2 block">Server Name</label><p class="text-2xl font-semibold text-white">${escapeHtml(server.name)}</p></div><div><label class="${C.label} mb-2 block">Auto Folder</label><div class="border border-outline bg-black p-4 font-mono text-[11px] text-zinc-300">${escapeHtml(server.serverDir)}</div></div><div class="grid grid-cols-2 gap-4"><div><label class="${C.label} mb-1 block">Port</label><p class="text-sm text-white">${escapeHtml(server.server.properties["server-port"] ?? 25565)}</p></div><div><label class="${C.label} mb-1 block">Backups</label><p class="text-sm text-white">${server.backups.enabled ? `Every ${escapeHtml(server.backups.intervalMinutes)} minutes` : "Disabled"}</p></div></div><div class="space-y-2 border-t border-zinc-900 pt-4 text-xs text-zinc-400"><p>Folders are created in Local App Data automatically.</p></div></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Choose Software</h2></div><div class="grid grid-cols-2 gap-4 lg:grid-cols-4">${softwareChoices().map((option) => { const selected = option.id === ui.installDraft.software; return `<button type="button" class="releu-button flex min-h-[148px] flex-col justify-between border ${selected ? "border-white bg-white text-black" : "border-outline bg-black text-white hover:border-zinc-600"} p-4 text-left transition" data-action="pick-software" data-software-id="${escapeHtml(option.id)}"><div class="flex items-start justify-between gap-3"><div class="${selected ? "text-black" : "text-zinc-500"}">${icon(selected ? "server" : "layers", "h-5 w-5")}</div>${selected ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}</div><div class="space-y-2"><div class="text-sm font-bold tracking-tight">${escapeHtml(option.name)}</div><div class="text-[10px] uppercase tracking-[0.18em] ${selected ? "text-zinc-700" : "text-zinc-500"}">${escapeHtml(option.latestHint ?? option.releaseChannel ?? option.id)}</div></div></button>`; }).join("")}</div><label class="flex flex-col gap-2"><span class="${C.label}">Minecraft Version</span><select data-install-field="version" class="w-full border border-outline bg-black px-4 py-3 text-white outline-none transition focus:border-white">${versionOptions.map((version) => `<option value="${escapeHtml(version)}" ${version === ui.installDraft.version ? "selected" : ""}>${escapeHtml(version)}</option>`).join("")}</select></label></section><section class="${C.card} flex flex-col gap-8 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Server Resources</h2></div><div class="grid grid-cols-1 gap-x-12 gap-y-8 md:grid-cols-2"><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Max RAM Allocation</span><span class="font-mono text-sm text-white" data-output="maxRamMb">${escapeHtml(mbToRamString(ui.installDraft.maxRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(runtime.data.host.totalMemoryMb)}" step="256" value="${escapeHtml(ui.installDraft.maxRamMb)}" data-install-field="maxRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Min RAM Allocation</span><span class="font-mono text-sm text-white" data-output="minRamMb">${escapeHtml(mbToRamString(ui.installDraft.minRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(ui.installDraft.maxRamMb)}" step="256" value="${escapeHtml(ui.installDraft.minRamMb)}" data-install-field="minRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">CPU Core Limit</span><span class="font-mono text-sm text-white" data-output="cpuCores">${escapeHtml(ui.installDraft.cpuCores)}</span></div><input type="range" min="1" max="${escapeHtml(runtime.data.host.cpuCores)}" step="1" value="${escapeHtml(ui.installDraft.cpuCores)}" data-install-field="cpuCores" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">GPU Share</span><span class="font-mono text-sm text-white" data-output="gpuShare">${escapeHtml(`${ui.installDraft.gpuShare}%`)}</span></div><input type="range" min="0" max="100" step="5" value="${escapeHtml(ui.installDraft.gpuShare)}" data-install-field="gpuShare" class="w-full accent-white" /></label><label class="space-y-2 md:col-span-2"><span class="${C.label}">Java Executable Path</span><input data-install-field="javaPath" type="text" value="${escapeHtml(ui.installDraft.javaPath)}" class="${C.input} font-mono text-sm" /></label></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Install And Open</h2></div><div class="flex flex-1 flex-col justify-between gap-6"><div class="space-y-4 text-sm text-zinc-300"><p>${escapeHtml(installState.detail)}</p><div class="flex items-center gap-3"><div class="h-2 w-2 rounded-full ${server.server.operation?.active ? "bg-zinc-300" : "bg-white"}"></div><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">${escapeHtml(installState.label)}</span></div></div><button type="button" data-action="install-setup" class="w-full border border-white bg-white py-6 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition hover:bg-zinc-200">${escapeHtml(server.server.operation?.active ? (server.server.operation.shortLabel ?? "Installing") : "Install Server")}</button></div></section></div></main></div>`;
 }
 
 function renderOverviewSection(server) {
@@ -709,17 +842,137 @@ function renderOverviewSection(server) {
   const ramLeftMb = Math.max(0, Number(metrics.ramLeftMb ?? ramMaxMb - ramUsedMb));
   const loadPercent = Math.max(cpuPercent, ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0);
   const world = currentWorld(server)?.name ?? server.server.properties["level-name"] ?? "world";
-  const status = formatStatus(server.server.status);
+  const status = serverStatusPresentation(server);
   const players = server.players?.filter((entry) => entry.online).slice(0, 5) ?? [];
   const ipAction = playitMinecraftIp()
     ? `<button type="button" class="${C.btnGhost}" data-action="copy-address">Copy IP</button>`
-    : "";
-  return `<section class="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div class="space-y-2"><div class="flex items-center gap-3"><span class="h-2 w-2 rounded-full ${escapeHtml(statusTone(server.server.status).dot)}"></span><p class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">System Status: ${escapeHtml(status)}</p></div><h1 class="text-4xl font-black uppercase tracking-tight text-white">${escapeHtml(server.name)}</h1></div><div class="flex flex-wrap gap-2"><button type="button" class="${C.btnPrimary}" data-action="server-control" data-server-command="start">Start</button><button type="button" class="${C.btnGhost}" data-action="server-control" data-server-command="stop">Stop</button><button type="button" class="${C.btnGhost}" data-action="server-control" data-server-command="restart">Restart</button><button type="button" class="border border-outline px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:border-white hover:text-white" data-action="server-control" data-server-command="kill">Force Kill</button></div></section><section class="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">${renderTile("Minecraft IP", joinState.value, joinState.detail)}${renderTile("Server Load", formatPercent(loadPercent), cpuPercent ? `CPU ${formatPercent(cpuPercent)}` : "Waiting for live stats")}${renderTile("Active Players", `${server.server.playerCount} / ${playerCapacity(server)}`, players.length ? `${players.length} online right now` : "No players online")}${renderTile("RAM Left", formatMemoryFromMb(ramLeftMb), `Used ${formatMemoryFromMb(ramUsedMb)} of ${formatMemoryFromMb(ramMaxMb)}`)}${renderTile("Software", softwareLabel(server.install.installedSoftware ?? server.install.software ?? "purpur"), server.install.installedVersion ?? server.install.requestedVersion ?? "latest")}${renderTile("Port", server.server.properties["server-port"] ?? 25565, "Auto-selected and saved")}${renderTile("Active World", world, `${worldCount(server)} world folder(s) detected`)}${renderTile("Backups", server.backups.enabled ? `Every ${server.backups.intervalMinutes} min` : "Disabled", server.backups.lastBackupAt ? `Last ${formatTimestamp(server.backups.lastBackupAt)}` : "No backups yet")}</section><section class="grid grid-cols-1 gap-4 md:grid-cols-12"><div class="${C.card} md:col-span-8"><div class="mb-6 flex items-start justify-between gap-4"><h2 class="${C.label} text-white">Server Load</h2><span class="font-mono text-sm text-white">${escapeHtml(formatPercent(loadPercent))} Peak</span></div><div class="space-y-4"><div class="space-y-2"><div class="flex items-center justify-between font-mono text-[10px] text-zinc-500"><span>CPU Utilization</span><span class="text-white">${escapeHtml(formatPercent(cpuPercent))}</span></div><div class="h-1 w-full bg-outline"><div class="h-full bg-white" style="width:${Math.max(0, Math.min(100, cpuPercent))}%"></div></div></div><div class="space-y-2"><div class="flex items-center justify-between font-mono text-[10px] text-zinc-500"><span>Memory Pressure</span><span class="text-white">${escapeHtml(ramMaxMb ? formatPercent((ramUsedMb / ramMaxMb) * 100) : "--")}</span></div><div class="h-1 w-full bg-outline"><div class="h-full bg-white" style="width:${Math.max(0, Math.min(100, ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0))}%"></div></div></div></div><div class="mt-10 flex h-32 items-end gap-1">${buildLoadBars(loadPercent)}</div></div><div class="space-y-4 md:col-span-4"><div class="${C.card}"><h2 class="${C.label} mb-4 text-white">Minecraft IP</h2><div class="space-y-4"><code class="block break-all text-xl font-semibold text-white">${escapeHtml(joinState.value)}</code><p class="text-sm text-zinc-400">${escapeHtml(joinState.detail)}</p>${ipAction ? `<div class="flex flex-wrap gap-2">${ipAction}</div>` : ""}</div></div><div class="${C.card}"><h2 class="${C.label} mb-4 text-white">Active Players</h2><div class="mb-4 flex items-baseline gap-2"><span class="text-4xl font-black tracking-tight text-white">${escapeHtml(server.server.playerCount)}</span><span class="text-xl font-bold text-zinc-500">/ ${escapeHtml(playerCapacity(server))}</span></div><div class="space-y-3">${players.length ? players.map((player) => `<div class="flex items-center justify-between font-mono text-[11px]"><span class="text-white">${escapeHtml(player.name)}</span><span class="text-zinc-500">${player.op ? "OP" : player.whitelisted ? "WL" : "Player"}</span></div>`).join("") : `<div class="text-sm text-zinc-500">No players are online.</div>`}</div></div></div><div class="border border-outline bg-black md:col-span-12"><div class="flex items-center justify-between border-b border-outline bg-surface px-4 py-3"><h2 class="${C.labelOn}">Console Stream</h2><button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="console">Open Console</button></div><pre data-role="console-output" class="h-64 overflow-y-auto whitespace-pre-wrap p-6 font-mono text-xs text-zinc-300">${escapeHtml(runtime.consoleText || "Console output will appear here once the server starts.")}</pre></div></section>`;
+    : joinState.value === "No Tunnel Assigned Yet"
+      ? `<button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="settings">Fix Tunnel</button>`
+      : "";
+  const publicStatusLabel =
+    playitMinecraftIp() ? "Live" : joinState.value === "No Tunnel Assigned Yet" ? "No Tunnel" : "Pending";
+  const memoryPercent = ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0;
+  const startDisabled = server.server.status === "running" || server.server.status === "starting";
+  const stopDisabled = server.server.status === "stopped" || server.server.status === "stopping";
+  const restartDisabled = server.server.status !== "running";
+  const killDisabled = !server.server.pid;
+  const actionButtonClass = (primary, disabled = false) =>
+    [
+      primary ? C.btnPrimary : C.btnGhost,
+      disabled ? "cursor-not-allowed opacity-40 hover:bg-inherit hover:text-inherit" : "",
+    ].join(" ");
+  const actionButton = (command, label, primary, disabled = false) =>
+    `<button type="button" class="${actionButtonClass(primary, disabled)}" data-action="server-control" data-server-command="${escapeHtml(command)}" ${disabled ? "disabled" : ""}>${escapeHtml(label)}</button>`;
+
+  const summaryTiles = [
+    renderTile("Minecraft IP", joinState.value, joinState.detail),
+    renderTile("Status", status.label, status.detail),
+    renderTile(
+      "Resource Load",
+      formatPercent(loadPercent),
+      `CPU ${formatPercent(cpuPercent)} / Memory ${formatPercent(memoryPercent)}`,
+    ),
+    renderTile(
+      "Active Players",
+      `${server.server.playerCount} / ${playerCapacity(server)}`,
+      players.length ? `${players.length} online right now` : "No players online",
+    ),
+    renderTile("RAM Left", formatMemoryFromMb(ramLeftMb), `Used ${formatMemoryFromMb(ramUsedMb)} of ${formatMemoryFromMb(ramMaxMb)}`),
+    renderTile(
+      "Software",
+      softwareLabel(server.install.installedSoftware ?? server.install.software ?? "purpur"),
+      server.install.installedVersion ?? server.install.requestedVersion ?? "latest",
+    ),
+    renderTile("Port", server.server.properties["server-port"] ?? 25565, "Auto-selected and saved"),
+    renderTile("Active World", world, `${worldCount(server)} world folder(s) detected`),
+  ].join("");
+
+  const playerRows = players.length
+    ? players
+        .map(
+          (player) => `<div class="flex items-center justify-between font-mono text-[11px]">
+              <span class="text-white">${escapeHtml(player.name)}</span>
+              <span class="text-zinc-500">${player.op ? "OP" : player.whitelisted ? "WL" : "Player"}</span>
+            </div>`,
+        )
+        .join("")
+    : `<div class="text-sm text-zinc-500">No players are online.</div>`;
+
+  return `<section class="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+      <div class="space-y-2">
+        <div class="flex items-center gap-3">
+          <span class="h-2 w-2 rounded-full ${escapeHtml(status.tone.dot)}"></span>
+          <p class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">System Status: ${escapeHtml(status.label)}</p>
+        </div>
+        <h1 class="text-4xl font-black uppercase tracking-tight text-white">${escapeHtml(server.name)}</h1>
+        <p class="max-w-3xl text-sm leading-7 text-zinc-400">${escapeHtml(status.detail)}</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        ${actionButton("start", server.server.status === "starting" ? "Starting..." : "Start", true, startDisabled)}
+        ${actionButton("stop", server.server.status === "stopping" ? "Stopping..." : "Stop", false, stopDisabled)}
+        ${actionButton("restart", "Restart", false, restartDisabled)}
+        ${actionButton("kill", "Force Kill", false, killDisabled)}
+      </div>
+    </section>
+    <section class="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">${summaryTiles}</section>
+    <section class="grid grid-cols-1 gap-4 md:grid-cols-12">
+      <div class="${C.card} md:col-span-8">
+        <div class="mb-6 flex items-start justify-between gap-4">
+          <h2 class="${C.label} text-white">Server Load</h2>
+          <span class="font-mono text-sm text-white">${escapeHtml(formatPercent(loadPercent))}</span>
+        </div>
+        <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <article class="border border-outline bg-black p-4">
+            <div class="${C.label} mb-3">CPU Utilization</div>
+            <div class="mb-2 text-2xl font-black tracking-tight text-white">${escapeHtml(formatPercent(cpuPercent))}</div>
+            <p class="text-xs leading-6 text-zinc-400">Live process usage from the running Minecraft server.</p>
+          </article>
+          <article class="border border-outline bg-black p-4">
+            <div class="${C.label} mb-3">Memory Pressure</div>
+            <div class="mb-2 text-2xl font-black tracking-tight text-white">${escapeHtml(formatPercent(memoryPercent))}</div>
+            <p class="text-xs leading-6 text-zinc-400">Using ${escapeHtml(formatMemoryFromMb(ramUsedMb))} out of ${escapeHtml(formatMemoryFromMb(ramMaxMb))}.</p>
+          </article>
+          <article class="border border-outline bg-black p-4">
+            <div class="${C.label} mb-3">Public Access</div>
+            <div class="mb-2 text-2xl font-black tracking-tight text-white">${escapeHtml(publicStatusLabel)}</div>
+            <p class="text-xs leading-6 text-zinc-400">${escapeHtml(joinState.detail)}</p>
+          </article>
+        </div>
+      </div>
+      <div class="space-y-4 md:col-span-4">
+        <div class="${C.card}">
+          <h2 class="${C.label} mb-4 text-white">Minecraft IP</h2>
+          <div class="space-y-4">
+            <code class="block break-all text-xl font-semibold text-white">${escapeHtml(joinState.value)}</code>
+            <p class="text-sm leading-7 text-zinc-400">${escapeHtml(joinState.detail)}</p>
+            ${ipAction ? `<div class="flex flex-wrap gap-2">${ipAction}</div>` : ""}
+          </div>
+        </div>
+        <div class="${C.card}">
+          <h2 class="${C.label} mb-4 text-white">Active Players</h2>
+          <div class="mb-4 flex items-baseline gap-2">
+            <span class="text-4xl font-black tracking-tight text-white">${escapeHtml(server.server.playerCount)}</span>
+            <span class="text-xl font-bold text-zinc-500">/ ${escapeHtml(playerCapacity(server))}</span>
+          </div>
+          <div class="space-y-3">${playerRows}</div>
+        </div>
+      </div>
+      <div class="border border-outline bg-black md:col-span-12">
+        <div class="flex items-center justify-between border-b border-outline bg-surface px-4 py-3">
+          <h2 class="${C.labelOn}">Console Stream</h2>
+          <button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="console">Open Console</button>
+        </div>
+        <pre data-role="console-output" class="h-64 overflow-y-auto whitespace-pre-wrap p-6 font-mono text-xs text-zinc-300">${escapeHtml(runtime.consoleText || "Console output will appear here once the server starts.")}</pre>
+      </div>
+    </section>`;
 }
 
 function renderSoftwareSection(server) {
   const versionOptions = getVersionOptions(ui.installDraft.software, ui.installDraft.version);
-  return `<div class="grid grid-cols-1 gap-8 xl:grid-cols-2"><section class="flex flex-col gap-6"><div class="flex items-center justify-between border-b border-zinc-900 pb-4"><h2 class="${C.labelOn}">Software / Version And Loader</h2><div class="text-zinc-600">${icon("layers")}</div></div><div class="grid grid-cols-2 gap-4">${softwareChoices().map((option) => { const selected = option.id === ui.installDraft.software; return `<button type="button" class="flex min-h-[148px] flex-col justify-between border ${selected ? "border-white bg-white text-black" : "border-outline bg-black text-white hover:border-zinc-600"} p-4 text-left transition" data-action="pick-software" data-software-id="${escapeHtml(option.id)}"><div class="flex items-start justify-between gap-3"><div class="${selected ? "text-black" : "text-zinc-500"}">${icon(selected ? "server" : "layers", "h-5 w-5")}</div>${selected ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}</div><div class="space-y-2"><div class="text-sm font-bold tracking-tight">${escapeHtml(option.name)}</div><div class="text-[10px] uppercase tracking-[0.18em] ${selected ? "text-zinc-700" : "text-zinc-500"}">${escapeHtml(option.latestHint ?? option.releaseChannel ?? option.id)}</div></div></button>`; }).join("")}</div><form data-form="software-install" class="space-y-4"><label class="flex flex-col gap-2"><span class="${C.label}">Minecraft Version</span><select data-install-field="version" class="w-full border border-outline bg-black px-4 py-3 text-white outline-none transition focus:border-white">${versionOptions.map((version) => `<option value="${escapeHtml(version)}" ${version === ui.installDraft.version ? "selected" : ""}>${escapeHtml(version)}</option>`).join("")}</select></label><button type="submit" class="w-full ${C.btnPrimary} py-4">Install / Update Software</button></form></section><section class="flex flex-col gap-6"><div class="flex items-center justify-between border-b border-zinc-900 pb-4"><h2 class="${C.labelOn}">Resources / Limit Management</h2><div class="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500"><span class="h-2 w-2 rounded-full bg-white"></span><span>${escapeHtml(formatStatus(server.server.status))}</span></div></div><form data-form="runtime-settings" class="space-y-8 py-2"><label class="space-y-4"><div class="flex items-end justify-between"><span class="${C.label}">Max RAM Allocation</span><span class="font-mono text-sm text-white" data-output="maxRamMb">${escapeHtml(mbToRamString(ui.installDraft.maxRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(runtime.data.host.totalMemoryMb)}" step="256" value="${escapeHtml(ui.installDraft.maxRamMb)}" data-install-field="maxRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-end justify-between"><span class="${C.label}">Min RAM</span><span class="font-mono text-sm text-white" data-output="minRamMb">${escapeHtml(mbToRamString(ui.installDraft.minRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(ui.installDraft.maxRamMb)}" step="256" value="${escapeHtml(ui.installDraft.minRamMb)}" data-install-field="minRamMb" class="w-full accent-white" /></label><div class="grid grid-cols-1 gap-8 md:grid-cols-2"><label class="space-y-4"><div class="flex items-end justify-between"><span class="${C.label}">CPU Cores</span><span class="font-mono text-sm text-white" data-output="cpuCores">${escapeHtml(ui.installDraft.cpuCores)}</span></div><input type="range" min="1" max="${escapeHtml(runtime.data.host.cpuCores)}" step="1" value="${escapeHtml(ui.installDraft.cpuCores)}" data-install-field="cpuCores" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-end justify-between"><span class="${C.label}">GPU Share</span><span class="font-mono text-sm text-white" data-output="gpuShare">${escapeHtml(`${ui.installDraft.gpuShare}%`)}</span></div><input type="range" min="0" max="100" step="5" value="${escapeHtml(ui.installDraft.gpuShare)}" data-install-field="gpuShare" class="w-full accent-white" /></label></div><label class="space-y-2"><span class="${C.label}">Java Executable Path</span><input data-install-field="javaPath" type="text" value="${escapeHtml(ui.installDraft.javaPath)}" class="${C.input} font-mono text-sm" /></label><button type="submit" class="w-full ${C.btnPrimary} py-4">Save Resource Limits</button></form></section></div>`;
+  const installButtonLabel = server.server.operation?.active
+    ? server.server.operation.shortLabel ?? "Installing"
+    : "Install / Update Software";
+  return `<div class="grid grid-cols-1 gap-8 xl:grid-cols-2"><section class="flex flex-col gap-6"><div class="flex items-center justify-between border-b border-zinc-900 pb-4"><h2 class="${C.labelOn}">Software / Version And Loader</h2><div class="text-zinc-600">${icon("layers")}</div></div><div class="grid grid-cols-2 gap-4">${softwareChoices().map((option) => { const selected = option.id === ui.installDraft.software; return `<button type="button" class="flex min-h-[148px] flex-col justify-between border ${selected ? "border-white bg-white text-black" : "border-outline bg-black text-white hover:border-zinc-600"} p-4 text-left transition" data-action="pick-software" data-software-id="${escapeHtml(option.id)}"><div class="flex items-start justify-between gap-3"><div class="${selected ? "text-black" : "text-zinc-500"}">${icon(selected ? "server" : "layers", "h-5 w-5")}</div>${selected ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}</div><div class="space-y-2"><div class="text-sm font-bold tracking-tight">${escapeHtml(option.name)}</div><div class="text-[10px] uppercase tracking-[0.18em] ${selected ? "text-zinc-700" : "text-zinc-500"}">${escapeHtml(option.latestHint ?? option.releaseChannel ?? option.id)}</div></div></button>`; }).join("")}</div><form data-form="software-install" class="space-y-4"><label class="flex flex-col gap-2"><span class="${C.label}">Minecraft Version</span><select data-install-field="version" class="w-full border border-outline bg-black px-4 py-3 text-white outline-none transition focus:border-white">${versionOptions.map((version) => `<option value="${escapeHtml(version)}" ${version === ui.installDraft.version ? "selected" : ""}>${escapeHtml(version)}</option>`).join("")}</select></label><button type="submit" class="w-full ${C.btnPrimary} py-4">${escapeHtml(installButtonLabel)}</button></form></section><section class="flex flex-col gap-6"><div class="flex items-center justify-between border-b border-zinc-900 pb-4"><h2 class="${C.labelOn}">Resources / Limit Management</h2><div class="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500"><span class="h-2 w-2 rounded-full bg-white"></span><span>${escapeHtml(formatStatus(server.server.status))}</span></div></div><form data-form="runtime-settings" class="space-y-8 py-2"><label class="space-y-4"><div class="flex items-end justify-between"><span class="${C.label}">Max RAM Allocation</span><span class="font-mono text-sm text-white" data-output="maxRamMb">${escapeHtml(mbToRamString(ui.installDraft.maxRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(runtime.data.host.totalMemoryMb)}" step="256" value="${escapeHtml(ui.installDraft.maxRamMb)}" data-install-field="maxRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-end justify-between"><span class="${C.label}">Min RAM</span><span class="font-mono text-sm text-white" data-output="minRamMb">${escapeHtml(mbToRamString(ui.installDraft.minRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(ui.installDraft.maxRamMb)}" step="256" value="${escapeHtml(ui.installDraft.minRamMb)}" data-install-field="minRamMb" class="w-full accent-white" /></label><div class="grid grid-cols-1 gap-8 md:grid-cols-2"><label class="space-y-4"><div class="flex items-end justify-between"><span class="${C.label}">CPU Cores</span><span class="font-mono text-sm text-white" data-output="cpuCores">${escapeHtml(ui.installDraft.cpuCores)}</span></div><input type="range" min="1" max="${escapeHtml(runtime.data.host.cpuCores)}" step="1" value="${escapeHtml(ui.installDraft.cpuCores)}" data-install-field="cpuCores" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-end justify-between"><span class="${C.label}">GPU Share</span><span class="font-mono text-sm text-white" data-output="gpuShare">${escapeHtml(`${ui.installDraft.gpuShare}%`)}</span></div><input type="range" min="0" max="100" step="5" value="${escapeHtml(ui.installDraft.gpuShare)}" data-install-field="gpuShare" class="w-full accent-white" /></label></div><label class="space-y-2"><span class="${C.label}">Java Executable Path</span><input data-install-field="javaPath" type="text" value="${escapeHtml(ui.installDraft.javaPath)}" class="${C.input} font-mono text-sm" /></label><button type="submit" class="w-full ${C.btnPrimary} py-4">Save Resource Limits</button></form></section></div>`;
 }
 
 function renderConsoleSection(server) {
@@ -770,7 +1023,9 @@ function renderSettingsSection(server) {
     ? `<button type="button" class="${C.btnPrimary}" data-action="playit-connect">Connect Playit Agent</button>`
     : playit.claimWaiting
       ? `<a class="${C.btnPrimary}" href="${escapeHtml(playit.claimUrl ?? playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Finish Playit Link</a>`
-      : `<a class="${C.btnPrimary}" href="${escapeHtml(playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open playit.gg Dashboard</a>`;
+      : playit.needsWebSetup || Number(playit.configuredTunnelCount ?? 0) === 0
+        ? `<a class="${C.btnPrimary}" href="${escapeHtml(playit.newTunnelUrl ?? playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Create Tunnel</a>`
+        : `<a class="${C.btnPrimary}" href="${escapeHtml(playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Tunnel Dashboard</a>`;
   return `<div class="grid grid-cols-12 gap-4">
     <section class="${C.card} col-span-12 lg:col-span-8">
       <div class="mb-6">
@@ -821,6 +1076,7 @@ function renderSettingsSection(server) {
         <p class="mt-2 text-sm text-zinc-400">${escapeHtml(joinState.detail)}</p>
         <div class="mt-4 flex flex-wrap gap-2">
           ${playitAction}
+          ${playit.secretConfigured ? `<a class="${C.btnGhost}" href="${escapeHtml(playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Dashboard</a>` : ""}
           ${playitMinecraftIp() ? `<button type="button" class="${C.btnGhost}" data-action="copy-address">Copy IP</button>` : ""}
         </div>
       </div>
@@ -904,7 +1160,7 @@ function renderPanelScreen() {
       : ui.section === "backups" ? renderBackupsSection(server)
       : ui.section === "settings" ? renderSettingsSection(server)
       : "";
-  return `<div class="min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-6 lg:p-8">${content || renderOverviewSection(server)}</main></div>`;
+  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-6 lg:p-8">${content || renderOverviewSection(server)}</main></div>`;
 }
 
 function render() {
@@ -931,13 +1187,20 @@ function render() {
   if (!server || ui.screen === "manager") page = renderManagerScreen();
   else if (!server.setupComplete || ui.screen === "setup") page = renderSetupScreen(server);
   else page = renderPanelScreen(server);
-  app.innerHTML = `${page}${renderModal()}`;
+  app.innerHTML = `${page}${renderModal()}${renderOperationOverlay()}`;
   updateConsoleElement();
   if (ui.modal?.type === "create-server" && ui.modal.justOpened) {
     const input = document.querySelector('[data-modal-input="server-name"]');
     input?.focus();
-    input?.select();
+    const currentLength = input?.value?.length ?? 0;
+    input?.setSelectionRange?.(currentLength, currentLength);
     ui.modal.justOpened = false;
+  } else if (ui.modal?.type === "create-server") {
+    const input = document.querySelector('[data-modal-input="server-name"]');
+    if (input && document.activeElement !== input && typeof ui.modal.selectionStart === "number") {
+      input.focus();
+      input.setSelectionRange?.(ui.modal.selectionStart, ui.modal.selectionEnd ?? ui.modal.selectionStart);
+    }
   }
 }
 
@@ -1072,6 +1335,114 @@ async function installSelectedSoftware() {
   });
 }
 
+async function trackServerOperationWhile(promise, fallbackOperation) {
+  let settled = false;
+  let result;
+  let failure;
+
+  promise
+    .then((payload) => {
+      result = payload;
+    })
+    .catch((error) => {
+      failure = error;
+    })
+    .finally(() => {
+      settled = true;
+    });
+
+  while (!settled) {
+    await sleep(900);
+    try {
+      const serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? null;
+      const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
+      const payload = await api(`/api/state${query}`);
+      runtime.data = payload.state;
+      syncInstallDraft();
+      const operation = activeServer()?.server?.operation;
+      setUiOperation(
+        operation?.active
+          ? {
+              tone: operation.type ?? fallbackOperation.tone ?? "working",
+              title: operation.title ?? fallbackOperation.title,
+              detail: operation.detail ?? fallbackOperation.detail,
+            }
+          : fallbackOperation,
+      );
+    } catch {
+      setUiOperation(fallbackOperation);
+    }
+  }
+
+  if (failure) throw failure;
+  return result;
+}
+
+async function performSetupInstall() {
+  setUiOperation({
+    tone: "install",
+    title: "Preparing Server Install",
+    detail: "Saving the selected runtime limits and launcher settings.",
+  });
+
+  try {
+    await saveRuntimeSettings();
+    setUiOperation({
+      tone: "install",
+      title: "Installing Server Software",
+      detail: `Downloading and installing ${softwareLabel(ui.installDraft.software)} ${ui.installDraft.version}.`,
+    });
+
+    const installPromise = api(activeServerPath("/install/server"), {
+      method: "POST",
+      body: {
+        software: ui.installDraft.software,
+        version: ui.installDraft.version,
+        acceptEula: true,
+      },
+    });
+    const payload = await trackServerOperationWhile(installPromise, {
+      tone: "install",
+      title: "Installing Server Software",
+      detail: `Downloading and installing ${softwareLabel(ui.installDraft.software)} ${ui.installDraft.version}.`,
+    });
+    runtime.data = payload.state;
+    ui.screen = "panel";
+    ui.section = "server";
+    await refreshLogs();
+  } finally {
+    clearUiOperation();
+  }
+}
+
+async function performSoftwareUpdate() {
+  setUiOperation({
+    tone: "install",
+    title: "Updating Server Software",
+    detail: `Downloading and installing ${softwareLabel(ui.installDraft.software)} ${ui.installDraft.version}.`,
+  });
+
+  try {
+    const installPromise = api(activeServerPath("/install/server"), {
+      method: "POST",
+      body: {
+        software: ui.installDraft.software,
+        version: ui.installDraft.version,
+        acceptEula: true,
+      },
+    });
+    const payload = await trackServerOperationWhile(installPromise, {
+      tone: "install",
+      title: "Updating Server Software",
+      detail: `Downloading and installing ${softwareLabel(ui.installDraft.software)} ${ui.installDraft.version}.`,
+    });
+    runtime.data = payload.state;
+    await refreshLogs();
+  } finally {
+    clearUiOperation();
+  }
+}
+
 async function runServerControl(command) {
   await api(activeServerPath(`/server/${command}`), { method: "POST" });
   await refreshState();
@@ -1112,6 +1483,7 @@ async function handleAction(event) {
   const button = event.target.closest("[data-action]");
   if (!button) return;
   event.preventDefault();
+  if (isUiLocked()) return;
   try {
     switch (button.dataset.action) {
       case "go-manager":
@@ -1171,18 +1543,13 @@ async function handleAction(event) {
         render();
         break;
       case "install-setup":
-        await saveRuntimeSettings();
-        await installSelectedSoftware();
-        await refreshState();
-        ui.screen = "panel";
-        ui.section = "server";
-        await refreshLogs();
+        await performSetupInstall();
         break;
       case "server-control":
         await runServerControl(button.dataset.serverCommand);
         break;
       case "copy-address":
-        if (!playitMinecraftIp()) throw new Error(runtime.data?.playit?.secretConfigured ? "Run Server To Get Address." : "Link playit.gg once first.");
+        if (!playitMinecraftIp()) throw new Error(runtime.data?.playit?.secretConfigured ? "No public join address is available yet." : "Link playit.gg once first.");
         await copyText(playitMinecraftIp());
         break;
       case "delete-server": {
@@ -1293,6 +1660,7 @@ async function handleSubmit(event) {
   const form = event.target.closest("form[data-form]");
   if (!form) return;
   event.preventDefault();
+  if (isUiLocked()) return;
   try {
     switch (form.dataset.form) {
       case "create-server-modal": {
@@ -1332,9 +1700,7 @@ async function handleSubmit(event) {
         break;
       }
       case "software-install":
-        await installSelectedSoftware();
-        await refreshState();
-        await refreshLogs();
+        await performSoftwareUpdate();
         break;
       case "world-select":
         await api(activeServerPath("/worlds/select"), { method: "POST", body: { name: form.elements.name.value } });
@@ -1453,6 +1819,8 @@ async function handleSubmit(event) {
 function handleInput(event) {
   if (event.target?.dataset?.modalInput === "server-name" && ui.modal?.type === "create-server") {
     ui.modal.name = event.target.value;
+    ui.modal.selectionStart = event.target.selectionStart ?? ui.modal.name.length;
+    ui.modal.selectionEnd = event.target.selectionEnd ?? ui.modal.name.length;
   }
   updateInstallDraftField(event.target);
 }
@@ -1462,6 +1830,38 @@ function handleKeydown(event) {
     event.preventDefault();
     closeModal();
   }
+}
+
+function scheduleLogsPolling() {
+  if (logsPollTimer) {
+    window.clearTimeout(logsPollTimer);
+  }
+  logsPollTimer = window.setTimeout(async () => {
+    try {
+      if (!isCreateServerModalOpen()) {
+        await refreshLogs();
+      }
+    } catch (error) {
+      console.error(error);
+    }
+    scheduleLogsPolling();
+  }, currentLogPollMs());
+}
+
+function scheduleStatePolling() {
+  if (statePollTimer) {
+    window.clearTimeout(statePollTimer);
+  }
+  statePollTimer = window.setTimeout(async () => {
+    try {
+      if (!isCreateServerModalOpen()) {
+        await refreshState();
+      }
+    } catch (error) {
+      console.error(error);
+    }
+    scheduleStatePolling();
+  }, currentStatePollMs());
 }
 
 async function boot() {
@@ -1475,12 +1875,8 @@ async function boot() {
   await ensureDependenciesReady();
   await refreshState();
   await runStartupAppUpdateCheck();
-  window.setInterval(() => {
-    refreshLogs().catch((error) => console.error(error));
-  }, LOG_POLL_MS);
-  window.setInterval(() => {
-    refreshState().catch((error) => console.error(error));
-  }, STATE_POLL_MS);
+  scheduleLogsPolling();
+  scheduleStatePolling();
 }
 
 boot().catch((error) => {
