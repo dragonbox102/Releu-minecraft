@@ -73,7 +73,7 @@ for ($i = 0; $i -lt 40; $i++) {
 }
 
 Remove-Item -LiteralPath $StagedExe -Force -ErrorAction SilentlyContinue
-Start-Process -FilePath $CurrentExe
+Start-Process -FilePath $CurrentExe -WorkingDirectory (Split-Path -Parent $CurrentExe)
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 `.trim();
 
@@ -167,7 +167,12 @@ function schedulePortableUpdate(stagedPath) {
   }
 
   if (process.platform === "win32") {
-    scheduleWindowsPortableUpdate(process.execPath, resolvedStagedPath);
+    const targetExePath = path.resolve(
+      process.env.PORTABLE_EXECUTABLE_FILE ||
+      process.env.PORTABLE_EXECUTABLE_PATH ||
+      process.execPath,
+    );
+    scheduleWindowsPortableUpdate(targetExePath, resolvedStagedPath);
     return;
   }
 
