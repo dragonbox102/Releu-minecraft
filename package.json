@@ -1,0 +1,66 @@
+{
+  "name": "minecraft-server",
+  "version": "1.0.0",
+  "description": "Localhost Minecraft control panel with multi-server, playit.gg, and addon catalog support",
+  "bin": "src/app.js",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "node src/app.js",
+    "start:desktop": "node scripts/start-desktop.cjs",
+    "test": "node --check src/app.js && node --check public/app.js && node --check electron/main.cjs && node --check electron/preload.cjs",
+    "build:exe": "electron-builder --win portable"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.6.0",
+    "electron": "^37.1.0",
+    "electron-builder": "^26.0.12"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*"
+    ]
+  },
+  "build": {
+    "appId": "local.minecraft.panel",
+    "productName": "Releu-minecraft",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "public/**/*",
+      "scripts/**/*",
+      "src/**/*",
+      "package.json",
+      "!data/**/*",
+      "!servers/**/*",
+      "!server/**/*",
+      "!backups/**/*",
+      "!tools/**/*",
+      "!dist/**/*",
+      "!MinecraftPanel.exe",
+      "!Releu.exe",
+      "!Releu-minecraft.exe",
+      "!*.zip"
+    ],
+    "asar": true,
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
+  }
+}

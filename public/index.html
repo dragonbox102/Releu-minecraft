@@ -1,0 +1,43 @@
+<!doctype html>
+<html class="dark" lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Releu</title>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              background: "#000000",
+              surface: "#0A0A0A",
+              surfaceAlt: "#131313",
+              outline: "#262626",
+              outlineSoft: "#444444",
+              ink: "#ffffff",
+              muted: "#808080",
+              mutedSoft: "#c4c7c8",
+            },
+            fontFamily: {
+              sans: ["Inter", "sans-serif"],
+            },
+            letterSpacing: {
+              releu: "0.18em",
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+  <body class="bg-black text-white font-sans antialiased">
+    <div id="app"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,70 @@
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  background: #000;
+  color: #fff;
+  font-family: Inter, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #525252;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #050505;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #262626;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4a4a4a;
+}
+
+.releu-icon {
+  display: inline-block;
+  vertical-align: middle;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.releu-card-active {
+  border-color: #ffffff !important;
+}
+
+.releu-no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.releu-no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

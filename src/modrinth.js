@@ -1,0 +1,217 @@
+const MODRINTH_API_BASE = "https://api.modrinth.com/v3";
+const MODRINTH_USER_AGENT = "localhost-minecraft-panel/1.0";
+
+export const pluginCatalogProfiles = [
+  {
+    id: "auto",
+    label: "Auto (Paper family)",
+    searchLoaders: ["purpur", "paper", "spigot", "bukkit"],
+    installLoaders: ["purpur", "paper", "spigot", "bukkit"],
+  },
+  {
+    id: "purpur",
+    label: "Purpur",
+    searchLoaders: ["purpur", "paper", "spigot", "bukkit"],
+    installLoaders: ["purpur", "paper", "spigot", "bukkit"],
+  },
+  {
+    id: "paper",
+    label: "Paper",
+    searchLoaders: ["paper", "spigot", "bukkit"],
+    installLoaders: ["paper", "spigot", "bukkit"],
+  },
+  {
+    id: "spigot",
+    label: "Spigot / Bukkit",
+    searchLoaders: ["spigot", "bukkit"],
+    installLoaders: ["spigot", "bukkit"],
+  },
+];
+
+export const modCatalogProfiles = [
+  {
+    id: "fabric",
+    label: "Fabric",
+    searchLoaders: ["fabric"],
+    installLoaders: ["fabric"],
+  },
+  {
+    id: "forge",
+    label: "Forge",
+    searchLoaders: ["forge"],
+    installLoaders: ["forge"],
+  },
+  {
+    id: "neoforge",
+    label: "NeoForge",
+    searchLoaders: ["neoforge"],
+    installLoaders: ["neoforge"],
+  },
+  {
+    id: "quilt",
+    label: "Quilt",
+    searchLoaders: ["quilt"],
+    installLoaders: ["quilt"],
+  },
+];
+
+function getProfiles(kind) {
+  return kind === "plugin" ? pluginCatalogProfiles : modCatalogProfiles;
+}
+
+export function getDefaultCatalogProfileId(kind, serverSoftware) {
+  if (kind === "plugin") {
+    if (serverSoftware === "purpur") {
+      return "purpur";
+    }
+    if (serverSoftware === "paper") {
+      return "paper";
+    }
+    return "auto";
+  }
+
+  return "fabric";
+}
+
+export function resolveCatalogProfile(kind, profileId, serverSoftware) {
+  const profiles = getProfiles(kind);
+  const preferredId = profileId || getDefaultCatalogProfileId(kind, serverSoftware);
+  return (
+    profiles.find((entry) => entry.id === preferredId) ??
+    profiles.find((entry) => entry.id === getDefaultCatalogProfileId(kind, serverSoftware)) ??
+    profiles[0]
+  );
+}
+
+async function fetchModrinthJson(pathname, searchParams = null) {
+  const url = new URL(`${MODRINTH_API_BASE}${pathname}`);
+  if (searchParams) {
+    for (const [key, value] of Object.entries(searchParams)) {
+      if (value === undefined || value === null || value === "") {
+        continue;
+      }
+      url.searchParams.set(key, value);
+    }
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": MODRINTH_USER_AGENT,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Modrinth request failed (${response.status}).`);
+  }
+
+  return response.json();
+}
+
+function buildSearchFacets({ kind, profile, gameVersion }) {
+  void kind;
+  void gameVersion;
+  return JSON.stringify([profile.searchLoaders.map((loader) => `categories:${loader}`)]);
+}
+
+export async function searchCatalogProjects({
+  kind,
+  query,
+  profileId,
+  serverSoftware,
+  gameVersion,
+  limit = 12,
+  index = "relevance",
+}) {
+  const profile = resolveCatalogProfile(kind, profileId, serverSoftware);
+  const payload = await fetchModrinthJson("/search", {
+    query: String(query ?? "").trim(),
+    facets: buildSearchFacets({ kind, profile, gameVersion }),
+    limit: String(limit),
+    index,
+  });
+
+  return {
+    profile,
+    totalHits: payload.total_hits ?? 0,
+    results: (payload.hits ?? []).map((entry) => ({
+      id: entry.project_id,
+      slug: entry.slug,
+      title: entry.name ?? entry.title,
+      author: entry.author,
+      description: entry.summary ?? entry.description,
+      iconUrl: entry.icon_url,
+      downloads: entry.downloads,
+      followers: entry.follows,
+      latestGameVersion:
+        entry.game_versions?.at?.(-1) ?? entry.latest_version ?? null,
+      gameVersions: entry.game_versions ?? entry.versions ?? [],
+      categories: entry.display_categories ?? entry.categories ?? entry.loaders ?? [],
+      dateModified: entry.date_modified,
+    })),
+  };
+}
+
+function pickPrimaryFile(version) {
+  return version.files?.find((entry) => entry.primary) ?? version.files?.[0] ?? null;
+}
+
+function sortVersionsDescending(left, right) {
+  return Date.parse(right.date_published ?? 0) - Date.parse(left.date_published ?? 0);
+}
+
+export async function resolveCatalogInstall({
+  projectId,
+  kind,
+  profileId,
+  serverSoftware,
+  gameVersion,
+}) {
+  const profile = resolveCatalogProfile(kind, profileId, serverSoftware);
+  const versions = await fetchModrinthJson(
+    `/project/${encodeURIComponent(projectId)}/version`,
+    {
+      loaders: JSON.stringify(profile.installLoaders),
+      game_versions: gameVersion ? JSON.stringify([gameVersion]) : undefined,
+      include_changelog: "false",
+    },
+  );
+
+  let candidates = [...versions];
+  if (!candidates.length) {
+    candidates = await fetchModrinthJson(
+      `/project/${encodeURIComponent(projectId)}/version`,
+      {
+        loaders: JSON.stringify(profile.installLoaders),
+        include_changelog: "false",
+      },
+    );
+  }
+
+  candidates = candidates
+    .filter((entry) => entry.status === "listed" || entry.status === "archived" || !entry.status)
+    .sort(sortVersionsDescending);
+
+  const selectedVersion = candidates.find((entry) => pickPrimaryFile(entry)) ?? null;
+  if (!selectedVersion) {
+    throw new Error("No compatible Modrinth version was found for this project.");
+  }
+
+  const file = pickPrimaryFile(selectedVersion);
+  if (!file?.url || !file?.filename) {
+    throw new Error("The selected Modrinth version does not expose a downloadable file.");
+  }
+
+  return {
+    profile,
+    projectId,
+    versionId: selectedVersion.id,
+    versionNumber: selectedVersion.version_number,
+    versionName: selectedVersion.name,
+    fileName: file.filename,
+    fileUrl: file.url,
+    gameVersions: selectedVersion.game_versions ?? [],
+    loaders: selectedVersion.loaders ?? [],
+    publishedAt: selectedVersion.date_published ?? null,
+  };
+}

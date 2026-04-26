@@ -1,0 +1,736 @@
+import fs from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { Readable } from "node:stream";
+
+import {
+  currentTimestamp,
+  fileExists,
+  paths,
+  readJsonFile,
+  sanitizeLogLine,
+  writeJsonFile,
+} from "./config.js";
+
+const PLAYIT_RELEASES_URL =
+  "https://api.github.com/repos/playit-cloud/playit-agent/releases/latest";
+
+function extractUiMessage(rawLine) {
+  const cleaned = sanitizeLogLine(rawLine);
+  if (!cleaned) {
+    return "";
+  }
+
+  const marker = "playit_cli::ui:";
+  const index = cleaned.indexOf(marker);
+  if (index >= 0) {
+    return cleaned.slice(index + marker.length).trim();
+  }
+
+  return cleaned;
+}
+
+function maybeExtractSecret(rawLine) {
+  const message = extractUiMessage(rawLine);
+  if (!message) {
+    return null;
+  }
+
+  if (/^[A-Za-z0-9._-]{20,}$/.test(message)) {
+    return message;
+  }
+
+  const lastToken = message.split(/\s+/).at(-1);
+  return /^[A-Za-z0-9._-]{20,}$/.test(lastToken) ? lastToken : null;
+}
+
+function parseTunnelLine(rawLine) {
+  const message = extractUiMessage(rawLine);
+  const match = message.match(/^\[(.+?)\]\s+(\S+)\s+(\d+)\s+(.+)$/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    id: match[1],
+    protocol: match[2],
+    portCount: Number(match[3]),
+    publicAddress: match[4],
+    raw: message,
+  };
+}
+
+function extractTunnelCount(rawLine) {
+  const message = extractUiMessage(rawLine);
+  const match =
+    message.match(/agent has (\d+) tunnels/i) ??
+    message.match(/(\d+) tunnels registered/i);
+  return match ? Number(match[1]) : null;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export class PlayitManager {
+  constructor({ appendLog, getServerPort }) {
+    this.appendLog = appendLog;
+    this.getServerPort = getServerPort;
+    this.agentProcess = null;
+    this.exchangeProcess = null;
+    this.state = {
+      installed: false,
+      version: null,
+      running: false,
+      status: "not-installed",
+      secretConfigured: false,
+      claimCode: null,
+      claimUrl: null,
+      claimWaiting: false,
+      tunnels: [],
+      configuredTunnelCount: 0,
+      detectedTunnelCount: 0,
+      needsWebSetup: false,
+      statusMessage: null,
+      dashboardTunnelUrl: "https://playit.gg/account/tunnels",
+      newTunnelUrl: "https://playit.gg/account/setup/new-tunnel",
+      lastError: null,
+      lastStartedAt: null,
+      lastExitedAt: null,
+      lastRefreshAt: null,
+      lastProbeAt: null,
+      recommendedTunnelTarget: `127.0.0.1:${this.getServerPort()}`,
+    };
+    this.lastRefreshAtMs = 0;
+    this.lastProbeAtMs = 0;
+  }
+
+  async init() {
+    this.state.installed = await fileExists(paths.playitBinary);
+    this.state.secretConfigured = await fileExists(paths.playitSecretFile);
+    if (this.state.installed) {
+      try {
+        const versionOutput = await this.runCommand(["version"]);
+        this.state.version = extractUiMessage(versionOutput.stdout)
+          .split(/\s+/)
+          .at(-1);
+      } catch {
+        this.state.version = null;
+      }
+    }
+    const claimInfo = await readJsonFile(paths.claimInfoFile, {});
+    this.state.claimCode = claimInfo.claimCode ?? null;
+    this.state.claimUrl = claimInfo.claimUrl ?? null;
+    this.state.claimWaiting = false;
+    this.state.status = this.state.installed
+      ? this.state.secretConfigured
+        ? "ready"
+        : "needs-claim"
+      : "not-installed";
+    if (this.state.secretConfigured) {
+      await this.refreshTunnels({ force: true });
+      if (this.state.needsWebSetup) {
+        this.state.status = "needs-tunnel-setup";
+      }
+    }
+  }
+
+  snapshot() {
+    return {
+      ...this.state,
+      recommendedTunnelTarget: `127.0.0.1:${this.getServerPort()}`,
+    };
+  }
+
+  observeLine(rawLine) {
+    const cleaned = sanitizeLogLine(rawLine);
+    if (!cleaned) {
+      return;
+    }
+
+    const tunnel = parseTunnelLine(cleaned);
+    if (tunnel) {
+      const existingIndex = this.state.tunnels.findIndex((entry) => entry.id === tunnel.id);
+      if (existingIndex >= 0) {
+        this.state.tunnels.splice(existingIndex, 1, tunnel);
+      } else {
+        this.state.tunnels.push(tunnel);
+      }
+      this.state.detectedTunnelCount = Math.max(
+        this.state.detectedTunnelCount,
+        this.state.tunnels.length,
+      );
+      this.state.configuredTunnelCount = Math.max(
+        this.state.configuredTunnelCount,
+        this.state.tunnels.length,
+      );
+      this.state.needsWebSetup = false;
+      this.state.statusMessage = `Detected ${this.state.tunnels.length} playit tunnel(s).`;
+    }
+
+    const tunnelCount = extractTunnelCount(cleaned);
+    if (tunnelCount !== null) {
+      this.state.configuredTunnelCount = Math.max(
+        this.state.configuredTunnelCount,
+        tunnelCount,
+      );
+      this.state.detectedTunnelCount = Math.max(
+        this.state.detectedTunnelCount,
+        tunnelCount,
+      );
+    }
+
+    if (cleaned.includes("SessionNotSetup")) {
+      this.state.needsWebSetup = true;
+      this.state.statusMessage =
+        "Playit connected, but this agent still needs web-side tunnel setup or assignment.";
+    }
+
+    if (cleaned.includes("secret key valid")) {
+      this.state.lastError = null;
+    }
+
+    if (cleaned.includes("tunnel running")) {
+      this.state.statusMessage =
+        this.state.configuredTunnelCount > 0
+          ? `Playit is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
+          : "Playit is online.";
+    }
+  }
+
+  async installBinary(onProgress = null) {
+    const release = await this.fetchLatestRelease();
+    const asset = this.pickWindowsAsset(release);
+    const response = await fetch(asset.browser_download_url, {
+      headers: {
+        Accept: "application/octet-stream",
+        "User-Agent": "localhost-minecraft-panel/1.0",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Unable to download playit agent (${response.status}).`);
+    }
+
+    await fs.mkdir(path.dirname(paths.playitBinary), { recursive: true });
+    const tempPath = `${paths.playitBinary}.download`;
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+    const output = createWriteStream(tempPath);
+    const totalBytes = Number(response.headers.get("content-length")) || null;
+    const startedAt = Date.now();
+    let downloadedBytes = 0;
+
+    try {
+      for await (const chunk of Readable.fromWeb(response.body)) {
+        const buffer = Buffer.from(chunk);
+        downloadedBytes += buffer.length;
+        if (!output.write(buffer)) {
+          await once(output, "drain");
+        }
+        if (onProgress) {
+          const elapsedSeconds = Math.max(0.25, (Date.now() - startedAt) / 1000);
+          onProgress({
+            fileName: asset.name,
+            downloadedBytes,
+            totalBytes,
+            speedBytesPerSecond: downloadedBytes / elapsedSeconds,
+          });
+        }
+      }
+
+      await new Promise((resolve, reject) => {
+        output.end((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      await fs.rm(paths.playitBinary, { force: true }).catch(() => {});
+      await fs.rename(tempPath, paths.playitBinary);
+    } catch (error) {
+      output.destroy();
+      await fs.rm(tempPath, { force: true }).catch(() => {});
+      throw error;
+    }
+
+    this.state.installed = true;
+    this.state.version = release.tag_name ?? null;
+    this.state.status = this.state.secretConfigured ? "ready" : "needs-claim";
+    this.appendLog(
+      "playit",
+      `Installed playit agent ${this.state.version ?? "latest"} to ${paths.playitBinary}.`,
+    );
+
+    return this.snapshot();
+  }
+
+  async fetchLatestRelease() {
+    const response = await fetch(PLAYIT_RELEASES_URL, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "localhost-minecraft-panel/1.0",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Unable to fetch playit release metadata (${response.status}).`);
+    }
+
+    return response.json();
+  }
+
+  pickWindowsAsset(release) {
+    const preferredAssetNames = [
+      "playit-windows-x86_64-signed.exe",
+      "playit-windows-x86_64.exe",
+      "playit-windows-x86-signed.exe",
+      "playit-windows-x86.exe",
+    ];
+
+    const asset = preferredAssetNames
+      .map((name) => release.assets?.find((entry) => entry.name === name))
+      .find(Boolean);
+
+    if (!asset) {
+      throw new Error("No supported Windows playit executable was found in the latest release.");
+    }
+
+    return asset;
+  }
+
+  async saveSecret(secret) {
+    const normalized = String(secret ?? "").trim();
+    if (!normalized) {
+      throw new Error("A playit secret is required.");
+    }
+
+    await fs.mkdir(paths.playitDataDir, { recursive: true });
+    await fs.writeFile(paths.playitSecretFile, `${normalized}\n`, "utf8");
+    this.state.secretConfigured = true;
+    this.state.claimWaiting = false;
+    this.state.status = this.state.running ? "running" : "ready";
+    this.state.lastError = null;
+    this.state.statusMessage = "Secret saved. Start the agent to refresh tunnel status.";
+    this.appendLog("playit", "Stored playit secret locally for this project.");
+    return this.snapshot();
+  }
+
+  async generateClaim(agentName) {
+    await this.ensureBinary();
+    const claimCodeOutput = await this.runCommand(["claim", "generate"]);
+    const claimCode = extractUiMessage(claimCodeOutput.stdout)
+      .split(/\s+/)
+      .at(-1);
+
+    const claimUrlOutput = await this.runCommand([
+      "claim",
+      "url",
+      claimCode,
+      "--name",
+      agentName || "Minecraft Panel Host",
+    ]);
+
+    const claimUrl = extractUiMessage(claimUrlOutput.stdout)
+      .split(/\s+/)
+      .find((token) => token.startsWith("https://"));
+
+    if (!claimCode || !claimUrl) {
+      throw new Error("playit returned an unexpected claim response.");
+    }
+
+    this.state.claimCode = claimCode;
+    this.state.claimUrl = claimUrl;
+    this.state.claimWaiting = true;
+    this.state.status = "waiting-for-claim";
+    await writeJsonFile(paths.claimInfoFile, {
+      claimCode,
+      claimUrl,
+      createdAt: currentTimestamp(),
+    });
+
+    this.appendLog("playit", `Generated playit claim URL: ${claimUrl}`);
+    this.startClaimExchange(claimCode);
+    return this.snapshot();
+  }
+
+  startClaimExchange(claimCode) {
+    if (this.exchangeProcess) {
+      this.exchangeProcess.kill();
+      this.exchangeProcess = null;
+    }
+
+    const child = spawn(
+      paths.playitBinary,
+      ["--stdout", "claim", "exchange", claimCode, "--wait", "0"],
+      {
+        cwd: paths.playitDataDir,
+        windowsHide: true,
+      },
+    );
+
+    this.exchangeProcess = child;
+    let settled = false;
+
+    const handleLine = async (line) => {
+      const cleaned = sanitizeLogLine(line);
+      if (!cleaned) {
+        return;
+      }
+
+      this.appendLog("playit", cleaned);
+      const secret = maybeExtractSecret(cleaned);
+      if (!secret) {
+        return;
+      }
+
+      settled = true;
+      await this.saveSecret(secret);
+      try {
+        await this.startAgent();
+      } catch (error) {
+        this.state.lastError = error.message;
+      }
+      this.state.claimWaiting = false;
+      this.state.status = this.state.running ? "running" : "ready";
+      if (this.exchangeProcess) {
+        this.exchangeProcess.kill();
+        this.exchangeProcess = null;
+      }
+    };
+
+    child.stdout.on("data", async (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/)) {
+        await handleLine(line);
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/)) {
+        const cleaned = sanitizeLogLine(line);
+        if (cleaned) {
+          this.appendLog("playit", cleaned, "error");
+        }
+      }
+    });
+
+    child.on("exit", (code) => {
+      this.exchangeProcess = null;
+      if (!settled && this.state.claimWaiting) {
+        this.appendLog(
+          "playit",
+          `Claim exchange stopped before a secret was returned (exit ${code ?? "unknown"}).`,
+          "warn",
+        );
+      }
+    });
+  }
+
+  async startAgent() {
+    await this.ensureBinary();
+    if (!(await fileExists(paths.playitSecretFile))) {
+      throw new Error("No playit secret is configured yet.");
+    }
+
+    if (this.agentProcess) {
+      return this.snapshot();
+    }
+
+    const child = spawn(
+      paths.playitBinary,
+      ["--secret_path", paths.playitSecretFile, "--stdout", "start"],
+      {
+        cwd: paths.playitDataDir,
+        windowsHide: true,
+      },
+    );
+
+    this.agentProcess = child;
+    this.state.running = true;
+    this.state.status = "running";
+    this.state.lastStartedAt = currentTimestamp();
+    this.state.lastError = null;
+
+    const handleLine = (line, level = "info") => {
+      const cleaned = sanitizeLogLine(line);
+      if (!cleaned) {
+        return;
+      }
+
+      this.observeLine(cleaned);
+      this.appendLog("playit", cleaned, level);
+    };
+
+    child.stdout.on("data", (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/)) {
+        handleLine(line);
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/)) {
+        handleLine(line, "error");
+      }
+    });
+
+    child.on("exit", (code) => {
+      this.agentProcess = null;
+      this.state.running = false;
+      this.state.status = this.state.secretConfigured
+        ? this.state.needsWebSetup
+          ? "needs-tunnel-setup"
+          : "ready"
+        : "needs-claim";
+      this.state.lastExitedAt = currentTimestamp();
+      if (code && code !== 0) {
+        this.state.lastError = `playit exited with code ${code}.`;
+      }
+    });
+
+    await wait(1200);
+    await this.refreshTunnels({ force: true });
+    if (this.state.needsWebSetup) {
+      this.state.status = "needs-tunnel-setup";
+    }
+    return this.snapshot();
+  }
+
+  async stopAgent() {
+    if (!this.agentProcess) {
+      this.state.running = false;
+      this.state.status = this.state.secretConfigured
+        ? this.state.needsWebSetup
+          ? "needs-tunnel-setup"
+          : "ready"
+        : "needs-claim";
+      return this.snapshot();
+    }
+
+    this.agentProcess.kill();
+    this.agentProcess = null;
+    this.state.running = false;
+    this.state.status = this.state.secretConfigured
+      ? this.state.needsWebSetup
+        ? "needs-tunnel-setup"
+        : "ready"
+      : "needs-claim";
+    return this.snapshot();
+  }
+
+  async refreshTunnels({ force = false } = {}) {
+    if (!(await fileExists(paths.playitSecretFile)) || !(await fileExists(paths.playitBinary))) {
+      this.state.tunnels = [];
+      this.state.configuredTunnelCount = 0;
+      this.state.detectedTunnelCount = 0;
+      this.state.needsWebSetup = false;
+      this.state.statusMessage = null;
+      return this.snapshot();
+    }
+
+    const now = Date.now();
+    if (!force && now - this.lastRefreshAtMs < 8000) {
+      return this.snapshot();
+    }
+    this.lastRefreshAtMs = now;
+    this.state.lastRefreshAt = currentTimestamp();
+
+    try {
+      const result = await this.runCommand(
+        ["tunnels", "list"],
+        { includeSecretPath: true, timeoutMs: 15000 },
+      );
+
+      const tunnels = result.stdout
+        .split(/\r?\n/)
+        .map(parseTunnelLine)
+        .filter(Boolean);
+
+      this.state.tunnels = tunnels;
+      if (tunnels.length) {
+        this.state.configuredTunnelCount = Math.max(
+          this.state.configuredTunnelCount,
+          tunnels.length,
+        );
+        this.state.detectedTunnelCount = Math.max(
+          this.state.detectedTunnelCount,
+          tunnels.length,
+        );
+        this.state.needsWebSetup = false;
+        this.state.statusMessage = `Detected ${tunnels.length} playit tunnel(s).`;
+      } else {
+        await this.probeTunnelStatus({ force });
+      }
+    } catch (error) {
+      if (String(error.message).includes("NotImplemented")) {
+        this.state.lastError = null;
+        await this.probeTunnelStatus({ force });
+      } else {
+        this.state.lastError = error.message;
+      }
+    }
+
+    if (!this.state.running) {
+      this.state.status = this.state.secretConfigured
+        ? this.state.needsWebSetup
+          ? "needs-tunnel-setup"
+          : "ready"
+        : "needs-claim";
+    }
+
+    return this.snapshot();
+  }
+
+  async probeTunnelStatus({ force = false } = {}) {
+    if (this.agentProcess) {
+      return this.snapshot();
+    }
+
+    const now = Date.now();
+    if (!force && now - this.lastProbeAtMs < 30000) {
+      return this.snapshot();
+    }
+
+    this.lastProbeAtMs = now;
+    this.state.lastProbeAt = currentTimestamp();
+
+    return new Promise((resolve) => {
+      const child = spawn(
+        paths.playitBinary,
+        ["--secret_path", paths.playitSecretFile, "--stdout", "start"],
+        {
+          cwd: paths.playitDataDir,
+          windowsHide: true,
+        },
+      );
+
+      const timer = setTimeout(() => {
+        if (!child.killed) {
+          child.kill();
+        }
+      }, 11000);
+
+      const consume = (chunk) => {
+        for (const line of String(chunk).split(/\r?\n/)) {
+          const cleaned = sanitizeLogLine(line);
+          if (!cleaned) {
+            continue;
+          }
+          this.observeLine(cleaned);
+        }
+      };
+
+      child.stdout.on("data", consume);
+      child.stderr.on("data", consume);
+      child.on("error", (error) => {
+        this.state.lastError = error.message;
+      });
+      child.on("exit", () => {
+        clearTimeout(timer);
+        if (!this.state.tunnels.length && this.state.configuredTunnelCount > 0) {
+          this.state.statusMessage =
+            this.state.statusMessage ??
+            `Playit reports ${this.state.configuredTunnelCount} configured tunnel(s), but this CLI cannot list the public address. Open the playit dashboard to confirm the address or finish setup.`;
+        }
+        resolve(this.snapshot());
+      });
+    });
+  }
+
+  async reset() {
+    await this.stopAgent();
+    if (this.exchangeProcess) {
+      this.exchangeProcess.kill();
+      this.exchangeProcess = null;
+    }
+
+    await Promise.all(
+      [
+        fs.rm(paths.playitSecretFile, { force: true }),
+        fs.rm(paths.claimInfoFile, { force: true }),
+      ],
+    );
+
+    this.state.secretConfigured = false;
+    this.state.claimCode = null;
+    this.state.claimUrl = null;
+    this.state.claimWaiting = false;
+    this.state.tunnels = [];
+    this.state.configuredTunnelCount = 0;
+    this.state.detectedTunnelCount = 0;
+    this.state.needsWebSetup = false;
+    this.state.statusMessage = null;
+    this.state.status = this.state.installed ? "needs-claim" : "not-installed";
+    return this.snapshot();
+  }
+
+  async ensureBinary() {
+    if (!(await fileExists(paths.playitBinary))) {
+      throw new Error("playit is not installed yet.");
+    }
+  }
+
+  async runCommand(commandArgs, options = {}) {
+    await this.ensureBinary();
+    const args = [];
+    if (options.includeSecretPath) {
+      args.push("--secret_path", paths.playitSecretFile);
+    }
+    args.push("--stdout", ...commandArgs);
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(paths.playitBinary, args, {
+        cwd: paths.playitDataDir,
+        windowsHide: true,
+      });
+
+      let stdout = "";
+      let stderr = "";
+      let finished = false;
+      const timeoutMs = options.timeoutMs ?? 20000;
+
+      const timeout = setTimeout(() => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        child.kill();
+        reject(new Error("playit command timed out."));
+      }, timeoutMs);
+
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+
+      child.on("error", (error) => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        clearTimeout(timeout);
+        reject(error);
+      });
+
+      child.on("exit", (code) => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        clearTimeout(timeout);
+
+        if (code !== 0) {
+          reject(new Error(stderr.trim() || stdout.trim() || `playit exited with code ${code}.`));
+          return;
+        }
+
+        resolve({ stdout: sanitizeLogLine(stdout), stderr: sanitizeLogLine(stderr) });
+      });
+    });
+  }
+}
