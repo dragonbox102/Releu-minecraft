@@ -712,9 +712,25 @@ function playitAddressState(server = activeServer()) {
       detail: "Complete the browser link. Releu will continue automatically after the agent is connected.",
     };
   }
-  if (playit?.needsWebSetup || Number(playit?.configuredTunnelCount ?? 0) === 0) {
+  if (playit?.checkingTunnelStatus) {
     return {
-      value: "No Tunnel Assigned Yet",
+      value: "Checking Tunnel Status",
+      detail:
+        playit?.statusMessage ??
+        `Releu is checking the linked playit.gg agent and tunnel status for ${playit?.recommendedTunnelTarget ?? "127.0.0.1:25565"}.`,
+    };
+  }
+  if (playit?.needsWebSetup && Number(playit?.configuredTunnelCount ?? 0) > 0) {
+    return {
+      value: "Tunnel Found, Setup Incomplete",
+      detail:
+        playit?.statusMessage ??
+        `Playit found a tunnel for ${playit?.recommendedTunnelTarget ?? "127.0.0.1:25565"}, but it still needs setup before a public join address exists.`,
+    };
+  }
+  if (Number(playit?.configuredTunnelCount ?? 0) === 0) {
+    return {
+      value: "No Tunnel Created Yet",
       detail: `Create or assign a Minecraft Java tunnel for ${playit?.recommendedTunnelTarget ?? "127.0.0.1:25565"} in Settings.`,
     };
   }

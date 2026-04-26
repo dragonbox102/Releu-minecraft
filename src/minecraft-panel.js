@@ -717,6 +717,26 @@ if (-not $sample) { exit 0 }
     return context.state.resourceMetrics;
   }
 
+  reconcileRuntimeState(context) {
+    if (!context.serverProcess) {
+      if (context.state.serverStatus === "starting" || context.state.serverStatus === "stopping") {
+        context.state.serverStatus = "stopped";
+      }
+      context.state.serverReady = false;
+      context.state.serverPid = null;
+      return;
+    }
+
+    if (context.state.serverReady && context.state.serverStatus !== "stopping") {
+      context.state.serverStatus = "running";
+      return;
+    }
+
+    if (context.state.serverStatus === "stopped") {
+      context.state.serverStatus = "starting";
+    }
+  }
+
   getServerGameVersion(serverId) {
     const context = this.getServerContext(serverId);
     return (
@@ -884,13 +904,23 @@ if (-not $sample) { exit 0 }
 
   async getState(serverId = this.activeServerId) {
     const context = this.getServerContext(serverId);
-    if (this.playitInitialized) {
-      const playitSnapshot = this.playit.snapshot();
-      const shouldForceTunnelRefresh =
-        playitSnapshot.secretConfigured &&
-        !playitSnapshot.tunnels.some((entry) => entry.publicAddress) &&
-        (context.state.serverStatus === "starting" || context.state.serverStatus === "running");
-      this.playit.refreshTunnels({ force: shouldForceTunnelRefresh }).catch(() => {});
+    this.reconcileRuntimeState(context);
+    await this.ensurePlayitInitialized();
+    const playitSnapshot = this.playit.snapshot();
+    const shouldForceTunnelRefresh =
+      playitSnapshot.secretConfigured &&
+      !playitSnapshot.tunnels.some((entry) => entry.publicAddress) &&
+      (context.state.serverStatus === "starting" || context.state.serverStatus === "running");
+    const shouldRefreshTunnelStatus =
+      playitSnapshot.secretConfigured &&
+      (!playitSnapshot.lastRefreshAt ||
+        shouldForceTunnelRefresh ||
+        (Number(playitSnapshot.configuredTunnelCount ?? 0) === 0 &&
+          !playitSnapshot.checkingTunnelStatus));
+    if (shouldRefreshTunnelStatus) {
+      this.playit.refreshTunnels({
+        force: !playitSnapshot.lastRefreshAt || shouldForceTunnelRefresh,
+      }).catch(() => {});
     }
     this.updater.maybeCheckForUpdates().catch(() => {});
 
