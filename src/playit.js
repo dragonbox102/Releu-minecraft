@@ -13,6 +13,12 @@ import {
   sanitizeLogLine,
   writeJsonFile,
 } from "./config.js";
+import {
+  getPlayitAssetCandidates,
+  isWindows,
+  runtimePlatform,
+  withHiddenConsole,
+} from "./platform.js";
 
 const PLAYIT_RELEASES_URL =
   "https://api.github.com/repos/playit-cloud/playit-agent/releases/latest";
@@ -202,7 +208,7 @@ export class PlayitManager {
 
   async installBinary(onProgress = null) {
     const release = await this.fetchLatestRelease();
-    const asset = this.pickWindowsAsset(release);
+    const asset = this.pickPlatformAsset(release);
     const response = await fetch(asset.browser_download_url, {
       headers: {
         Accept: "application/octet-stream",
@@ -251,6 +257,9 @@ export class PlayitManager {
       });
       await fs.rm(paths.playitBinary, { force: true }).catch(() => {});
       await fs.rename(tempPath, paths.playitBinary);
+      if (!isWindows) {
+        await fs.chmod(paths.playitBinary, 0o755);
+      }
     } catch (error) {
       output.destroy();
       await fs.rm(tempPath, { force: true }).catch(() => {});
@@ -283,20 +292,17 @@ export class PlayitManager {
     return response.json();
   }
 
-  pickWindowsAsset(release) {
-    const preferredAssetNames = [
-      "playit-windows-x86_64-signed.exe",
-      "playit-windows-x86_64.exe",
-      "playit-windows-x86-signed.exe",
-      "playit-windows-x86.exe",
-    ];
+  pickPlatformAsset(release) {
+    const preferredAssetNames = getPlayitAssetCandidates();
 
     const asset = preferredAssetNames
       .map((name) => release.assets?.find((entry) => entry.name === name))
       .find(Boolean);
 
     if (!asset) {
-      throw new Error("No supported Windows playit executable was found in the latest release.");
+      throw new Error(
+        `No supported ${runtimePlatform} playit executable was found in the latest release.`,
+      );
     }
 
     return asset;
@@ -366,10 +372,9 @@ export class PlayitManager {
     const child = spawn(
       paths.playitBinary,
       ["--stdout", "claim", "exchange", claimCode, "--wait", "0"],
-      {
+      withHiddenConsole({
         cwd: paths.playitDataDir,
-        windowsHide: true,
-      },
+      }),
     );
 
     this.exchangeProcess = child;
@@ -442,10 +447,9 @@ export class PlayitManager {
     const child = spawn(
       paths.playitBinary,
       ["--secret_path", paths.playitSecretFile, "--stdout", "start"],
-      {
+      withHiddenConsole({
         cwd: paths.playitDataDir,
-        windowsHide: true,
-      },
+      }),
     );
 
     this.agentProcess = child;
@@ -600,10 +604,9 @@ export class PlayitManager {
       const child = spawn(
         paths.playitBinary,
         ["--secret_path", paths.playitSecretFile, "--stdout", "start"],
-        {
+        withHiddenConsole({
           cwd: paths.playitDataDir,
-          windowsHide: true,
-        },
+        }),
       );
 
       const timer = setTimeout(() => {
@@ -683,7 +686,7 @@ export class PlayitManager {
     return new Promise((resolve, reject) => {
       const child = spawn(paths.playitBinary, args, {
         cwd: paths.playitDataDir,
-        windowsHide: true,
+        ...withHiddenConsole(),
       });
 
       let stdout = "";

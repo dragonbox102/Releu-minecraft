@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  getAppDataHomeDir,
+  getDefaultUpdaterAssetName,
+  getPlayitBinaryName,
+} from "./platform.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const snapshotRootDir = path.resolve(moduleDir, "..");
@@ -10,10 +15,8 @@ const portableExecutableDir =
   process.env.PORTABLE_EXECUTABLE_DIR ||
   process.env.PORTABLE_EXECUTABLE_PATH ||
   null;
-const localAppDataDir =
-  process.env.LOCALAPPDATA ||
-  path.join(os.homedir(), "AppData", "Local");
-const releuLocalRootDir = path.join(localAppDataDir, "Releu");
+const releuLocalRootDir = getAppDataHomeDir("Releu");
+const appDataHomeDir = path.dirname(releuLocalRootDir);
 const runtimeRootDir = isPackagedDesktop
   ? portableExecutableDir || path.dirname(process.execPath)
   : snapshotRootDir;
@@ -26,7 +29,7 @@ export const paths = {
   snapshotRootDir,
   runtimeRootDir,
   writableRootDir,
-  localAppDataDir,
+  localAppDataDir: appDataHomeDir,
   releuLocalRootDir,
   publicDir: path.join(snapshotRootDir, "public"),
   srcDir: path.join(snapshotRootDir, "src"),
@@ -44,7 +47,7 @@ export const paths = {
   playerIndexFile: path.join(writableRootDir, "data", "player-index.json"),
   claimInfoFile: path.join(writableRootDir, "data", "playit", "claim-info.json"),
   playitSecretFile: path.join(writableRootDir, "data", "playit", "secret.txt"),
-  playitBinary: path.join(writableRootDir, "tools", "playit", "playit.exe"),
+  playitBinary: path.join(writableRootDir, "tools", "playit", getPlayitBinaryName()),
   updatesDir: path.join(releuLocalRootDir, "updates"),
   updateCacheDir: path.join(releuLocalRootDir, "updates", "cache"),
   updatePendingDir: path.join(releuLocalRootDir, "updates", "pending"),
@@ -88,7 +91,7 @@ export const defaultConfig = {
     checkIntervalHours: 6,
     githubOwner: "dragonbox102",
     githubRepo: "Releu-minecraft",
-    assetName: "Releu-minecraft.exe",
+    assetName: getDefaultUpdaterAssetName(),
     allowPrerelease: false,
   },
 };

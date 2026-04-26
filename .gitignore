@@ -9,6 +9,7 @@ servers/
 
 *.zip
 *.exe
+*.AppImage
 *.log
 
 npm-debug.log*

@@ -754,7 +754,7 @@ function renderSettingsSection(server) {
           </label>
           <label class="block">
             <span class="${C.label} mb-2 block">Release Asset Name</span>
-            <input name="assetName" type="text" value="${escapeHtml(appUpdate?.assetName ?? "Releu-minecraft.exe")}" class="${C.input} w-full" placeholder="Releu-minecraft.exe" />
+            <input name="assetName" type="text" value="${escapeHtml(appUpdate?.assetName ?? "")}" class="${C.input} w-full" placeholder="${escapeHtml(appUpdate?.assetName ?? runtime.data.updaterSettings?.assetName ?? "Releu-minecraft")}" />
           </label>
           <label class="block">
             <span class="${C.label} mb-2 block">Check Interval (Hours)</span>

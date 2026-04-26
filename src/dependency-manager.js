@@ -5,32 +5,29 @@ import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
 import { once } from "node:events";
 
+import extractZip from "extract-zip";
+import * as tar from "tar";
+
 import { currentTimestamp, fileExists, paths, sanitizeLogLine } from "./config.js";
+import {
+  getJavaExecutableName,
+  getMicrosoftJdkDownloadUrl,
+  isWindows,
+  withHiddenConsole,
+} from "./platform.js";
 
 const DOWNLOAD_USER_AGENT = "releu-minecraft/1.0";
 
-const JAVA_DEPENDENCIES = [
-  {
-    id: "java21",
-    name: "Microsoft OpenJDK 21",
-    major: 21,
-    archivePath: path.join(paths.toolsDir, "microsoft-jdk-21.zip"),
-    installDir: path.join(paths.toolsDir, "microsoft-jdk-21"),
-    downloadUrl: "https://aka.ms/download-jdk/microsoft-jdk-21-windows-x64.zip",
-  },
-  {
-    id: "java25",
-    name: "Microsoft OpenJDK 25",
-    major: 25,
-    archivePath: path.join(paths.toolsDir, "microsoft-jdk-25.zip"),
-    installDir: path.join(paths.toolsDir, "microsoft-jdk-25"),
-    downloadUrl: "https://aka.ms/download-jdk/microsoft-jdk-25-windows-x64.zip",
-  },
-];
-
-function escapePowerShellLiteral(value) {
-  return String(value ?? "").replace(/'/g, "''");
-}
+const JAVA_EXECUTABLE_NAME = getJavaExecutableName();
+const JAVA_ARCHIVE_EXTENSION = isWindows ? "zip" : "tar.gz";
+const JAVA_DEPENDENCIES = [21, 25].map((major) => ({
+  id: `java${major}`,
+  name: `Microsoft OpenJDK ${major}`,
+  major,
+  archivePath: path.join(paths.toolsDir, `microsoft-jdk-${major}.${JAVA_ARCHIVE_EXTENSION}`),
+  installDir: path.join(paths.toolsDir, `microsoft-jdk-${major}`),
+  downloadUrl: getMicrosoftJdkDownloadUrl(major),
+}));
 
 async function findJavaBinaryInDirectory(rootDir) {
   if (!(await fileExists(rootDir))) {
@@ -40,7 +37,7 @@ async function findJavaBinaryInDirectory(rootDir) {
   const queue = [{ dir: rootDir, depth: 0 }];
   while (queue.length) {
     const current = queue.shift();
-    const candidate = path.join(current.dir, "bin", "java.exe");
+    const candidate = path.join(current.dir, "bin", JAVA_EXECUTABLE_NAME);
     if (await fileExists(candidate)) {
       return candidate;
     }
@@ -69,9 +66,7 @@ async function inspectJavaBinary(javaPath) {
   }
 
   return new Promise((resolve) => {
-    const child = spawn(javaPath, ["-version"], {
-      windowsHide: true,
-    });
+    const child = spawn(javaPath, ["-version"], withHiddenConsole());
 
     let output = "";
     let settled = false;
@@ -105,54 +100,27 @@ async function inspectJavaBinary(javaPath) {
   });
 }
 
-async function expandZipArchive(archivePath, destinationPath) {
-  const archiveLiteral = escapePowerShellLiteral(archivePath);
-  const destinationLiteral = escapePowerShellLiteral(destinationPath);
-  const command = [
-    `$dest = '${destinationLiteral}'`,
-    `if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }`,
-    `New-Item -ItemType Directory -Path $dest -Force | Out-Null`,
-    `Expand-Archive -LiteralPath '${archiveLiteral}' -DestinationPath $dest -Force`,
-  ].join("; ");
+async function extractJavaArchive(archivePath, destinationPath) {
+  await fsp.rm(destinationPath, { recursive: true, force: true }).catch(() => {});
+  await fsp.mkdir(destinationPath, { recursive: true });
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "powershell",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
-      {
-        windowsHide: true,
-      },
-    );
-
-    let stderr = "";
-    let settled = false;
-
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
+  if (archivePath.endsWith(".zip")) {
+    await extractZip(archivePath, {
+      dir: destinationPath,
     });
+    return;
+  }
 
-    child.on("error", (error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      reject(error);
+  if (archivePath.endsWith(".tar.gz")) {
+    await tar.x({
+      cwd: destinationPath,
+      file: archivePath,
+      strict: true,
     });
+    return;
+  }
 
-    child.on("exit", (code) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      if (code && code !== 0) {
-        reject(
-          new Error(sanitizeLogLine(stderr) || "Unable to extract the Java runtime archive."),
-        );
-        return;
-      }
-      resolve(true);
-    });
-  });
+  throw new Error("Unsupported Java archive format.");
 }
 
 async function downloadToFile(url, destinationPath, onProgress = null) {
@@ -416,10 +384,12 @@ export class DependencyManager {
         totalBytes: null,
         speedBytesPerSecond: 0,
       });
-      await expandZipArchive(definition.archivePath, definition.installDir);
+      await extractJavaArchive(definition.archivePath, definition.installDir);
       const javaPath = await findJavaBinaryInDirectory(definition.installDir);
       if (!javaPath) {
-        throw new Error(`${definition.name} was extracted, but java.exe was not found.`);
+        throw new Error(
+          `${definition.name} was extracted, but ${JAVA_EXECUTABLE_NAME} was not found.`,
+        );
       }
 
       const javaInfo = await inspectJavaBinary(javaPath);

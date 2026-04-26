@@ -8,14 +8,17 @@
     "start": "node src/app.js",
     "start:desktop": "node scripts/start-desktop.cjs",
     "test": "node --check src/app.js && node --check public/app.js && node --check electron/main.cjs && node --check electron/preload.cjs",
-    "build:exe": "electron-builder --win portable"
+    "build:exe": "electron-builder --win portable",
+    "build:linux": "electron-builder --linux AppImage"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "extract-zip": "^2.0.1",
+    "tar": "^7.5.13"
   },
   "devDependencies": {
     "@yao-pkg/pkg": "^6.6.0",
@@ -48,10 +51,12 @@
       "!MinecraftPanel.exe",
       "!Releu.exe",
       "!Releu-minecraft.exe",
+      "!Releu-minecraft.AppImage",
       "!*.zip"
     ],
     "asar": true,
     "win": {
+      "artifactName": "Releu-minecraft.exe",
       "signAndEditExecutable": false,
       "target": [
         {
@@ -61,6 +66,18 @@
           ]
         }
       ]
+    },
+    "linux": {
+      "artifactName": "Releu-minecraft.AppImage",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Game"
     }
   }
 }

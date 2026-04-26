@@ -39,17 +39,7 @@ function createWindow(url) {
   return window;
 }
 
-function schedulePortableUpdate(stagedPath) {
-  if (!app.isPackaged) {
-    throw new Error("App self-update is supported only in packaged builds.");
-  }
-
-  const targetExePath = process.execPath;
-  const resolvedStagedPath = path.resolve(String(stagedPath ?? "").trim());
-  if (!resolvedStagedPath) {
-    throw new Error("No staged update executable was provided.");
-  }
-
+function scheduleWindowsPortableUpdate(targetExePath, resolvedStagedPath) {
   const scriptPath = path.join(
     app.getPath("temp"),
     `releu-apply-update-${Date.now()}.ps1`,
@@ -112,6 +102,82 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
   );
 
   child.unref();
+}
+
+function scheduleLinuxPortableUpdate(targetAppPath, resolvedStagedPath) {
+  const scriptPath = path.join(
+    app.getPath("temp"),
+    `releu-apply-update-${Date.now()}.sh`,
+  );
+  const scriptBody = `
+#!/usr/bin/env sh
+set -eu
+
+CURRENT_APP="$1"
+STAGED_APP="$2"
+PARENT_PID="$3"
+
+i=0
+while kill -0 "$PARENT_PID" 2>/dev/null && [ "$i" -lt 120 ]; do
+  sleep 0.5
+  i=$((i + 1))
+done
+
+i=0
+while [ "$i" -lt 40 ]; do
+  if cp "$STAGED_APP" "$CURRENT_APP" 2>/dev/null; then
+    chmod +x "$CURRENT_APP" || true
+    rm -f "$STAGED_APP"
+    nohup "$CURRENT_APP" >/dev/null 2>&1 &
+    rm -f "$0"
+    exit 0
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
+
+exit 1
+`.trim();
+
+  fs.writeFileSync(scriptPath, scriptBody, {
+    encoding: "utf8",
+    mode: 0o700,
+  });
+
+  const child = spawn(
+    "sh",
+    [scriptPath, targetAppPath, resolvedStagedPath, String(process.pid)],
+    {
+      detached: true,
+      stdio: "ignore",
+    },
+  );
+
+  child.unref();
+}
+
+function schedulePortableUpdate(stagedPath) {
+  if (!app.isPackaged) {
+    throw new Error("App self-update is supported only in packaged builds.");
+  }
+
+  const resolvedStagedPath = path.resolve(String(stagedPath ?? "").trim());
+  if (!resolvedStagedPath) {
+    throw new Error("No staged update executable was provided.");
+  }
+
+  if (process.platform === "win32") {
+    scheduleWindowsPortableUpdate(process.execPath, resolvedStagedPath);
+    return;
+  }
+
+  if (process.platform === "linux") {
+    const targetAppPath = path.resolve(process.env.APPIMAGE || process.execPath);
+    scheduleLinuxPortableUpdate(targetAppPath, resolvedStagedPath);
+    return;
+  }
+
+  throw new Error("App self-update is not supported on this platform.");
 }
 
 ipcMain.handle("desktop:copy-text", async (_event, value) => {
