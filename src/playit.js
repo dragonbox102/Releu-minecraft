@@ -80,6 +80,12 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function maybeExtractClaimUrl(rawLine) {
+  const message = extractUiMessage(rawLine);
+  const match = message.match(/https:\/\/playit\.gg\/claim\/[A-Za-z0-9._-]+/i);
+  return match?.[0] ?? null;
+}
+
 export class PlayitManager {
   constructor({ appendLog, getServerPort }) {
     this.appendLog = appendLog;
@@ -158,6 +164,41 @@ export class PlayitManager {
     };
   }
 
+  async persistClaimInfo(claimUrl) {
+    const normalizedUrl = String(claimUrl ?? "").trim();
+    if (!normalizedUrl) {
+      return;
+    }
+
+    const claimCode = normalizedUrl.split("/").filter(Boolean).at(-1) ?? null;
+    this.state.claimCode = claimCode;
+    this.state.claimUrl = normalizedUrl;
+    this.state.claimWaiting = true;
+    this.state.status = "waiting-for-claim";
+    this.state.statusMessage =
+      "Playit setup is waiting for you to finish the browser link.";
+    await writeJsonFile(paths.claimInfoFile, {
+      claimCode,
+      claimUrl: normalizedUrl,
+      createdAt: currentTimestamp(),
+    });
+  }
+
+  async syncSecretStateFromDisk() {
+    const secretConfigured = await fileExists(paths.playitSecretFile);
+    if (!secretConfigured || this.state.secretConfigured) {
+      return secretConfigured;
+    }
+
+    this.state.secretConfigured = true;
+    this.state.claimWaiting = false;
+    this.state.status = this.state.running ? "running" : "ready";
+    this.state.lastError = null;
+    this.state.statusMessage = "Playit agent linked successfully.";
+    this.appendLog("playit", "Stored playit secret locally from playit setup.");
+    return true;
+  }
+
   describeMissingTunnel() {
     return `No playit tunnel is assigned to this agent yet. Create or assign a Minecraft Java tunnel for 127.0.0.1:${this.getServerPort()} in the playit dashboard.`;
   }
@@ -194,6 +235,11 @@ export class PlayitManager {
     const cleaned = sanitizeLogLine(rawLine);
     if (!cleaned) {
       return;
+    }
+
+    const claimUrl = maybeExtractClaimUrl(cleaned);
+    if (claimUrl) {
+      void this.persistClaimInfo(claimUrl);
     }
 
     const tunnel = parseTunnelLine(cleaned);
@@ -247,6 +293,9 @@ export class PlayitManager {
     }
 
     if (cleaned.includes("secret key valid")) {
+      this.state.secretConfigured = true;
+      this.state.claimWaiting = false;
+      this.state.status = this.state.running ? "running" : "ready";
       this.state.lastError = null;
       if (this.state.configuredTunnelCount === 0 && !this.state.tunnels.length) {
         this.state.needsWebSetup = true;
@@ -383,42 +432,20 @@ export class PlayitManager {
     return this.snapshot();
   }
 
-  async generateClaim(agentName) {
+  async generateClaim(_agentName) {
     await this.ensureBinary();
-    const claimCodeOutput = await this.runCommand(["claim", "generate"]);
-    const claimCode = extractUiMessage(claimCodeOutput.stdout)
-      .split(/\s+/)
-      .at(-1);
+    await this.startAgent({ allowSetup: true });
 
-    const claimUrlOutput = await this.runCommand([
-      "claim",
-      "url",
-      claimCode,
-      "--name",
-      agentName || "Minecraft Panel Host",
-    ]);
-
-    const claimUrl = extractUiMessage(claimUrlOutput.stdout)
-      .split(/\s+/)
-      .find((token) => token.startsWith("https://"));
-
-    if (!claimCode || !claimUrl) {
-      throw new Error("playit returned an unexpected claim response.");
+    const deadline = Date.now() + 12000;
+    while (Date.now() < deadline) {
+      if (this.state.claimUrl) {
+        this.appendLog("playit", `Generated playit claim URL: ${this.state.claimUrl}`);
+        return this.snapshot();
+      }
+      await wait(250);
     }
 
-    this.state.claimCode = claimCode;
-    this.state.claimUrl = claimUrl;
-    this.state.claimWaiting = true;
-    this.state.status = "waiting-for-claim";
-    await writeJsonFile(paths.claimInfoFile, {
-      claimCode,
-      claimUrl,
-      createdAt: currentTimestamp(),
-    });
-
-    this.appendLog("playit", `Generated playit claim URL: ${claimUrl}`);
-    this.startClaimExchange(claimCode);
-    return this.snapshot();
+    throw new Error("playit did not provide a claim link in time.");
   }
 
   startClaimExchange(claimCode) {
@@ -492,9 +519,10 @@ export class PlayitManager {
     });
   }
 
-  async startAgent() {
+  async startAgent({ allowSetup = false } = {}) {
     await this.ensureBinary();
-    if (!(await fileExists(paths.playitSecretFile))) {
+    const secretConfigured = await fileExists(paths.playitSecretFile);
+    if (!secretConfigured && !allowSetup) {
       throw new Error("No playit secret is configured yet.");
     }
 
@@ -516,9 +544,11 @@ export class PlayitManager {
 
     this.agentProcess = child;
     this.state.running = true;
-    this.state.status = "running";
+    this.state.status = secretConfigured ? "running" : "waiting-for-claim";
     this.state.checkingTunnelStatus = true;
-    this.state.statusMessage = "Checking linked playit agent and tunnel status.";
+    this.state.statusMessage = secretConfigured
+      ? "Checking linked playit agent and tunnel status."
+      : "Starting playit setup and waiting for the claim link.";
     this.state.lastStartedAt = currentTimestamp();
     this.state.lastError = null;
 
@@ -530,6 +560,7 @@ export class PlayitManager {
 
       this.observeLine(cleaned);
       this.appendLog("playit", cleaned, level);
+      void this.syncSecretStateFromDisk();
     };
 
     child.stdout.on("data", (chunk) => {
@@ -559,9 +590,12 @@ export class PlayitManager {
     });
 
     await wait(1200);
-    await this.refreshTunnels({ force: true });
-    if (this.state.needsWebSetup) {
-      this.state.status = "needs-tunnel-setup";
+    await this.syncSecretStateFromDisk();
+    if (this.state.secretConfigured) {
+      await this.refreshTunnels({ force: true });
+      if (this.state.needsWebSetup) {
+        this.state.status = "needs-tunnel-setup";
+      }
     }
     return this.snapshot();
   }
