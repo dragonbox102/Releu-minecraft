@@ -7,6 +7,7 @@ body {
   background: #000;
   color: #fff;
   font-family: Inter, sans-serif;
+  overflow-y: scroll;
 }
 
 * {
@@ -60,6 +61,58 @@ textarea::placeholder {
   border-color: #ffffff !important;
 }
 
+.releu-screen {
+  animation: releu-screen-in 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.releu-panel {
+  animation: releu-fade-up 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.releu-button {
+  transition:
+    transform 180ms ease,
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    opacity 180ms ease;
+}
+
+.releu-button:hover {
+  transform: translateY(-1px);
+}
+
+.releu-button:active {
+  transform: translateY(1px) scale(0.99);
+}
+
+.releu-progress-fill {
+  transition: width 280ms ease;
+}
+
+.releu-nav-active {
+  position: relative;
+}
+
+.releu-nav-active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: #ffffff;
+}
+
+.releu-modal-backdrop {
+  backdrop-filter: blur(6px);
+  animation: releu-fade-in 180ms ease;
+}
+
+.releu-modal-panel {
+  animation: releu-modal-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .releu-no-scrollbar::-webkit-scrollbar {
   display: none;
 }
@@ -67,4 +120,56 @@ textarea::placeholder {
 .releu-no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+@keyframes releu-screen-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes releu-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes releu-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes releu-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
 }

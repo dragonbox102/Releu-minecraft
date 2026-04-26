@@ -290,6 +290,14 @@ export class MinecraftPanelService {
         serverReady: false,
         serverPid: null,
         playerCount: 0,
+        operation: {
+          active: false,
+          type: null,
+          title: null,
+          shortLabel: null,
+          detail: null,
+          startedAt: null,
+        },
         resourceMetrics: {
           cpuPercent: 0,
           ramUsedMb: 0,
@@ -336,6 +344,28 @@ export class MinecraftPanelService {
       throw new Error("The selected server does not exist.");
     }
     return context;
+  }
+
+  setServerOperation(context, operation = {}) {
+    context.state.operation = {
+      active: true,
+      type: operation.type ?? "working",
+      title: operation.title ?? "Working",
+      shortLabel: operation.shortLabel ?? operation.title ?? "Working",
+      detail: operation.detail ?? "Releu is working on this server.",
+      startedAt: operation.startedAt ?? currentTimestamp(),
+    };
+  }
+
+  clearServerOperation(context) {
+    context.state.operation = {
+      active: false,
+      type: null,
+      title: null,
+      shortLabel: null,
+      detail: null,
+      startedAt: null,
+    };
   }
 
   getRecommendedTunnelPort() {
@@ -751,6 +781,7 @@ if (-not $sample) { exit 0 }
       ready: context.state.serverReady,
       pid: context.state.serverPid,
       playerCount: context.state.playerCount,
+      operation: context.state.operation,
       metrics,
       port: Number(context.cachedProperties["server-port"] ?? 25565),
       serverDir: context.paths.serverDir,
@@ -791,6 +822,7 @@ if (-not $sample) { exit 0 }
         ready: context.state.serverReady,
         pid: context.state.serverPid,
         playerCount: context.state.playerCount,
+        operation: context.state.operation,
         metrics,
         jarInstalled,
         eulaAccepted: await this.readEula(context.record.id),
@@ -810,7 +842,12 @@ if (-not $sample) { exit 0 }
   async getState(serverId = this.activeServerId) {
     const context = this.getServerContext(serverId);
     if (this.playitInitialized) {
-      this.playit.refreshTunnels().catch(() => {});
+      const playitSnapshot = this.playit.snapshot();
+      const shouldForceTunnelRefresh =
+        playitSnapshot.secretConfigured &&
+        !playitSnapshot.tunnels.some((entry) => entry.publicAddress) &&
+        (context.state.serverStatus === "starting" || context.state.serverStatus === "running");
+      this.playit.refreshTunnels({ force: shouldForceTunnelRefresh }).catch(() => {});
     }
     this.updater.maybeCheckForUpdates().catch(() => {});
 
@@ -1202,43 +1239,60 @@ if (-not $sample) { exit 0 }
     const context = this.getServerContext(serverId);
     const selectedSoftware = software ?? context.config.install.software ?? "purpur";
     const selectedVersion = requestedVersion ?? "latest";
-
-    this.appendLog(serverId, "panel", `Downloading ${selectedSoftware} (${selectedVersion})...`);
-    const installMeta = await downloadServerJar({
-      software: selectedSoftware,
-      requestedVersion: selectedVersion,
-      destinationPath: context.paths.serverJar,
+    this.setServerOperation(context, {
+      type: "install",
+      title: "Installing Server Software",
+      shortLabel: "Installing",
+      detail: `Downloading ${selectedSoftware} ${selectedVersion}.`,
     });
 
-    context.state.installMeta = installMeta;
-    context.config.install = {
-      software: selectedSoftware,
-      requestedVersion: selectedVersion,
-      installedSoftware: installMeta.software,
-      installedVersion: installMeta.version,
-      installedBuild: installMeta.build,
-    };
+    try {
+      this.appendLog(serverId, "panel", `Downloading ${selectedSoftware} (${selectedVersion})...`);
+      const installMeta = await downloadServerJar({
+        software: selectedSoftware,
+        requestedVersion: selectedVersion,
+        destinationPath: context.paths.serverJar,
+      });
 
-    const preferredJavaPath = this.getPreferredManagedJavaPath(installMeta.version);
-    if (preferredJavaPath && this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
-      context.config.launcher = {
-        ...context.config.launcher,
-        javaPath: preferredJavaPath,
+      this.setServerOperation(context, {
+        type: "install",
+        title: "Finalizing Server Install",
+        shortLabel: "Finalizing",
+        detail: `Saving ${installMeta.softwareName} ${installMeta.version} and updating launcher defaults.`,
+      });
+
+      context.state.installMeta = installMeta;
+      context.config.install = {
+        software: selectedSoftware,
+        requestedVersion: selectedVersion,
+        installedSoftware: installMeta.software,
+        installedVersion: installMeta.version,
+        installedBuild: installMeta.build,
       };
-    }
 
-    await this.saveContextConfig(context);
-    context.cachedProperties = await ensureServerPropertyFile(context.paths);
-    if (acceptEula) {
-      await this.setEula(serverId, true);
-    }
+      const preferredJavaPath = this.getPreferredManagedJavaPath(installMeta.version);
+      if (preferredJavaPath && this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
+        context.config.launcher = {
+          ...context.config.launcher,
+          javaPath: preferredJavaPath,
+        };
+      }
 
-    this.appendLog(
-      serverId,
-      "panel",
-      `Installed ${installMeta.softwareName} ${installMeta.version} build ${installMeta.build}.`,
-    );
-    return installMeta;
+      await this.saveContextConfig(context);
+      context.cachedProperties = await ensureServerPropertyFile(context.paths);
+      if (acceptEula) {
+        await this.setEula(serverId, true);
+      }
+
+      this.appendLog(
+        serverId,
+        "panel",
+        `Installed ${installMeta.softwareName} ${installMeta.version} build ${installMeta.build}.`,
+      );
+      return installMeta;
+    } finally {
+      this.clearServerOperation(context);
+    }
   }
 
   async getSoftwareVersions(software = "purpur") {
@@ -1498,6 +1552,9 @@ if (-not $sample) { exit 0 }
     if (payload.includes("Done (") && payload.includes("For help")) {
       context.state.serverStatus = "running";
       context.state.serverReady = true;
+      if (this.playit.snapshot().secretConfigured) {
+        this.playit.refreshTunnels({ force: true }).catch(() => {});
+      }
     }
 
     const uuidMatch = payload.match(/^UUID of player (.+?) is ([0-9a-f-]+)$/i);

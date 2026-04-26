@@ -150,6 +150,10 @@ export class PlayitManager {
     };
   }
 
+  describeMissingTunnel() {
+    return `No playit tunnel is assigned to this agent yet. Create or assign a Minecraft Java tunnel for 127.0.0.1:${this.getServerPort()} in the playit dashboard.`;
+  }
+
   observeLine(rawLine) {
     const cleaned = sanitizeLogLine(rawLine);
     if (!cleaned) {
@@ -186,6 +190,10 @@ export class PlayitManager {
         this.state.detectedTunnelCount,
         tunnelCount,
       );
+      if (tunnelCount === 0) {
+        this.state.needsWebSetup = true;
+        this.state.statusMessage = this.describeMissingTunnel();
+      }
     }
 
     if (cleaned.includes("SessionNotSetup")) {
@@ -196,6 +204,10 @@ export class PlayitManager {
 
     if (cleaned.includes("secret key valid")) {
       this.state.lastError = null;
+      if (this.state.configuredTunnelCount === 0 && !this.state.tunnels.length) {
+        this.state.needsWebSetup = true;
+        this.state.statusMessage = this.describeMissingTunnel();
+      }
     }
 
     if (cleaned.includes("tunnel running")) {
@@ -565,6 +577,8 @@ export class PlayitManager {
         this.state.needsWebSetup = false;
         this.state.statusMessage = `Detected ${tunnels.length} playit tunnel(s).`;
       } else {
+        this.state.needsWebSetup = true;
+        this.state.statusMessage = this.describeMissingTunnel();
         await this.probeTunnelStatus({ force });
       }
     } catch (error) {
@@ -632,10 +646,15 @@ export class PlayitManager {
       });
       child.on("exit", () => {
         clearTimeout(timer);
-        if (!this.state.tunnels.length && this.state.configuredTunnelCount > 0) {
-          this.state.statusMessage =
-            this.state.statusMessage ??
-            `Playit reports ${this.state.configuredTunnelCount} configured tunnel(s), but this CLI cannot list the public address. Open the playit dashboard to confirm the address or finish setup.`;
+        if (!this.state.tunnels.length) {
+          if (this.state.configuredTunnelCount > 0) {
+            this.state.statusMessage =
+              this.state.statusMessage ??
+              `Playit reports ${this.state.configuredTunnelCount} configured tunnel(s), but this CLI cannot list the public address yet. Releu will keep checking while the server is online.`;
+          } else {
+            this.state.needsWebSetup = true;
+            this.state.statusMessage = this.describeMissingTunnel();
+          }
         }
         resolve(this.snapshot());
       });
