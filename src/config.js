@@ -100,6 +100,30 @@ function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeUpdaterConfig(config, storedConfig = null) {
+  const merged = deepMerge(defaultConfig.updater, config ?? {});
+  const storedUpdater = isObject(storedConfig?.updater) ? storedConfig.updater : null;
+  const owner = String(merged.githubOwner ?? "").trim();
+  const repo = String(merged.githubRepo ?? "").trim();
+  const assetName = String(merged.assetName ?? "").trim();
+  const storedOwner = String(storedUpdater?.githubOwner ?? "").trim();
+  const storedRepo = String(storedUpdater?.githubRepo ?? "").trim();
+
+  // Repair legacy local configs that predate the baked-in GitHub defaults.
+  if (!owner && !repo && !storedOwner && !storedRepo) {
+    merged.enabled = true;
+    merged.githubOwner = defaultConfig.updater.githubOwner;
+    merged.githubRepo = defaultConfig.updater.githubRepo;
+    merged.assetName = assetName || defaultConfig.updater.assetName;
+  } else {
+    merged.githubOwner = owner;
+    merged.githubRepo = repo;
+    merged.assetName = assetName || defaultConfig.updater.assetName;
+  }
+
+  return merged;
+}
+
 export function deepMerge(base, incoming) {
   const output = structuredClone(base);
   for (const [key, value] of Object.entries(incoming ?? {})) {
@@ -202,12 +226,14 @@ export async function loadPanelConfig() {
   await ensureAppDirectories();
   const stored = await readJsonFile(paths.configFile, defaultConfig);
   const merged = deepMerge(defaultConfig, stored);
+  merged.updater = normalizeUpdaterConfig(merged.updater, stored);
   await writeJsonFile(paths.configFile, merged);
   return merged;
 }
 
 export async function savePanelConfig(config) {
   const merged = deepMerge(defaultConfig, config);
+  merged.updater = normalizeUpdaterConfig(merged.updater, merged);
   await writeJsonFile(paths.configFile, merged);
   return merged;
 }
