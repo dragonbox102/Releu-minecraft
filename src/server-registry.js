@@ -70,6 +70,7 @@ export function getServerPaths(serverRecord) {
     logsDir: path.join(serverRecord.serverDir, "logs"),
     configFile: path.join(dataDir, "config.json"),
     playerIndexFile: path.join(dataDir, "player-index.json"),
+    assetIndexFile: path.join(dataDir, "asset-index.json"),
   };
 }
 
