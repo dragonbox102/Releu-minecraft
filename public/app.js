@@ -1521,24 +1521,17 @@ function renderSettingsSection(server) {
         <form data-form="app-update-settings" class="space-y-4">
           <label class="flex items-center gap-3">
             <input name="enabled" type="checkbox" class="h-4 w-4 accent-white" ${appUpdate?.enabled ? "checked" : ""} />
-            <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Enable GitHub Updates</span>
+            <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Enable App Updates</span>
           </label>
           <label class="flex items-center gap-3">
             <input name="autoInstall" type="checkbox" class="h-4 w-4 accent-white" ${appUpdate?.autoInstall ? "checked" : ""} />
             <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Auto Install And Restart</span>
           </label>
-          <label class="block">
-            <span class="${C.label} mb-2 block">GitHub Owner</span>
-            <input name="githubOwner" type="text" value="${escapeHtml(appUpdate?.githubOwner ?? "")}" class="${C.input} w-full" placeholder="your-github-name" />
-          </label>
-          <label class="block">
-            <span class="${C.label} mb-2 block">GitHub Repo</span>
-            <input name="githubRepo" type="text" value="${escapeHtml(appUpdate?.githubRepo ?? "")}" class="${C.input} w-full" placeholder="releu-minecraft" />
-          </label>
-          <label class="block">
-            <span class="${C.label} mb-2 block">Release Asset Name</span>
-            <input name="assetName" type="text" value="${escapeHtml(appUpdate?.assetName ?? "")}" class="${C.input} w-full" placeholder="${escapeHtml(appUpdate?.assetName ?? runtime.data.updaterSettings?.assetName ?? "Releu-minecraft")}" />
-          </label>
+          <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
+            <div>Update source: <span class="font-mono text-zinc-200">${escapeHtml(`${appUpdate?.githubOwner ?? runtime.data.updaterSettings?.githubOwner ?? "dragonbox102"}/${appUpdate?.githubRepo ?? runtime.data.updaterSettings?.githubRepo ?? "Releu-minecraft"}`)}</span></div>
+            <div class="mt-1">Locked release asset: <span class="font-mono text-zinc-200">${escapeHtml(appUpdate?.assetName ?? runtime.data.updaterSettings?.assetName ?? "Releu-minecraft.exe")}</span></div>
+            <div class="mt-1">This source is locked by Releu and cannot be changed from the panel.</div>
+          </div>
           <label class="block">
             <span class="${C.label} mb-2 block">Check Interval (Hours)</span>
             <input name="checkIntervalHours" type="number" min="1" value="${escapeHtml(runtime.data.updaterSettings?.checkIntervalHours ?? 6)}" class="${C.input} w-full font-mono" />
@@ -2267,9 +2260,6 @@ async function handleSubmit(event) {
           body: {
             enabled: form.elements.enabled.checked,
             autoInstall: form.elements.autoInstall.checked,
-            githubOwner: form.elements.githubOwner.value,
-            githubRepo: form.elements.githubRepo.value,
-            assetName: form.elements.assetName.value,
             checkIntervalHours: Number(form.elements.checkIntervalHours.value) || 6,
           },
         });
