@@ -103,9 +103,7 @@ function isPotentialMinecraftDowngrade(currentVersion, nextVersion) {
 
 function stripMinecraftLogPrefix(value) {
   return sanitizeLogLine(value)
-    .replace(/^\[[0-9:.]+\]\s+\[[^\]]+\]:\s*/i, "")
-    .replace(/^\[[^\]]+\]\s+\[[^\]]+\]:\s*/i, "")
-    .replace(/^\[[^\]]+\]:\s*/i, "")
+    .replace(/^(?:\[[^\]]+\]\s*)+:\s*/i, "")
     .trim();
 }
 
@@ -2425,10 +2423,44 @@ if (-not $sample) { exit 0 }
     return null;
   }
 
+  serverLooksLikeSoftware(context, softwareId) {
+    const serverDir = context.paths.serverDir;
+    switch (softwareId) {
+      case "purpur":
+        return hasPath(path.join(serverDir, "purpur.yml"));
+      case "paper":
+        return (
+          !hasPath(path.join(serverDir, "purpur.yml")) &&
+          (
+            hasPath(path.join(serverDir, "paper.yml")) ||
+            hasPath(path.join(serverDir, "paper-global.yml")) ||
+            hasPath(path.join(serverDir, "config", "paper-global.yml"))
+          )
+        );
+      case "fabric":
+        return (
+          hasPath(path.join(serverDir, ".fabric", "server")) ||
+          hasPath(path.join(serverDir, "libraries", "net", "fabricmc", "fabric-loader"))
+        );
+      case "forge":
+        return (
+          hasPath(path.join(serverDir, "forge-server-launcher.jar")) ||
+          hasPath(path.join(serverDir, "libraries", "net", "minecraftforge", "forge"))
+        );
+      case "neoforge":
+        return (
+          hasPath(path.join(serverDir, "neoforge.mods.toml")) ||
+          hasPath(path.join(serverDir, "libraries", "net", "neoforged", "neoforge"))
+        );
+      default:
+        return false;
+    }
+  }
+
   getEffectiveServerSoftwareId(context) {
     return (
-      this.getDetectedServerSoftwareId(context) ??
       context.config.install.installedSoftware ??
+      this.getDetectedServerSoftwareId(context) ??
       context.config.install.software ??
       "vanilla"
     );
@@ -2437,11 +2469,45 @@ if (-not $sample) { exit 0 }
   async syncDetectedInstalledSoftware(context) {
     const detectedSoftware = this.getDetectedServerSoftwareId(context);
     if (!detectedSoftware) {
-      return null;
+      return context.config.install.installedSoftware ?? null;
     }
 
-    if (context.config.install.installedSoftware === detectedSoftware) {
-      return detectedSoftware;
+    const configuredInstalledSoftware = String(
+      context.config.install.installedSoftware ?? "",
+    ).trim();
+    const requestedSoftware = String(context.config.install.software ?? "").trim();
+    const requestedVersion = String(context.config.install.requestedVersion ?? "").trim();
+    const installedVersion = String(context.config.install.installedVersion ?? "").trim();
+    const requestedMatchesInstalledVersion =
+      Boolean(requestedVersion) &&
+      Boolean(installedVersion) &&
+      requestedVersion === installedVersion;
+
+    if (
+      configuredInstalledSoftware &&
+      requestedSoftware &&
+      configuredInstalledSoftware !== requestedSoftware &&
+      requestedMatchesInstalledVersion &&
+      (
+        detectedSoftware === requestedSoftware ||
+        this.serverLooksLikeSoftware(context, requestedSoftware)
+      )
+    ) {
+      context.config.install = {
+        ...context.config.install,
+        installedSoftware: requestedSoftware,
+      };
+      await this.saveContextConfig(context);
+      this.appendLog(
+        context.record.id,
+        "panel",
+        `Releu corrected this server profile from stale ${formatSoftwareName(configuredInstalledSoftware) ?? configuredInstalledSoftware} markers to ${formatSoftwareName(requestedSoftware) ?? requestedSoftware}.`,
+      );
+      return requestedSoftware;
+    }
+
+    if (configuredInstalledSoftware) {
+      return configuredInstalledSoftware;
     }
 
     context.config.install = {
