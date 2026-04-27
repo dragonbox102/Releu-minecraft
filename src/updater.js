@@ -74,6 +74,22 @@ function pickReleaseAsset(release, preferredAssetName) {
   return null;
 }
 
+function parsePendingUpdateVersion(fileName, assetName) {
+  const normalizedFileName = String(fileName ?? "").trim();
+  const normalizedAssetName = path.basename(String(assetName ?? "").trim());
+  if (!normalizedFileName || !normalizedAssetName) {
+    return null;
+  }
+
+  const suffix = `-${normalizedAssetName}`;
+  if (!normalizedFileName.toLowerCase().endsWith(suffix.toLowerCase())) {
+    return null;
+  }
+
+  const version = normalizedFileName.slice(0, -suffix.length);
+  return normalizeVersion(version) || null;
+}
+
 export class AppUpdater {
   constructor({ appendLog, getPanelConfig, hasRunningServers }) {
     this.appendLog = appendLog;
@@ -112,6 +128,7 @@ export class AppUpdater {
     await fs.mkdir(paths.updatesDir, { recursive: true });
     await fs.mkdir(paths.updateCacheDir, { recursive: true });
     await fs.mkdir(paths.updatePendingDir, { recursive: true });
+    await this.restorePendingUpdate();
     await this.cleanupAppliedStagedUpdate();
   }
 
@@ -164,6 +181,57 @@ export class AppUpdater {
     this.state.downloadedBytes = 0;
     this.state.totalBytes = 0;
     this.state.speedBytesPerSecond = 0;
+  }
+
+  async restorePendingUpdate() {
+    await fs.mkdir(paths.updatePendingDir, { recursive: true });
+    const entries = await fs.readdir(paths.updatePendingDir, {
+      withFileTypes: true,
+    }).catch(() => []);
+
+    let bestCandidate = null;
+    for (const entry of entries) {
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      if (entry.name.endsWith(".download")) {
+        await fs.rm(path.join(paths.updatePendingDir, entry.name), {
+          force: true,
+        }).catch(() => {});
+        continue;
+      }
+
+      const version = parsePendingUpdateVersion(entry.name, this.state.assetName);
+      if (!version) {
+        continue;
+      }
+
+      const absolutePath = path.join(paths.updatePendingDir, entry.name);
+      if (compareVersions(version, this.state.currentVersion) <= 0) {
+        await fs.rm(absolutePath, { force: true }).catch(() => {});
+        continue;
+      }
+
+      if (!bestCandidate || compareVersions(version, bestCandidate.version) > 0) {
+        bestCandidate = {
+          version,
+          filePath: absolutePath,
+        };
+      }
+    }
+
+    if (!bestCandidate) {
+      return;
+    }
+
+    this.state.available = true;
+    this.state.updateReady = true;
+    this.state.latestVersion = bestCandidate.version;
+    this.state.stagedVersion = bestCandidate.version;
+    this.state.stagedFilePath = bestCandidate.filePath;
+    this.state.statusMessage =
+      `Update ${bestCandidate.version} is already downloaded and ready to install.`;
   }
 
   async maybeCheckForUpdates() {
