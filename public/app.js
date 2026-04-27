@@ -356,14 +356,21 @@ function isDesktopApp() {
   return Boolean(window.desktop?.isDesktop);
 }
 
-function playitPrimaryTunnel() {
-  return runtime.data?.playit?.tunnels?.find((entry) => entry.publicAddress) ??
-    runtime.data?.playit?.tunnels?.[0] ??
+function serverPort(server = activeServer()) {
+  return Number(server?.server?.properties?.["server-port"] ?? 25565);
+}
+
+function playitPrimaryTunnel(server = activeServer()) {
+  const tunnels = runtime.data?.playit?.tunnels ?? [];
+  const port = serverPort(server);
+  const matching = tunnels.filter((entry) => Number(entry?.localPort ?? 0) === port);
+  return matching.find((entry) => entry.publicAddress) ??
+    matching[0] ??
     null;
 }
 
-function playitMinecraftIp() {
-  return playitPrimaryTunnel()?.publicAddress ?? null;
+function playitMinecraftIp(server = activeServer()) {
+  return playitPrimaryTunnel(server)?.publicAddress ?? null;
 }
 
 function appUpdateState() {
@@ -833,8 +840,12 @@ function worldCount(server) {
 
 function playitAddressState(server = activeServer()) {
   const playit = runtime.data?.playit;
-  const ip = playitMinecraftIp();
+  const ip = playitMinecraftIp(server);
   const running = String(server?.server?.status ?? "").toLowerCase() === "running";
+  const port = serverPort(server);
+  const otherTunnel = (playit?.tunnels ?? []).find(
+    (entry) => entry.publicAddress && Number(entry?.localPort ?? 0) !== port,
+  );
   if (ip) {
     return {
       value: ip,
@@ -858,7 +869,13 @@ function playitAddressState(server = activeServer()) {
       value: "Checking Tunnel Status",
       detail:
         playit?.statusMessage ??
-        `Releu is checking the linked playit.gg agent and tunnel status for ${playit?.recommendedTunnelTarget ?? "127.0.0.1:25565"}.`,
+        `Releu is checking the linked playit.gg agent and tunnel status for 127.0.0.1:${port}.`,
+    };
+  }
+  if (otherTunnel) {
+    return {
+      value: "Tunnel Uses Different Port",
+      detail: `Playit already has a live tunnel for 127.0.0.1:${otherTunnel.localPort} at ${otherTunnel.publicAddress}. This server is using 127.0.0.1:${port}. Change the tunnel target or change this server port to match.`,
     };
   }
   if (playit?.needsWebSetup && Number(playit?.configuredTunnelCount ?? 0) > 0) {
@@ -866,13 +883,13 @@ function playitAddressState(server = activeServer()) {
       value: "Tunnel Found, Setup Incomplete",
       detail:
         playit?.statusMessage ??
-        `Playit found a tunnel for ${playit?.recommendedTunnelTarget ?? "127.0.0.1:25565"}, but it still needs setup before a public join address exists.`,
+        `Playit found a tunnel for 127.0.0.1:${port}, but it still needs setup before a public join address exists.`,
     };
   }
   if (Number(playit?.configuredTunnelCount ?? 0) === 0) {
     return {
       value: "No Tunnel Created Yet",
-      detail: `Create or assign a Minecraft Java tunnel for ${playit?.recommendedTunnelTarget ?? "127.0.0.1:25565"} in Settings.`,
+      detail: `Create or assign a Minecraft Java tunnel for 127.0.0.1:${port} in Settings.`,
     };
   }
   if (!running) {
@@ -880,14 +897,14 @@ function playitAddressState(server = activeServer()) {
       value: "Run Server To Get Address",
       detail:
         playit.statusMessage ??
-        `Start this server on ${playit.recommendedTunnelTarget} so playit can publish the join address.`,
+        `Start this server on 127.0.0.1:${port} so playit can publish the join address.`,
     };
   }
   return {
     value: "Waiting For Public Address",
     detail:
       playit.statusMessage ??
-      `Releu is waiting for playit.gg to publish the public join address for ${playit.recommendedTunnelTarget}.`,
+      `Releu is waiting for playit.gg to publish the public join address for 127.0.0.1:${port}.`,
   };
 }
 
@@ -1172,13 +1189,17 @@ function renderOverviewSection(server) {
   const world = currentWorld(server)?.name ?? server.server.properties["level-name"] ?? "world";
   const status = serverStatusPresentation(server);
   const players = server.players?.filter((entry) => entry.online).slice(0, 5) ?? [];
-  const ipAction = playitMinecraftIp()
+  const ipAction = playitMinecraftIp(server)
     ? `<button type="button" class="${C.btnGhost}" data-action="copy-address">Copy IP</button>`
-    : joinState.value === "No Tunnel Assigned Yet"
-      ? `<button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="settings">Fix Tunnel</button>`
-      : "";
+    : `<button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="settings">Open Tunnel Settings</button>`;
   const publicStatusLabel =
-    playitMinecraftIp() ? "Live" : joinState.value === "No Tunnel Assigned Yet" ? "No Tunnel" : "Pending";
+    playitMinecraftIp(server)
+      ? "Live"
+      : joinState.value === "No Tunnel Created Yet"
+        ? "No Tunnel"
+        : joinState.value === "Tunnel Uses Different Port"
+          ? "Mismatch"
+          : "Pending";
   const memoryPercent = ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0;
   const startDisabled = server.server.status === "running" || server.server.status === "starting";
   const stopDisabled = server.server.status === "stopped" || server.server.status === "stopping";
@@ -1267,18 +1288,11 @@ function renderOverviewSection(server) {
             <div class="${C.label} mb-3">Public Access</div>
             <div class="mb-2 text-2xl font-black tracking-tight text-white">${escapeHtml(publicStatusLabel)}</div>
             <p class="text-xs leading-6 text-zinc-400">${escapeHtml(joinState.detail)}</p>
+            ${ipAction ? `<div class="mt-4 flex flex-wrap gap-2">${ipAction}</div>` : ""}
           </article>
         </div>
       </div>
       <div class="space-y-4 md:col-span-4">
-        <div class="${C.card}">
-          <h2 class="${C.label} mb-4 text-white">Minecraft IP</h2>
-          <div class="space-y-4">
-            <code class="block break-all text-xl font-semibold text-white">${escapeHtml(joinState.value)}</code>
-            <p class="text-sm leading-7 text-zinc-400">${escapeHtml(joinState.detail)}</p>
-            ${ipAction ? `<div class="flex flex-wrap gap-2">${ipAction}</div>` : ""}
-          </div>
-        </div>
         <div class="${C.card}">
           <h2 class="${C.label} mb-4 text-white">Active Players</h2>
           <div class="mb-4 flex items-baseline gap-2">
@@ -1485,7 +1499,7 @@ function renderSettingsSection(server) {
         <div class="mt-4 flex flex-wrap gap-2">
           ${playitAction}
           ${playit.secretConfigured ? `<a class="${C.btnGhost}" href="${escapeHtml(playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Dashboard</a>` : ""}
-          ${playitMinecraftIp() ? `<button type="button" class="${C.btnGhost}" data-action="copy-address">Copy IP</button>` : ""}
+          ${playitMinecraftIp(server) ? `<button type="button" class="${C.btnGhost}" data-action="copy-address">Copy IP</button>` : ""}
         </div>
       </div>
       <div class="${C.card}">
