@@ -52,7 +52,6 @@ import {
   slugifyServerId,
 } from "./server-registry.js";
 import {
-  getDefaultUpdaterAssetName,
   isLinux,
   withHiddenConsole,
 } from "./platform.js";
@@ -1354,16 +1353,6 @@ if (-not $sample) { exit 0 }
         1,
         Number(payload.checkIntervalHours ?? this.panelConfig.updater.checkIntervalHours ?? 6) || 6,
       ),
-      githubOwner:
-        String(payload.githubOwner ?? this.panelConfig.updater.githubOwner ?? "").trim(),
-      githubRepo:
-        String(payload.githubRepo ?? this.panelConfig.updater.githubRepo ?? "").trim(),
-      assetName:
-        String(
-          payload.assetName ??
-            this.panelConfig.updater.assetName ??
-            getDefaultUpdaterAssetName(),
-        ).trim() || getDefaultUpdaterAssetName(),
       allowPrerelease: Boolean(
         payload.allowPrerelease ?? this.panelConfig.updater.allowPrerelease,
       ),
