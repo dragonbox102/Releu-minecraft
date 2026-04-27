@@ -1460,7 +1460,10 @@ function renderSettingsSection(server) {
             <input name="server-port" type="number" value="${escapeHtml(server.server.properties["server-port"] ?? 25565)}" class="${C.input} font-mono text-sm" placeholder="Port" />
             <input name="max-players" type="number" value="${escapeHtml(server.server.properties["max-players"] ?? 20)}" class="${C.input} font-mono text-sm" placeholder="Max players" />
             <input name="level-name" type="text" value="${escapeHtml(server.server.properties["level-name"] ?? "world")}" class="${C.input} font-mono text-sm" placeholder="Level name" />
-            <select name="gamemode" class="${C.input} font-mono text-sm">${["survival", "creative", "adventure", "spectator"].map((value) => `<option value="${escapeHtml(value)}" ${String(server.server.properties.gamemode ?? "").toLowerCase() === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>
+            <div class="space-y-2">
+              <select name="gamemode" class="${C.input} font-mono text-sm">${["survival", "creative", "adventure", "spectator"].map((value) => `<option value="${escapeHtml(value)}" ${String(server.server.properties.gamemode ?? "").toLowerCase() === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>
+              <p class="text-xs text-zinc-500">Default gamemode is only for new joins. Player actions can still change an online player's gamemode unless <span class="font-mono">force-gamemode=true</span>.</p>
+            </div>
           </div>
           <div class="space-y-4">
             <select name="difficulty" class="${C.input} font-mono text-sm">${["peaceful", "easy", "normal", "hard"].map((value) => `<option value="${escapeHtml(value)}" ${String(server.server.properties.difficulty ?? "").toLowerCase() === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>

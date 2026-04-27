@@ -1898,7 +1898,10 @@ if (-not $sample) { exit 0 }
       );
     }
 
-    const gamemodeMatch = payload.match(/^Set (.+?)'s game mode to (.+?) Mode$/i);
+    const gamemodeMatch =
+      payload.match(/^Set (.+?)'s game mode to (.+?) Mode$/i) ??
+      payload.match(/^Set game mode of (.+?) to (.+?)$/i) ??
+      payload.match(/^Set gamemode of (.+?) to (.+?)$/i);
     if (gamemodeMatch) {
       const player = normalizePlayerName(gamemodeMatch[1]);
       const gamemode = normalizeGamemode(gamemodeMatch[2]);
@@ -2822,7 +2825,7 @@ if (-not $sample) { exit 0 }
     const identity = requiresRunningServer.has(action)
       ? await this.resolvePlayerIdentity(serverId, normalized)
       : { name: normalized, uuid: null };
-    const liveCommandTarget = identity.uuid ?? identity.name ?? normalized;
+    const liveCommandTarget = identity.name ?? normalized;
 
     switch (action) {
       case "op":
@@ -2903,10 +2906,6 @@ if (-not $sample) { exit 0 }
         {
           const mode = normalizeGamemode(payload.mode) ?? "survival";
           await this.sendCommand(serverId, `gamemode ${mode} ${liveCommandTarget}`);
-          await this.rememberPlayer(serverId, normalized, {
-            gamemode: mode,
-            lastSeenAt: currentTimestamp(),
-          });
         }
         break;
       case "heal":
@@ -2934,7 +2933,15 @@ if (-not $sample) { exit 0 }
         throw new Error(`Unsupported player action: ${action}`);
     }
 
-    this.appendLog(serverId, "panel", `Player action "${action}" applied to ${normalized}.`);
+    if (requiresRunningServer.has(action)) {
+      this.appendLog(
+        serverId,
+        "panel",
+        `Sent player action "${action}" for ${normalized}. Waiting for server output to confirm it.`,
+      );
+    } else {
+      this.appendLog(serverId, "panel", `Player action "${action}" applied to ${normalized}.`);
+    }
     return this.getPlayers(serverId);
   }
 
