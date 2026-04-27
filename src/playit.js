@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { createWriteStream } from "node:fs";
+import https from "node:https";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -22,6 +23,7 @@ import {
 
 const PLAYIT_RELEASES_URL =
   "https://api.github.com/repos/playit-cloud/playit-agent/releases/latest";
+const PLAYIT_API_BASE = "https://api.playit.gg";
 
 function extractUiMessage(rawLine) {
   const cleaned = sanitizeLogLine(rawLine);
@@ -84,6 +86,67 @@ function maybeExtractClaimUrl(rawLine) {
   const message = extractUiMessage(rawLine);
   const match = message.match(/https:\/\/playit\.gg\/claim\/[A-Za-z0-9._-]+/i);
   return match?.[0] ?? null;
+}
+
+function getTunnelFieldValue(fields, name) {
+  return (
+    fields?.find(
+      (entry) => String(entry?.name ?? "").toLowerCase() === String(name).toLowerCase(),
+    )?.value ?? null
+  );
+}
+
+function parsePortNumber(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
+function preferredConnectAddress(addresses) {
+  const values = (addresses ?? [])
+    .map((entry) => entry?.value?.address ?? null)
+    .filter(Boolean);
+
+  return (
+    values.find((entry) => /\.joinmc\.link(?::\d+)?$/i.test(entry)) ??
+    values.find((entry) => !entry.includes(":")) ??
+    values[0] ??
+    null
+  );
+}
+
+function normalizeApiTunnel(accountTunnel, agentTunnel = null) {
+  const origin =
+    accountTunnel?.origin?.type === "agent" ? accountTunnel.origin.details ?? null : null;
+  const originFields = origin?.config_data?.fields ?? [];
+  const agentFields = agentTunnel?.agent_config?.fields ?? [];
+  const localPort =
+    parsePortNumber(getTunnelFieldValue(originFields, "local_port")) ??
+    parsePortNumber(getTunnelFieldValue(agentFields, "local_port"));
+  const localIp =
+    getTunnelFieldValue(originFields, "local_ip") ??
+    getTunnelFieldValue(agentFields, "local_ip") ??
+    null;
+  const publicAddress =
+    preferredConnectAddress(accountTunnel?.connect_addresses) ??
+    agentTunnel?.display_address ??
+    null;
+
+  return {
+    id: String(accountTunnel?.id ?? agentTunnel?.id ?? publicAddress ?? "unknown-tunnel"),
+    protocol: accountTunnel?.port_type ?? agentTunnel?.port_type ?? "tcp",
+    portCount: Number(accountTunnel?.port_count ?? agentTunnel?.port_count ?? 1),
+    publicAddress,
+    raw: publicAddress ?? agentTunnel?.display_address ?? "",
+    localIp,
+    localPort,
+    tunnelType: accountTunnel?.tunnel_type ?? agentTunnel?.tunnel_type ?? null,
+    displayAddress: agentTunnel?.display_address ?? null,
+    offlineReasons: accountTunnel?.offline_reasons ?? [],
+    disabledReason: accountTunnel?.disabled_reason ?? agentTunnel?.disabled_reason ?? null,
+    addresses: (accountTunnel?.connect_addresses ?? [])
+      .map((entry) => entry?.value?.address ?? null)
+      .filter(Boolean),
+  };
 }
 
 export class PlayitManager {
@@ -197,6 +260,118 @@ export class PlayitManager {
     this.state.statusMessage = "Playit agent linked successfully.";
     this.appendLog("playit", "Stored playit secret locally from playit setup.");
     return true;
+  }
+
+  async readSecret() {
+    const secret = await fs.readFile(paths.playitSecretFile, "utf8");
+    const normalized = String(secret ?? "").trim();
+    if (!normalized) {
+      throw new Error("No playit secret is configured yet.");
+    }
+    return normalized;
+  }
+
+  async requestApi(endpoint, payload = {}) {
+    const secret = await this.readSecret();
+    const requestBody = JSON.stringify(payload);
+
+    return new Promise((resolve, reject) => {
+      const request = https.request(
+        new URL(`${PLAYIT_API_BASE}${endpoint}`),
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(requestBody),
+            "User-Agent": "Releu/1.0",
+            Authorization: `Agent-Key ${secret}`,
+          },
+        },
+        (response) => {
+          let bodyText = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            bodyText += chunk;
+          });
+          response.on("end", () => {
+            const statusCode = Number(response.statusCode ?? 0);
+            if (statusCode < 200 || statusCode >= 300) {
+              reject(
+                new Error(
+                  `playit API request failed (${statusCode}): ${bodyText.trim() || "empty response"}`,
+                ),
+              );
+              return;
+            }
+
+            let body = null;
+            try {
+              body = JSON.parse(bodyText);
+            } catch {
+              reject(new Error(`playit API returned invalid JSON for ${endpoint}.`));
+              return;
+            }
+
+            if (body?.status !== "success") {
+              reject(
+                new Error(body?.error?.message ?? `playit API request failed for ${endpoint}.`),
+              );
+              return;
+            }
+
+            resolve(body.data ?? null);
+          });
+        },
+      );
+
+      request.on("error", reject);
+      request.write(requestBody);
+      request.end();
+    });
+  }
+
+  async fetchTunnelStateFromApi() {
+    const [runData, tunnelData] = await Promise.all([
+      this.requestApi("/v1/agents/rundata"),
+      this.requestApi("/v1/tunnels/list"),
+    ]);
+
+    const agentTunnelMap = new Map(
+      (runData?.tunnels ?? []).map((entry) => [String(entry.id), entry]),
+    );
+    const tunnels = (tunnelData?.tunnels ?? []).map((entry) =>
+      normalizeApiTunnel(entry, agentTunnelMap.get(String(entry.id)) ?? null),
+    );
+    const pendingCount = Number(runData?.pending?.length ?? 0);
+    const configuredTunnelCount = tunnels.length + pendingCount;
+    const matchedPublicTunnel =
+      tunnels.find(
+        (entry) =>
+          entry.publicAddress &&
+          Number(entry.localPort ?? 0) === Number(this.getServerPort()),
+      ) ??
+      tunnels.find((entry) => entry.publicAddress) ??
+      null;
+
+    let statusMessage = null;
+    let needsWebSetup = false;
+    if (matchedPublicTunnel?.publicAddress) {
+      statusMessage = `Detected ${tunnels.length} playit tunnel(s). Public address: ${matchedPublicTunnel.publicAddress}`;
+    } else if (configuredTunnelCount === 0) {
+      statusMessage = this.describeMissingTunnel();
+    } else {
+      needsWebSetup = true;
+      statusMessage = this.describeUnreadyTunnel();
+    }
+
+    return {
+      tunnels,
+      configuredTunnelCount,
+      detectedTunnelCount: runData?.tunnels?.length ?? tunnels.length,
+      needsWebSetup,
+      statusMessage,
+    };
   }
 
   describeMissingTunnel() {
@@ -649,45 +824,20 @@ export class PlayitManager {
     this.state.checkingTunnelStatus = true;
     this.refreshPromise = (async () => {
       try {
-        const result = await this.runCommand(
-          ["tunnels", "list"],
-          { includeSecretPath: true, timeoutMs: 15000 },
-        );
-
-        const tunnels = result.stdout
-          .split(/\r?\n/)
-          .map(parseTunnelLine)
-          .filter(Boolean);
-
-        this.state.tunnels = tunnels;
-        if (tunnels.length) {
-          this.state.configuredTunnelCount = Math.max(
-            this.state.configuredTunnelCount,
-            tunnels.length,
-          );
-          this.state.detectedTunnelCount = Math.max(
-            this.state.detectedTunnelCount,
-            tunnels.length,
-          );
-          this.state.needsWebSetup = false;
-          const publicAddress =
-            tunnels.find((entry) => entry.publicAddress)?.publicAddress ?? null;
-          this.state.statusMessage = publicAddress
-            ? `Detected ${tunnels.length} playit tunnel(s). Public address: ${publicAddress}`
-            : `Detected ${tunnels.length} playit tunnel(s).`;
-          this.announceTunnelState();
-        } else {
-          this.state.needsWebSetup = true;
-          this.state.statusMessage =
-            Number(this.state.configuredTunnelCount ?? 0) > 0 ||
-            Number(this.state.detectedTunnelCount ?? 0) > 0
-              ? this.describeUnreadyTunnel()
-              : this.describeMissingTunnel();
-          this.announceTunnelState();
-          await this.probeTunnelStatus({ force });
-        }
+        const apiState = await this.fetchTunnelStateFromApi();
+        this.state.tunnels = apiState.tunnels;
+        this.state.configuredTunnelCount = apiState.configuredTunnelCount;
+        this.state.detectedTunnelCount = apiState.detectedTunnelCount;
+        this.state.needsWebSetup = apiState.needsWebSetup;
+        this.state.statusMessage = apiState.statusMessage;
+        this.state.lastError = null;
+        this.announceTunnelState();
       } catch (error) {
-        if (String(error.message).includes("NotImplemented")) {
+        if (
+          String(error.message).includes("NotImplemented") ||
+          String(error.message).includes("invalid JSON") ||
+          String(error.message).includes("playit API request failed")
+        ) {
           this.state.lastError = null;
           await this.probeTunnelStatus({ force });
         } else {
