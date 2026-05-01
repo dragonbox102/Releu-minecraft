@@ -10,7 +10,10 @@ import {
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const snapshotRootDir = path.resolve(moduleDir, "..");
-const isPackagedDesktop = Boolean(process.pkg) || snapshotRootDir.includes(".asar");
+const isPackagedDesktop =
+  process.env.RELEU_DESKTOP_PACKAGED === "true" ||
+  Boolean(process.pkg) ||
+  snapshotRootDir.includes(".asar");
 const portableExecutableDir =
   process.env.PORTABLE_EXECUTABLE_DIR ||
   process.env.PORTABLE_EXECUTABLE_PATH ||
@@ -85,6 +88,10 @@ export const defaultConfig = {
     host: "127.0.0.1",
     port: 8787,
   },
+  ui: {
+    variant: "classic",
+    hasChosenVariant: false,
+  },
   playit: {
     autoStart: true,
     agentName: "Minecraft Panel Host",
@@ -97,6 +104,18 @@ export const defaultConfig = {
     githubRepo: "Releu-minecraft",
     assetName: getDefaultUpdaterAssetName(),
     allowPrerelease: false,
+  },
+  cloudBackup: {
+    enabled: false,
+    provider: "supabase",
+    functionName: "releu-cloud-backup",
+    bucket: "releu-backups",
+    uploadLimitMb: 50,
+    projectUrl: "https://lksffessgkckjffuzfmf.supabase.co",
+    publishableKey: "sb_publishable_jYXQJJKCYUBHrJUUyB-xvA_u7oj_sbx",
+    serviceKey: "",
+    restoreKey: "",
+    deviceLabel: "",
   },
 };
 
@@ -119,6 +138,40 @@ function normalizeUpdaterConfig(config, storedConfig = null) {
   merged.assetName = defaultConfig.updater.assetName;
   merged.allowPrerelease = Boolean(merged.allowPrerelease);
 
+  return merged;
+}
+
+function normalizeCloudBackupConfig(config) {
+  const merged = deepMerge(defaultConfig.cloudBackup, config ?? {});
+  merged.enabled = Boolean(merged.enabled);
+  merged.provider = String(merged.provider ?? defaultConfig.cloudBackup.provider).trim().toLowerCase() || defaultConfig.cloudBackup.provider;
+  merged.functionName = String(merged.functionName ?? defaultConfig.cloudBackup.functionName).trim() || defaultConfig.cloudBackup.functionName;
+  merged.bucket = String(merged.bucket ?? defaultConfig.cloudBackup.bucket).trim() || defaultConfig.cloudBackup.bucket;
+  merged.uploadLimitMb = Math.max(
+    1,
+    Number(merged.uploadLimitMb ?? defaultConfig.cloudBackup.uploadLimitMb) ||
+      defaultConfig.cloudBackup.uploadLimitMb,
+  );
+  merged.projectUrl = String(merged.projectUrl ?? defaultConfig.cloudBackup.projectUrl).trim();
+  merged.publishableKey = String(
+    merged.publishableKey ?? defaultConfig.cloudBackup.publishableKey,
+  ).trim();
+  merged.serviceKey = String(merged.serviceKey ?? "").trim();
+  merged.restoreKey = String(merged.restoreKey ?? "").trim();
+  merged.deviceLabel = String(merged.deviceLabel ?? "").trim();
+  return merged;
+}
+
+function normalizeUiConfig(config) {
+  const merged = deepMerge(defaultConfig.ui, config ?? {});
+  const variant = String(merged.variant ?? defaultConfig.ui.variant)
+    .trim()
+    .toLowerCase();
+  merged.variant =
+    variant === "pelican-blueprint"
+      ? "pelican-blueprint"
+      : defaultConfig.ui.variant;
+  merged.hasChosenVariant = Boolean(merged.hasChosenVariant);
   return merged;
 }
 
@@ -224,14 +277,18 @@ export async function loadPanelConfig() {
   await ensureAppDirectories();
   const stored = await readJsonFile(paths.configFile, defaultConfig);
   const merged = deepMerge(defaultConfig, stored);
+  merged.ui = normalizeUiConfig(merged.ui);
   merged.updater = normalizeUpdaterConfig(merged.updater, stored);
+  merged.cloudBackup = normalizeCloudBackupConfig(merged.cloudBackup);
   await writeJsonFile(paths.configFile, merged);
   return merged;
 }
 
 export async function savePanelConfig(config) {
   const merged = deepMerge(defaultConfig, config);
+  merged.ui = normalizeUiConfig(merged.ui);
   merged.updater = normalizeUpdaterConfig(merged.updater, merged);
+  merged.cloudBackup = normalizeCloudBackupConfig(merged.cloudBackup);
   await writeJsonFile(paths.configFile, merged);
   return merged;
 }

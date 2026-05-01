@@ -99,6 +99,7 @@ function normalizeRegistryShape(registry) {
       .map((entry) => ({
         id: String(entry.id),
         name: normalizeServerName(entry.name) || String(entry.id),
+        description: String(entry.description ?? "").trim(),
         serverDir: path.resolve(String(entry.serverDir)),
         createdAt: entry.createdAt ?? currentTimestamp(),
         updatedAt: entry.updatedAt ?? currentTimestamp(),
@@ -150,6 +151,7 @@ export async function ensureServerRegistry({ panelConfig } = {}) {
   const primaryServer = {
     id: "primary",
     name: "Primary Server",
+    description: "",
     serverDir: paths.legacyServerDir,
     createdAt: now,
     updatedAt: now,

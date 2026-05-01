@@ -4,6 +4,17 @@ const LOG_POLL_MS = 2500;
 const SOFTWARE_ORDER = ["purpur", "paper", "vanilla", "fabric", "forge", "neoforge", "quilt"];
 const DEPENDENCY_CHECK_MIN_MS = 3000;
 const DEPENDENCY_CHECK_MAX_MS = 6000;
+const UI_VARIANT_CLASSIC = "classic";
+const UI_VARIANT_PELICAN_BLUEPRINT = "pelican-blueprint";
+const PELICAN_ASSET_HREFS = [
+  "/vendor/pelican/filament/app.css",
+  "/vendor/pelican/forms/forms.css",
+  "/vendor/pelican/support/support.css",
+];
+
+function detectInitialUiVariant() {
+  return UI_VARIANT_CLASSIC;
+}
 
 const runtime = { latestLogId: 0, consoleText: "", data: null, versionCache: new Map() };
 let playitGatePollTimer = null;
@@ -26,12 +37,17 @@ const ui = {
   section: "server",
   managerView: "grid",
   installDraft: null,
+  createDraft: null,
   catalog: { plugin: null, mod: null },
   modal: null,
   operation: null,
   appUpdateAttemptedVersion: null,
+  cloudBackupStatus: null,
+  cloudBackupStatusLoading: false,
+  cloudBackupStatusFetchedAt: 0,
   playerDrafts: {},
   consoleDrafts: {},
+  variant: detectInitialUiVariant(),
 };
 
 const sections = [
@@ -60,6 +76,111 @@ const C = {
     "releu-button border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-zinc-900",
   chip: "border border-outline px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-zinc-400",
 };
+
+function isPelicanBlueprintVariant() {
+  return ui.variant === UI_VARIANT_PELICAN_BLUEPRINT;
+}
+
+function syncVariantAssets() {
+  const wantsPelican = isPelicanBlueprintVariant();
+  document.documentElement.classList.add("dark");
+  document.body.dataset.uiVariant = ui.variant;
+  document.body.classList.toggle("releu-pelican-theme", wantsPelican);
+  document.body.classList.toggle("fi-body", wantsPelican);
+  document.body.classList.toggle("fi-body-has-sidebar", wantsPelican);
+
+  const existing = new Map(
+    Array.from(document.head.querySelectorAll('link[data-ui-variant-asset="pelican"]')).map((node) => [
+      node.getAttribute("href"),
+      node,
+    ]),
+  );
+
+  if (!wantsPelican) {
+    for (const node of existing.values()) {
+      node.remove();
+    }
+    return;
+  }
+
+  for (const href of PELICAN_ASSET_HREFS) {
+    if (existing.has(href)) continue;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    link.dataset.uiVariantAsset = "pelican";
+    document.head.appendChild(link);
+  }
+}
+
+function currentUiSettings() {
+  return runtime.data?.uiSettings ?? {
+    variant: UI_VARIANT_CLASSIC,
+    hasChosenVariant: false,
+  };
+}
+
+function isPelicanPreferenceSelected() {
+  return currentUiSettings().variant === UI_VARIANT_PELICAN_BLUEPRINT;
+}
+
+function buildPelicanShellUrl(serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? null) {
+  const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
+  return `/pelican-demo/servers.html${query}`;
+}
+
+function maybeRedirectToPreferredUi() {
+  const uiSettings = currentUiSettings();
+  if (!uiSettings.hasChosenVariant || uiSettings.variant !== UI_VARIANT_PELICAN_BLUEPRINT) {
+    return false;
+  }
+  if (window.location.pathname.startsWith("/pelican-demo/")) {
+    return false;
+  }
+  window.location.replace(buildPelicanShellUrl());
+  return true;
+}
+
+function syncUiPickerPrompt() {
+  const uiSettings = currentUiSettings();
+  if (uiSettings.hasChosenVariant) {
+    if (ui.modal?.type === "ui-picker") {
+      ui.modal = null;
+    }
+    return;
+  }
+  if (!ui.modal) {
+    ui.modal = { type: "ui-picker" };
+  }
+}
+
+async function saveUiPreference(variant, { redirect = true, hasChosenVariant = true } = {}) {
+  const normalizedVariant =
+    String(variant ?? "").trim().toLowerCase() === UI_VARIANT_PELICAN_BLUEPRINT
+      ? UI_VARIANT_PELICAN_BLUEPRINT
+      : UI_VARIANT_CLASSIC;
+  const payload = await api("/api/settings/ui", {
+    method: "POST",
+    body: {
+      variant: normalizedVariant,
+      hasChosenVariant,
+    },
+  });
+  runtime.data = payload.state;
+  syncUiPickerPrompt();
+  if (redirect) {
+    if (normalizedVariant === UI_VARIANT_PELICAN_BLUEPRINT) {
+      window.location.replace(buildPelicanShellUrl());
+      return true;
+    }
+    if (window.location.pathname.startsWith("/pelican-demo/")) {
+      window.location.replace("/");
+      return true;
+    }
+  }
+  render();
+  return false;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -357,7 +478,11 @@ function isDesktopApp() {
 }
 
 function serverPort(server = activeServer()) {
-  return Number(server?.server?.properties?.["server-port"] ?? 25565);
+  return Number(server?.server?.properties?.["server-port"] ?? server?.port ?? 25565);
+}
+
+function serverLastStartedAt(server = activeServer()) {
+  return server?.server?.lastStartedAt ?? server?.lastStartedAt ?? null;
 }
 
 function playitPrimaryTunnel(server = activeServer()) {
@@ -722,6 +847,53 @@ function syncInstallDraft() {
   ui.installDraft.gpuShare = Math.max(0, Math.min(100, Math.round(ui.installDraft.gpuShare)));
 }
 
+function buildCreateDraft() {
+  const host = runtime.data?.host ?? { totalMemoryMb: 4096, cpuCores: 4 };
+  const source = ui.installDraft ?? {};
+  return {
+    name: "",
+    software: source.software ?? "purpur",
+    version: source.version ?? "latest",
+    javaPath: source.javaPath ?? "java",
+    minRamMb: Math.max(512, Math.round(source.minRamMb ?? 2048)),
+    maxRamMb: Math.max(2048, Math.round(source.maxRamMb ?? 4096)),
+    cpuCores: Math.max(1, Math.min(host.cpuCores, Math.round(source.cpuCores ?? Math.min(4, host.cpuCores)))),
+    gpuShare: Math.max(0, Math.min(100, Math.round(source.gpuShare ?? 0))),
+  };
+}
+
+function syncCreateDraftBounds() {
+  if (!ui.createDraft) return;
+  const host = runtime.data?.host ?? { totalMemoryMb: 4096, cpuCores: 4 };
+  ui.createDraft.minRamMb = Math.max(512, Math.round(ui.createDraft.minRamMb));
+  ui.createDraft.maxRamMb = Math.max(ui.createDraft.minRamMb, Math.round(ui.createDraft.maxRamMb));
+  ui.createDraft.maxRamMb = Math.min(Math.max(512, host.totalMemoryMb), ui.createDraft.maxRamMb);
+  ui.createDraft.cpuCores = Math.max(1, Math.min(host.cpuCores, Math.round(ui.createDraft.cpuCores)));
+  ui.createDraft.gpuShare = Math.max(0, Math.min(100, Math.round(ui.createDraft.gpuShare)));
+}
+
+function openCreateServerScreen() {
+  ui.createDraft = buildCreateDraft();
+  syncCreateDraftBounds();
+  ui.screen = "create-server";
+  ui.section = "server";
+  render();
+}
+
+function applyCreateDraftToInstallDraft(serverId) {
+  if (!ui.createDraft) return;
+  ui.installDraft = {
+    serverId,
+    software: ui.createDraft.software,
+    version: ui.createDraft.version,
+    javaPath: ui.createDraft.javaPath,
+    minRamMb: ui.createDraft.minRamMb,
+    maxRamMb: ui.createDraft.maxRamMb,
+    cpuCores: ui.createDraft.cpuCores,
+    gpuShare: ui.createDraft.gpuShare,
+  };
+}
+
 async function createServerFromName(name) {
   const trimmed = String(name ?? "").trim();
   if (!trimmed) return false;
@@ -955,6 +1127,261 @@ function renderTile(label, value, detail = "") {
   return `<article class="${C.card}"><p class="${C.label} mb-3">${escapeHtml(label)}</p><div class="text-2xl font-black tracking-tight text-white">${escapeHtml(value)}</div>${detail ? `<p class="mt-2 text-xs leading-6 text-zinc-400">${escapeHtml(detail)}</p>` : ""}</article>`;
 }
 
+function pelicanProgressTone(ratio) {
+  if (ratio >= 0.9) return "danger";
+  if (ratio >= 0.7) return "warning";
+  return "success";
+}
+
+function pelicanToneColor(status) {
+  if (status === "danger") {
+    return {
+      color: "var(--danger-500)",
+      track: "color-mix(in srgb, var(--danger-500) 15%, transparent)",
+      pulse: true,
+    };
+  }
+  if (status === "warning") {
+    return {
+      color: "var(--warning-500)",
+      track: "color-mix(in srgb, var(--warning-500) 15%, transparent)",
+      pulse: false,
+    };
+  }
+  return {
+    color: "var(--success-500)",
+    track: "color-mix(in srgb, var(--success-500) 15%, transparent)",
+    pulse: false,
+  };
+}
+
+function renderPelicanProgressBar(label, current, max, suffix = "") {
+  const safeCurrent = Math.max(0, Number(current) || 0);
+  const safeMax = Math.max(1, Number(max) || 1);
+  const ratio = Math.max(0, Math.min(1, safeCurrent / safeMax));
+  const tone = pelicanProgressTone(ratio);
+  const colors = pelicanToneColor(tone);
+  const width = Math.max(0, Math.min(100, ratio * 100));
+  const suffixText = suffix ? ` ${suffix}` : "";
+  const labelText = `${label} ${formatCount(Math.round(safeCurrent))}${suffixText} / ${formatCount(Math.round(safeMax))}${suffixText}`;
+  return `<div class="fi-ta-text block w-full px-3">
+      <div class="flex flex-col gap-2">
+        <div class="relative w-full overflow-hidden rounded-full" style="height: 0.725rem; background-color: ${colors.track};" role="progressbar" aria-valuenow="${escapeHtml(safeCurrent)}" aria-valuemin="0" aria-valuemax="${escapeHtml(safeMax)}" aria-label="${escapeHtml(labelText)}">
+          <div class="h-full rounded-full transition-all duration-300 ease-in-out ${colors.pulse ? "animate-pulse" : ""}" style="width: ${width}%; background-color: ${colors.color};"></div>
+        </div>
+        <span class="text-center text-sm ${tone === "danger" ? "font-bold" : "text-gray-500 dark:text-gray-400"}" ${tone === "danger" ? `style="color: ${colors.color};"` : ""}>${escapeHtml(labelText)}</span>
+      </div>
+    </div>`;
+}
+
+function renderPelicanPageIntro(meta) {
+  return `<section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+      <div class="px-6 py-6">
+        <div class="text-xs font-semibold uppercase tracking-[0.22em] text-gray-500 dark:text-gray-400">${escapeHtml(meta.eyebrow)}</div>
+        <h1 class="mt-3 text-3xl font-black tracking-tight text-gray-950 dark:text-white">${escapeHtml(meta.title)}</h1>
+        <p class="mt-3 max-w-4xl text-sm leading-7 text-gray-600 dark:text-gray-300">${escapeHtml(meta.detail)}</p>
+      </div>
+    </section>`;
+}
+
+function pelicanServerCondition(server) {
+  const presentation = serverStatusPresentation(server);
+  if (presentation.label === "Online") return { color: "#10b981", icon: "server" };
+  if (presentation.label === "Starting") return { color: "#f59e0b", icon: "server" };
+  if (presentation.label === "Stopping") return { color: "#94a3b8", icon: "server" };
+  if (presentation.label === "Setup Required") return { color: "#38bdf8", icon: "layers" };
+  return { color: "#64748b", icon: "server" };
+}
+
+function pelicanServerDescription(server) {
+  const joinAddress = playitMinecraftIp(server);
+  if (joinAddress) return `Public join address ${joinAddress}`;
+  return serverStatusPresentation(server).detail;
+}
+
+function renderPelicanCardAction(action, label, tone = "default", extra = "") {
+  const classes = tone === "primary"
+    ? "fi-btn inline-grid rounded-lg bg-primary-600 text-white hover:bg-primary-500 dark:bg-primary-500 dark:text-gray-950 dark:hover:bg-primary-400"
+    : "fi-btn inline-grid rounded-lg bg-transparent text-gray-700 ring-1 ring-gray-950/10 hover:bg-gray-50 dark:text-gray-200 dark:ring-white/10 dark:hover:bg-white/5";
+  return `<button type="button" data-action="${escapeHtml(action)}" ${extra} class="${classes}">${escapeHtml(label)}</button>`;
+}
+
+function renderPelicanServerEntryCard(server) {
+  const presentation = serverStatusPresentation(server);
+  const condition = pelicanServerCondition(server);
+  const software = server.install.installedSoftware ?? server.install.software ?? "purpur";
+  const version = server.install.installedVersion ?? server.install.requestedVersion ?? "latest";
+  const cpuCurrent = Math.max(0, Number(server.metrics?.cpuPercent ?? 0));
+  const cpuLimit = Math.max(100, Number(server.launcher?.cpuCores ?? runtime.data?.host?.cpuCores ?? 1) * 100);
+  const ramCurrent = Math.max(0, Number(server.metrics?.ramUsedMb ?? 0));
+  const ramLimit = Math.max(512, Number(server.metrics?.ramMaxMb ?? ramStringToMb(server.launcher?.maxRam, 4096)));
+  const diskCurrent = Math.max(0, Number(server.metrics?.diskUsedMb ?? 0));
+  const diskLimit = Math.max(diskCurrent, Number(runtime.data?.host?.diskTotalMb ?? 102400));
+  const secondaryCommand = server.jarInstalled ? (server.status === "running" ? "restart" : "start") : null;
+  const actionLabel = server.jarInstalled ? "Manage" : "Setup";
+  const networkAddress = playitMinecraftIp(server) ?? `127.0.0.1:${serverPort(server)}`;
+  return `<article class="w-full">
+      <div class="relative cursor-pointer">
+        <div class="absolute left-0 top-1 bottom-0 w-1 rounded-lg" style="background-color: ${condition.color};"></div>
+        <div class="relative overflow-hidden rounded-lg p-3 dark:bg-gray-800 dark:text-white">
+          <div class="flex items-center gap-2 mb-5">
+            <span class="fi-icon-btn relative flex items-center justify-center rounded-lg outline-none transition duration-75 h-10 w-10 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400" style="color: ${condition.color};">
+              ${icon(condition.icon, "fi-icon h-5 w-5")}
+            </span>
+            <h2 class="text-xl font-bold">
+              ${escapeHtml(server.name)}
+              <span class="dark:text-gray-400">(${escapeHtml(presentation.label)})</span>
+            </h2>
+            <div class="ml-auto flex flex-wrap items-center gap-2">
+              ${renderPelicanCardAction("select-server", actionLabel, "default", `data-server-id="${escapeHtml(server.id)}"`)}
+              ${secondaryCommand ? renderPelicanCardAction("quick-server-control", secondaryCommand === "restart" ? "Restart" : "Start", "primary", `data-server-id="${escapeHtml(server.id)}" data-server-command="${escapeHtml(secondaryCommand)}"`) : ""}
+              ${renderPelicanCardAction("delete-server", "Delete", "default", `data-server-id="${escapeHtml(server.id)}" data-server-name="${escapeHtml(server.name)}"`)}
+            </div>
+          </div>
+          <div class="text-left mb-1 ml-4 pl-4">
+            <p class="text-base dark:text-gray-400">${escapeHtml(pelicanServerDescription(server))}</p>
+          </div>
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between text-center">
+            <div class="w-full max-w-xs">${renderPelicanProgressBar("CPU", cpuCurrent, cpuLimit, "%")}</div>
+            <div class="w-full max-w-xs">${renderPelicanProgressBar("Memory", ramCurrent, ramLimit, "MB")}</div>
+            <div class="w-full max-w-xs">${renderPelicanProgressBar("Disk", diskCurrent, diskLimit, "MB")}</div>
+            <div class="hidden sm:block text-left">
+              <p class="text-sm dark:text-gray-400">Network</p>
+              <p class="text-md font-semibold">${escapeHtml(networkAddress)}</p>
+              <p class="mt-1 text-sm dark:text-gray-400">${escapeHtml(`${softwareLabel(software)} / ${version}`)}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>`;
+}
+
+function renderPelicanManagerScreen() {
+  const servers = runtime.data?.servers ?? [];
+  const cards = servers.map((server) => renderPelicanServerEntryCard(server)).join("");
+  return `<div class="space-y-6">
+      ${renderPelicanPageIntro({
+        eyebrow: "Client Area",
+        title: "Servers",
+        detail: "This test build uses Pelican’s own server entry structure and Filament shell while keeping the Releu backend unchanged.",
+      })}
+      <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+        <div class="px-6 py-6">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div class="text-sm text-gray-600 dark:text-gray-400">Only implemented pages are exposed in this Pelican test build.</div>
+            <div class="flex items-center gap-2">
+              ${renderPelicanCardAction("toggle-manager-view", "Grid", "default", `data-view="grid"`)}
+              ${renderPelicanCardAction("toggle-manager-view", "List", "default", `data-view="list"`)}
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="grid grid-cols-1 gap-4 ${ui.managerView === "list" ? "" : "xl:grid-cols-2"}">
+        ${cards}
+        <button type="button" class="flex min-h-[220px] w-full items-center justify-center rounded-lg border border-dashed border-gray-300 bg-white px-6 py-8 text-center text-sm font-semibold text-gray-700 shadow-sm ring-1 ring-gray-950/5 transition hover:border-primary-400 hover:text-primary-600 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:ring-white/10 dark:hover:border-primary-400 dark:hover:text-primary-400" data-action="add-server-prompt">
+          <span class="flex flex-col items-center gap-4">
+            <span class="fi-icon-btn relative flex h-14 w-14 items-center justify-center rounded-lg border border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-400">${icon("plus", "fi-icon h-7 w-7")}</span>
+            Add Server
+          </span>
+        </button>
+      </section>
+    </div>`;
+}
+
+function renderPelicanConsoleSection(server) {
+  const metrics = server.server.metrics ?? {};
+  const ramMaxMb = Number(metrics.ramMaxMb ?? ramStringToMb(server.launcher.maxRam, 4096));
+  const ramUsedMb = Number(metrics.ramUsedMb ?? 0);
+  const commandDraft = getConsoleDraft(server.id);
+  return `<div class="space-y-6">
+      ${renderPelicanPageIntro({
+        eyebrow: "Console",
+        title: server.name,
+        detail: `Last start: ${formatTimestamp(serverLastStartedAt(server))}`,
+      })}
+      <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+        <div class="max-h-[620px] min-h-[420px] overflow-y-auto bg-[rgba(19,26,32,0.7)] p-6 font-mono text-xs leading-6 text-slate-200">
+          <pre data-role="console-output" class="whitespace-pre-wrap">${escapeHtml(runtime.consoleText || "Console output will appear here once the server starts.")}</pre>
+        </div>
+        <form data-form="console-command" class="flex items-center w-full overflow-hidden border-t border-white/10 dark:bg-gray-900" style="border-bottom-right-radius: 10px; border-bottom-left-radius: 10px;">
+          <span class="px-3 text-gray-400">${icon("terminal", "fi-icon h-5 w-5")}</span>
+          <input name="command" type="text" value="${escapeHtml(commandDraft)}" autocomplete="off" spellcheck="false" placeholder="Send command to server" class="w-full focus:outline-none focus:ring-0 border-none dark:bg-gray-900 p-1 font-mono text-sm" />
+        </form>
+      </section>
+      <section class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div class="fi-section rounded-xl bg-white px-4 py-4 shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">${renderPelicanProgressBar("CPU", Number(metrics.cpuPercent ?? 0), 100, "%")}</div>
+        <div class="fi-section rounded-xl bg-white px-4 py-4 shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">${renderPelicanProgressBar("Memory", ramUsedMb, ramMaxMb, "MB")}</div>
+        <div class="fi-section rounded-xl bg-white px-4 py-4 shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">${renderPelicanProgressBar("Players", Number(server.server.playerCount ?? 0), playerCapacity(server), "")}</div>
+      </section>
+    </div>`;
+}
+
+function renderPelicanOverviewSection(server) {
+  const joinState = playitAddressState(server);
+  const metrics = server.server.metrics ?? {};
+  const cpuPercent = Number(metrics.cpuPercent ?? 0);
+  const ramMaxMb = Number(metrics.ramMaxMb ?? ramStringToMb(server.launcher.maxRam, 4096));
+  const ramUsedMb = Number(metrics.ramUsedMb ?? 0);
+  const world = currentWorld(server)?.name ?? server.server.properties["level-name"] ?? "world";
+  const status = serverStatusPresentation(server);
+  const players = server.players?.filter((entry) => entry.online).slice(0, 5) ?? [];
+  return `<div class="space-y-6">
+      ${renderPelicanPageIntro({
+        eyebrow: "Overview",
+        title: server.name,
+        detail: status.detail,
+      })}
+      <section class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        ${renderPelicanServerEntryCard(server)}
+        <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+          <div class="px-6 py-6">
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div>
+                <div class="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Minecraft IP</div>
+                <div class="mt-3 text-2xl font-black tracking-tight text-gray-950 dark:text-white">${escapeHtml(joinState.value)}</div>
+                <p class="mt-3 text-sm leading-7 text-gray-600 dark:text-gray-300">${escapeHtml(joinState.detail)}</p>
+              </div>
+              <div>
+                <div class="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Software</div>
+                <div class="mt-3 text-2xl font-black tracking-tight text-gray-950 dark:text-white">${escapeHtml(softwareLabel(server.install.installedSoftware ?? server.install.software ?? "purpur"))}</div>
+                <p class="mt-3 text-sm leading-7 text-gray-600 dark:text-gray-300">${escapeHtml(server.install.installedVersion ?? server.install.requestedVersion ?? "latest")}</p>
+              </div>
+              <div class="md:col-span-2 grid grid-cols-1 gap-4 lg:grid-cols-3">
+                <div>${renderPelicanProgressBar("CPU", cpuPercent, 100, "%")}</div>
+                <div>${renderPelicanProgressBar("Memory", ramUsedMb, ramMaxMb, "MB")}</div>
+                <div>${renderPelicanProgressBar("Players", Number(server.server.playerCount ?? 0), playerCapacity(server), "")}</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+      <section class="grid grid-cols-1 gap-4 xl:grid-cols-[2fr_1fr]">
+        <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+          <div class="border-b border-gray-200 px-6 py-4 dark:border-white/10">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Console</div>
+          </div>
+          <pre data-role="console-output" class="h-64 overflow-y-auto whitespace-pre-wrap bg-[rgba(19,26,32,0.7)] p-6 font-mono text-xs text-slate-200">${escapeHtml(runtime.consoleText || "Console output will appear here once the server starts.")}</pre>
+        </section>
+        <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+          <div class="border-b border-gray-200 px-6 py-4 dark:border-white/10">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Players</div>
+          </div>
+          <div class="space-y-4 px-6 py-6">
+            <div class="text-3xl font-black tracking-tight text-gray-950 dark:text-white">${escapeHtml(server.server.playerCount)} / ${escapeHtml(playerCapacity(server))}</div>
+            ${players.length ? players.map((player) => `<div class="flex items-center justify-between gap-3">
+                  <div class="flex items-center gap-3">
+                    <img src="${escapeHtml(playerAvatarUrl(player))}" alt="${escapeHtml(player.name)}" class="fi-avatar fi-size-sm fi-circular" loading="lazy" />
+                    <div class="text-sm font-medium text-gray-900 dark:text-white">${escapeHtml(player.name)}</div>
+                  </div>
+                  <div class="text-xs text-gray-500 dark:text-gray-400">${player.op ? "OP" : player.whitelisted ? "WL" : "Player"}</div>
+                </div>`).join("") : `<div class="text-sm text-gray-500 dark:text-gray-400">No players are online.</div>`}
+            <div class="border-t border-gray-200 pt-4 text-sm text-gray-500 dark:border-white/10 dark:text-gray-400">Active world: ${escapeHtml(world)}</div>
+          </div>
+        </section>
+      </section>
+    </div>`;
+}
+
 function renderOperationOverlay() {
   if (!isUiLocked()) return "";
   return `<div class="releu-modal-backdrop fixed inset-0 z-[80] flex items-center justify-center bg-black/82 p-4"><section class="releu-modal-panel w-full max-w-xl border border-outline bg-surface p-7 text-center shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><p class="${C.label} mb-4">${escapeHtml(ui.operation?.tone === "install" ? "Server Install" : "Working")}</p><div class="mx-auto mb-5 h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white"></div><h2 class="text-3xl font-black tracking-tight text-white">${escapeHtml(ui.operation?.title ?? "Working")}</h2><p class="mx-auto mt-4 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(ui.operation?.detail ?? "Please wait while Releu finishes this task.")}</p><div class="mx-auto mt-6 max-w-md border border-outline bg-black px-4 py-3 text-left text-xs text-zinc-500">All other actions are temporarily disabled until this finishes.</div></section></div>`;
@@ -1002,6 +1429,72 @@ function renderWorldCard(world) {
   return `<article class="${C.card}"><div class="mb-4 flex items-start justify-between gap-4"><div><div class="${world.isActive ? C.labelOn : C.label} mb-2">${world.isActive ? "Active World" : "World Slot"}</div><h3 class="text-xl font-semibold text-white">${escapeHtml(world.name)}</h3><p class="mt-2 font-mono text-xs text-zinc-500">${escapeHtml(world.path)}</p></div><div class="text-zinc-500">${icon("globe", "h-5 w-5")}</div></div><div class="mb-4 flex flex-wrap gap-2"><span class="${C.chip}">${world.exists ? "Base" : "Missing"}</span><span class="${C.chip}">${world.netherExists ? "Nether" : "No Nether"}</span><span class="${C.chip}">${world.endExists ? "End" : "No End"}</span></div><div class="flex flex-wrap gap-2"><button type="button" class="${C.btnPrimary}" data-action="use-world" data-world-name="${escapeHtml(world.name)}">Use This World</button><button type="button" class="${C.btnGhost}" data-action="regenerate-world" data-world-name="${escapeHtml(world.name)}">Regenerate</button>${isDesktopApp() ? `<button type="button" class="border border-outline px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-400 transition hover:border-white hover:text-white" data-action="open-path" data-path="${escapeHtml(world.path)}">Open Folder</button>` : ""}</div></article>`;
 }
 
+function normalizeSideSupport(value) {
+  const normalized = String(value ?? "unknown").trim().toLowerCase();
+  return ["required", "optional", "unsupported", "unknown"].includes(normalized)
+    ? normalized
+    : "unknown";
+}
+
+function resourcePackNeedsClientSupport(item) {
+  const summary = [
+    item?.title,
+    item?.displayName,
+    item?.description,
+    ...(item?.categories ?? []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return /(fresh animations|better animations?|connected textures|continuity|optifine|entity texture features|entity model features|custom entity model|cem|ctm|etf|emf)/i.test(
+    summary,
+  );
+}
+
+function addonInstallWarning(item, kind = "mod") {
+  if (kind === "resourcepack" && resourcePackNeedsClientSupport(item)) {
+    return {
+      title: "Client-Side Features Detected",
+      message:
+        "This resource pack is sent by the server, but features like connected textures, custom entity models, or Fresh Animations still need compatible client support such as Continuity, OptiFine, ETF, or EMF. Continue saving it to the server?",
+    };
+  }
+  const clientSide = normalizeSideSupport(item?.clientSide);
+  if (clientSide === "required") {
+    return {
+      title: "Client-Side Mod Detected",
+      message:
+        "Players must also install this mod on their Minecraft client to use its features. Continue installing it on the server?",
+    };
+  }
+  if (clientSide === "optional") {
+    return {
+      title: "Client Features Detected",
+      message:
+        "This mod can run on the server, but some features may still require the client mod. Continue installing it on the server?",
+    };
+  }
+  return null;
+}
+
+function sideSupportChip(side, channel) {
+  const normalized = normalizeSideSupport(side);
+  if (normalized === "unknown") return "";
+  const tone =
+    normalized === "required"
+      ? "border-white text-white"
+      : normalized === "optional"
+        ? "border-zinc-600 text-zinc-300"
+        : "border-zinc-800 text-zinc-500";
+  const label =
+    normalized === "required"
+      ? `${channel} required`
+      : normalized === "optional"
+        ? `${channel} features`
+        : `${channel} unsupported`;
+  return `<span class="border ${tone} px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em]">${escapeHtml(label)}</span>`;
+}
+
 function renderCatalogResults(kind, resultSet) {
   const support = addonSupportState(activeServer(), kind);
   if (!resultSet?.results?.length) return `<div class="border border-outline bg-surfaceAlt p-4 text-sm text-zinc-500">Search the catalog to install ${escapeHtml(kind)} files directly into this server.</div>`;
@@ -1016,9 +1509,14 @@ function renderCatalogResults(kind, resultSet) {
               <p class="text-xs text-zinc-500">by ${escapeHtml(item.author)} / ${escapeHtml(formatCount(item.downloads))} downloads</p>
             </div>
           </div>
-          <button type="button" class="${C.btnPrimary}" data-action="install-catalog" data-kind="${escapeHtml(kind)}" data-project-id="${escapeHtml(item.id)}" data-profile-id="${escapeHtml(resultSet.profile.id)}" data-busy-label="Installing..." ${support.supported ? "" : "disabled"}>Install</button>
+          <button type="button" class="${C.btnPrimary}" data-action="install-catalog" data-kind="${escapeHtml(kind)}" data-project-id="${escapeHtml(item.id)}" data-project-title="${escapeHtml(item.title)}" data-profile-id="${escapeHtml(resultSet.profile.id)}" data-client-side="${escapeHtml(normalizeSideSupport(item.clientSide))}" data-server-side="${escapeHtml(normalizeSideSupport(item.serverSide))}" data-busy-label="Installing..." ${support.supported ? "" : "disabled"}>Install</button>
         </div>
         <p class="text-sm text-zinc-400">${escapeHtml(item.description ?? "No description provided.")}</p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          ${item.compatibleVersionNumber ? `<span class="${C.chip}">${escapeHtml(item.compatibleVersionNumber)}</span>` : ""}
+          ${kind === "mod" ? sideSupportChip(item.clientSide, "Client") : ""}
+          ${kind !== "resourcepack" ? sideSupportChip(item.serverSide, "Server") : ""}
+        </div>
       </article>`,
     )
     .join("");
@@ -1038,6 +1536,8 @@ function renderInstalledAssets(kind, assets) {
               <div class="mt-2 flex flex-wrap gap-2">
                 <span class="${C.chip}">${escapeHtml(asset.source ?? "upload")}</span>
                 ${asset.versionNumber ? `<span class="${C.chip}">${escapeHtml(asset.versionNumber)}</span>` : ""}
+                ${kind === "mod" ? sideSupportChip(asset.clientSide, "Client") : ""}
+                ${kind !== "resourcepack" ? sideSupportChip(asset.serverSide, "Server") : ""}
                 ${asset.restartRequired ? `<span class="border border-white px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white">Restart Required</span>` : ""}
               </div>
               ${asset.restartReason ? `<p class="mt-2 text-xs leading-6 text-zinc-400">${escapeHtml(asset.restartReason)}</p>` : ""}
@@ -1054,6 +1554,132 @@ function renderInstalledAssets(kind, assets) {
       </tr>`,
     )
     .join("");
+}
+
+function renderExtensionStatusBanner(tone, title, detail) {
+  const toneClasses = tone === "danger"
+    ? "bg-[linear-gradient(to_left,#1f2933_50%,#5c143b_100%)] text-pink-100"
+    : tone === "warning"
+      ? "bg-[linear-gradient(to_left,#1f2933_60%,#a43e006e_100%)] text-amber-100"
+      : "bg-[#1f2933] text-slate-200";
+  const titleClass = tone === "danger"
+    ? "text-pink-300"
+    : tone === "warning"
+      ? "text-amber-300"
+      : "text-white";
+  return `<div class="mb-4 flex items-start gap-4 rounded-lg ${toneClasses} px-5 py-4">
+      <div class="mt-0.5 h-3 w-3 rounded-full border border-white/40 ${tone === "danger" ? "bg-pink-400" : tone === "warning" ? "bg-amber-400" : "bg-cyan-300"}"></div>
+      <div class="text-sm leading-6">
+        <div class="font-bold ${titleClass}">${escapeHtml(title)}</div>
+        <div class="mt-1 text-slate-200/90">${escapeHtml(detail)}</div>
+      </div>
+    </div>`;
+}
+
+function renderBlueprintExtensionTile(kind, asset) {
+  const iconMarkup = renderImageOrFallback(asset.iconUrl, asset.title, kind === "plugin" ? "plug" : "archive");
+  return `<article class="relative overflow-hidden rounded-lg border border-[#2c3743] bg-[#1f2933] p-4 transition hover:border-[#556372]">
+      <div class="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.06),transparent_34%)] opacity-70"></div>
+      <div class="relative">
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex min-w-0 items-start gap-3">
+            <div class="h-12 w-12 overflow-hidden rounded-md border border-white/10 bg-black/30">
+              ${iconMarkup}
+            </div>
+            <div class="min-w-0">
+              <h3 class="truncate text-base font-bold text-white">${escapeHtml(asset.title ?? asset.name)}</h3>
+              <div class="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
+                <span class="rounded-full border border-white/10 bg-black/20 px-2 py-0.5 font-semibold uppercase tracking-[0.12em]">${escapeHtml(kind)}</span>
+                <span>${escapeHtml(asset.version ?? "installed")}</span>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-300 transition hover:border-white hover:text-white" data-action="remove-asset" data-kind="${escapeHtml(kind)}" data-file-name="${escapeHtml(asset.name)}" data-busy-label="Removing...">Remove</button>
+        </div>
+        ${asset.description ? `<p class="mt-4 text-sm leading-6 text-slate-300">${escapeHtml(asset.description)}</p>` : ""}
+        <div class="mt-4 flex flex-wrap gap-2 text-[11px] text-slate-400">
+          <span>${escapeHtml(formatBytes(asset.size))}</span>
+          <span>•</span>
+          <span>${escapeHtml(formatTimestamp(asset.updatedAt))}</span>
+          ${asset.restartRequired ? `<span>•</span><span class="font-semibold uppercase tracking-[0.12em] text-amber-300">Restart Required</span>` : ""}
+        </div>
+      </div>
+    </article>`;
+}
+
+function renderBlueprintCatalogTile(kind, item, support, profileId) {
+  const iconMarkup = renderImageOrFallback(item.iconUrl, item.title, kind === "plugin" ? "plug" : "archive");
+  const disabledClass = support.supported ? "" : "cursor-not-allowed opacity-50";
+  return `<article class="relative overflow-hidden rounded-lg border border-[#2c3743] bg-[#1f2933] p-4 transition hover:border-[#556372]">
+      <div class="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.05),transparent_30%)]"></div>
+      <div class="relative">
+        <div class="flex items-start justify-between gap-4">
+          <div class="flex min-w-0 items-start gap-3">
+            <div class="h-12 w-12 overflow-hidden rounded-md border border-white/10 bg-black/30">
+              ${iconMarkup}
+            </div>
+            <div class="min-w-0">
+              <h3 class="truncate text-base font-bold text-white">${escapeHtml(item.title)}</h3>
+              <div class="mt-1 text-[11px] text-slate-400">by ${escapeHtml(item.author)} • ${escapeHtml(formatCount(item.downloads))} downloads</div>
+            </div>
+          </div>
+          <button type="button" class="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-[11px] font-bold uppercase tracking-[0.16em] text-white transition hover:border-white hover:bg-white hover:text-black ${disabledClass}" data-action="install-catalog" data-kind="${escapeHtml(kind)}" data-project-id="${escapeHtml(item.id)}" data-profile-id="${escapeHtml(profileId)}" data-busy-label="Installing..." ${support.supported ? "" : "disabled"}>Install</button>
+        </div>
+        <p class="mt-4 text-sm leading-6 text-slate-300">${escapeHtml(item.description ?? "No description provided.")}</p>
+      </div>
+    </article>`;
+}
+
+function renderBlueprintAddonColumn(kind, profiles, assets, resultSet) {
+  const support = addonSupportState(activeServer(), kind);
+  const profile = resultSet?.profile ?? profiles?.[0] ?? null;
+  const statusBanner = !support.supported
+    ? renderExtensionStatusBanner(
+        "warning",
+        `${kind === "plugin" ? "Plugin" : "Mod"} install blocked`,
+        support.reason,
+      )
+    : profile
+      ? renderExtensionStatusBanner(
+          "info",
+          `${kind === "plugin" ? "Plugin" : "Mod"} catalog ready`,
+          `Installs will target ${profile.name} for ${activeServer()?.install?.installedVersion ?? activeServer()?.install?.requestedVersion ?? "latest"}.`,
+        )
+      : "";
+  const installedTiles = assets.length
+    ? assets.map((asset) => renderBlueprintExtensionTile(kind, asset)).join("")
+    : `<div class="rounded-lg border border-dashed border-[#3a4754] bg-[#1f2933]/60 px-5 py-8 text-sm text-slate-400">No ${escapeHtml(kind)} files are installed yet.</div>`;
+  const searchResults = resultSet?.results?.length
+    ? resultSet.results.map((item) => renderBlueprintCatalogTile(kind, item, support, resultSet.profile.id)).join("")
+    : `<div class="rounded-lg border border-dashed border-[#3a4754] bg-[#1f2933]/60 px-5 py-8 text-sm text-slate-400">Search the catalog to install ${escapeHtml(kind)} files directly into this server.</div>`;
+  return `<section class="space-y-5 rounded-xl border border-[#2c3743] bg-[#18212b] p-6">
+      <div class="rounded-lg bg-[linear-gradient(to_right,#1f2933_50%,transparent_100%)] px-5 py-4">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <div class="text-xl font-bold text-white">${escapeHtml(kind === "plugin" ? "Plugins" : "Mods")}</div>
+            <div class="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
+              ${kind === "plugin"
+                ? "Browse and install server-side plugin files using the current server software and version rules."
+                : "Browse and install mod files that match the current loader and Minecraft version."}
+            </div>
+          </div>
+          <a href="${escapeHtml(kind === "plugin" ? "https://modrinth.com/plugins" : "https://modrinth.com/mods")}" target="_blank" rel="noreferrer" class="text-sm font-bold text-cyan-300 hover:text-cyan-200">Learn more</a>
+        </div>
+      </div>
+      ${statusBanner}
+      <form data-form="catalog-search" data-kind="${escapeHtml(kind)}" class="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px_auto]">
+        <input name="query" type="text" value="${escapeHtml(resultSet?.query ?? "")}" placeholder="Search ${escapeHtml(kind)} catalog" class="${C.input} w-full" />
+        <select name="profileId" class="${C.input} w-full">
+          ${(profiles ?? []).map((entry) => `<option value="${escapeHtml(entry.id)}" ${entry.id === profile?.id ? "selected" : ""}>${escapeHtml(entry.name ?? entry.label ?? entry.id)}</option>`).join("")}
+        </select>
+        <button type="submit" class="${C.btnPrimary}" data-busy-label="Searching...">Search</button>
+      </form>
+      <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">${searchResults}</div>
+      <div class="space-y-4">
+        <div class="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">Installed ${escapeHtml(kind === "plugin" ? "plugins" : "mods")}</div>
+        <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">${installedTiles}</div>
+      </div>
+    </section>`;
 }
 
 function icon(name, className = "h-4 w-4") {
@@ -1091,6 +1717,159 @@ function renderHeader() {
         ),
       ];
   return `<header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-outline bg-black px-6"><div class="flex min-w-0 items-center gap-8"><div class="text-xl font-black tracking-tight text-white">Releu</div>${nav.length ? `<nav class="hidden items-center gap-8 md:flex">${nav.join("")}</nav>` : ""}</div><div class="flex items-center gap-3">${server && ui.screen !== "manager" ? `<div class="hidden items-center gap-2 border border-outline px-3 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-400 lg:flex"><span class="${escapeHtml(serverStatusPresentation(server).tone.dot)} h-2 w-2 rounded-full"></span><span>${escapeHtml(server.name)}</span></div>` : ""}<button type="button" class="${C.btnPrimary}" data-action="add-server-prompt">Add Server</button></div></header>`;
+}
+
+function extractMainContent(screenHtml) {
+  const match = String(screenHtml ?? "").match(/<main\b[^>]*>([\s\S]*)<\/main>/i);
+  return match ? match[1] : String(screenHtml ?? "");
+}
+
+function pelicanSidebarItems(server) {
+  if (ui.screen === "create-server") {
+    return [
+      { kind: "action", label: "Servers", active: false, action: "go-manager", iconName: "server" },
+      { kind: "static", label: "Create Server", active: true, iconName: "plus" },
+    ];
+  }
+
+  if (ui.screen === "manager" || !server) {
+    return [{ kind: "action", label: "Servers", active: true, action: "go-manager", iconName: "server" }];
+  }
+
+  if (ui.screen === "setup" || !server.setupComplete) {
+    return [
+      { kind: "action", label: "Servers", active: false, action: "go-manager", iconName: "server" },
+      { kind: "static", label: "Setup", active: true, iconName: "layers" },
+    ];
+  }
+
+  return [
+    { kind: "action", label: "Servers", active: false, action: "go-manager", iconName: "server" },
+    ...sections.map((section) => ({
+      kind: "section",
+      label: section.label,
+      active: ui.section === section.id,
+      sectionId: section.id,
+      iconName:
+        section.id === "server" ? "grid"
+          : section.id === "software" ? "layers"
+            : section.id === "console" ? "terminal"
+              : section.id === "players" ? "users"
+                : section.id === "worlds" ? "globe"
+                  : section.id === "addons" ? "plug"
+                    : section.id === "backups" ? "archive"
+                      : "sliders",
+    })),
+  ];
+}
+
+function pelicanPageMeta(server) {
+  if (ui.screen === "manager" || !server) {
+    return {
+      eyebrow: "Client Area",
+      title: "Server Control",
+      detail: "Pelican-style navigation with the current Releu backend and data flow untouched.",
+    };
+  }
+
+  if (ui.screen === "create-server") {
+    return {
+      eyebrow: "Servers",
+      title: "Create Server",
+      detail: "Create the server first, then continue directly into Setup with the selected choices ready.",
+    };
+  }
+
+  if (ui.screen === "setup" || !server.setupComplete) {
+    return {
+      eyebrow: "Server Setup",
+      title: server.name,
+      detail: "Install software and tune runtime limits before opening the full panel.",
+    };
+  }
+
+  return {
+    eyebrow: ui.section === "server" ? "Overview" : sections.find((entry) => entry.id === ui.section)?.label ?? "Panel",
+    title: server.name,
+    detail: serverStatusPresentation(server).detail,
+  };
+}
+
+function renderPelicanSidebar(server) {
+  const items = pelicanSidebarItems(server);
+  const serverBadge = server && ui.screen !== "manager"
+    ? `<div class="fi-sidebar-footer">
+        <div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+          <div class="text-xs text-gray-500 dark:text-gray-400">Active Server</div>
+          <div class="mt-1 text-sm font-semibold text-gray-950 dark:text-white">${escapeHtml(server.name)}</div>
+          <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">127.0.0.1:${escapeHtml(serverPort(server))}</div>
+        </div>
+      </div>`
+    : "";
+  return `<aside class="fi-sidebar fixed inset-y-0 left-0 z-40 hidden w-[18rem] flex-col bg-white ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10 lg:flex">
+      <div class="fi-sidebar-header flex h-16 items-center bg-white px-6 ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+        <div class="fi-logo text-xl font-black tracking-tight text-gray-950 dark:text-white">Releu</div>
+      </div>
+      <nav class="fi-sidebar-nav">
+        <ul class="fi-sidebar-nav-groups">
+          <li class="fi-sidebar-group flex flex-col gap-y-1">
+            <ul class="fi-sidebar-group-items flex flex-col gap-y-1">
+              ${items.map((item) => {
+                const label = escapeHtml(item.label);
+                const iconSvg = icon(item.iconName, "fi-icon h-5 w-5");
+                const liClass = `fi-sidebar-item ${item.active ? "fi-active" : ""} ${item.kind !== "static" ? "fi-sidebar-item-has-url" : ""}`;
+                const actionAttrs =
+                  item.kind === "action"
+                    ? `data-action="${escapeHtml(item.action)}"`
+                    : item.kind === "section"
+                      ? `data-action="switch-section" data-section="${escapeHtml(item.sectionId)}"`
+                      : "";
+                const element = item.kind === "static" ? "div" : "button";
+                return `<li class="${liClass}">
+                    <${element} ${element === "button" ? 'type="button"' : ""} ${actionAttrs} class="fi-sidebar-item-btn group">
+                      ${iconSvg}
+                      <span class="fi-sidebar-item-label">${label}</span>
+                    </${element}>
+                  </li>`;
+              }).join("")}
+            </ul>
+          </li>
+        </ul>
+      </nav>
+      ${serverBadge}
+      <div class="fi-sidebar-footer">
+        <button type="button" class="fi-btn rounded-lg bg-primary-600 text-white hover:bg-primary-500 dark:bg-primary-500 dark:text-gray-950 dark:hover:bg-primary-400" data-action="add-server-prompt">Add Server</button>
+      </div>
+    </aside>`;
+}
+
+function renderPelicanBlueprintShell(screenHtml, server) {
+  const headerActions = server && ui.screen !== "manager"
+    ? `<div class="flex items-center gap-2 rounded-lg bg-gray-50 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-700 dark:bg-white/5 dark:text-gray-200"><span class="${escapeHtml(serverStatusPresentation(server).tone.dot)} h-2 w-2 rounded-full"></span><span>${escapeHtml(serverStatusPresentation(server).label)}</span></div>`
+    : "";
+  return `<div class="releu-pelican-frame min-h-screen bg-gray-50 text-gray-950 dark:bg-gray-950 dark:text-white">
+      <div class="fi-layout flex min-h-screen w-full">
+        ${renderPelicanSidebar(server)}
+        <div class="min-w-0 flex-1 lg:ml-[18rem]">
+          <div class="fi-topbar-ctn">
+            <header class="fi-topbar">
+              <div class="fi-topbar-start">
+                <div class="fi-logo text-lg font-black tracking-tight text-gray-950 dark:text-white">Releu</div>
+              </div>
+              <div class="fi-topbar-end">
+                ${headerActions}
+                <button type="button" class="fi-btn rounded-lg bg-primary-600 text-white hover:bg-primary-500 dark:bg-primary-500 dark:text-gray-950 dark:hover:bg-primary-400" data-action="add-server-prompt">Add Server</button>
+              </div>
+            </header>
+          </div>
+          <main class="fi-main mx-auto h-full w-full max-w-7xl px-4 py-6 md:px-6">
+            <div class="fi-page flex flex-col gap-y-6">
+              ${extractMainContent(screenHtml)}
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>`;
 }
 
 function renderPlayitGateScreen() {
@@ -1141,10 +1920,85 @@ function renderModal() {
   if (ui.modal.type === "playit-reset") {
     return `<div class="releu-modal-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4"><div class="releu-modal-panel w-full max-w-lg border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]"><div class="mb-6"><p class="${C.label} mb-2">Reset Agent</p><h2 class="text-3xl font-black tracking-tight text-white">Reset playit.gg agent link</h2><p class="mt-3 text-sm text-zinc-400">This stops the local playit agent, clears the saved playit account link, and removes the current tunnel session from Releu. You can link a different playit.gg account again right after this.</p></div><form data-form="playit-reset-modal" class="space-y-4"><div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">If the agent file is missing, Releu will reinstall it automatically the next time you link playit.gg.</div><div class="flex flex-wrap justify-end gap-2"><button type="button" class="${C.btnGhost}" data-action="close-modal">Cancel</button><button type="submit" class="border border-white px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black">Reset Agent</button></div></form></div></div>`;
   }
+  if (ui.modal.type === "ui-picker") {
+    const currentVariant = currentUiSettings().variant === UI_VARIANT_PELICAN_BLUEPRINT
+      ? UI_VARIANT_PELICAN_BLUEPRINT
+      : UI_VARIANT_CLASSIC;
+    return `<div class="releu-modal-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/82 p-4"><div class="releu-modal-panel w-full max-w-5xl border border-outline bg-surface p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]">
+      <div class="mb-6">
+        <p class="${C.label} mb-2">Choose Releu UI</p>
+        <h2 class="text-3xl font-black tracking-tight text-white">Legacy UI is the default. You can switch to the new Pelican-based UI anytime.</h2>
+        <p class="mt-3 max-w-3xl text-sm text-zinc-400">This picker uses the original Releu styling on purpose. Pick the shell this PC should open by default, and you can change it again later from Settings.</p>
+      </div>
+      <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <section class="border ${currentVariant === UI_VARIANT_CLASSIC ? "border-white bg-black" : "border-outline bg-surfaceAlt"} p-5">
+          <div class="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <h3 class="text-xl font-semibold text-white">Legacy UI</h3>
+              <p class="mt-2 text-sm text-zinc-400">The original Releu layout. Best when you want the most proven feature coverage first.</p>
+            </div>
+            <span class="${C.chip} ${currentVariant === UI_VARIANT_CLASSIC ? "!border-white !text-white" : ""}">${currentVariant === UI_VARIANT_CLASSIC ? "Current Default" : "Option"}</span>
+          </div>
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="border border-outline bg-surface p-4">
+              <div class="${C.labelOn} mb-3">Pros</div>
+              <div class="space-y-2 text-sm text-zinc-300">
+                <div>Most complete and battle-tested feature coverage</div>
+                <div>Denser server controls and quicker action access</div>
+                <div>Best fallback if you want the least experimental route</div>
+              </div>
+            </div>
+            <div class="border border-outline bg-surface p-4">
+              <div class="${C.labelOn} mb-3">Cons</div>
+              <div class="space-y-2 text-sm text-zinc-300">
+                <div>Heavier, more utilitarian panel look</div>
+                <div>Less like a hosted game-panel shell</div>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <button type="button" class="${C.btnPrimary}" data-action="choose-ui-variant" data-ui-variant="${UI_VARIANT_CLASSIC}">Continue With Legacy UI</button>
+          </div>
+        </section>
+        <section class="border ${currentVariant === UI_VARIANT_PELICAN_BLUEPRINT ? "border-white bg-black" : "border-outline bg-surfaceAlt"} p-5">
+          <div class="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <h3 class="text-xl font-semibold text-white">New UI</h3>
+              <p class="mt-2 text-sm text-zinc-400">A Pelican-based shell wired to Releu’s backend. Cleaner browsing and calmer page structure, with newer bridge logic underneath.</p>
+            </div>
+            <span class="${C.chip} ${currentVariant === UI_VARIANT_PELICAN_BLUEPRINT ? "!border-white !text-white" : ""}">${currentVariant === UI_VARIANT_PELICAN_BLUEPRINT ? "Current Default" : "Option"}</span>
+          </div>
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="border border-outline bg-surface p-4">
+              <div class="${C.labelOn} mb-3">Pros</div>
+              <div class="space-y-2 text-sm text-zinc-300">
+                <div>Cleaner hosted-panel style navigation</div>
+                <div>Better visual hierarchy for browsing and setup</div>
+                <div>Pelican-based structure with Releu data wired in</div>
+              </div>
+            </div>
+            <div class="border border-outline bg-surface p-4">
+              <div class="${C.labelOn} mb-3">Cons</div>
+              <div class="space-y-2 text-sm text-zinc-300">
+                <div>Newer shell, so edge-case flows need more verification</div>
+                <div>Some advanced pages still depend on bridge patching</div>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <button type="button" class="${C.btnGhost}" data-action="choose-ui-variant" data-ui-variant="${UI_VARIANT_PELICAN_BLUEPRINT}">Use New UI</button>
+          </div>
+        </section>
+      </div>
+    </div></div>`;
+  }
   return "";
 }
 
 function renderManagerScreen() {
+  if (isPelicanBlueprintVariant()) {
+    return renderPelicanManagerScreen();
+  }
   const servers = runtime.data?.servers ?? [];
   const gridClass = ui.managerView === "list" ? "grid grid-cols-1 gap-6" : "grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3";
   const cards = servers
@@ -1176,6 +2030,103 @@ function renderSetupScreen() {
         detail: "The server folder already exists, the port is reserved, and backups are ready. Install the selected software to open the full panel.",
       };
   return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-8"><header class="mb-10"><h1 class="text-3xl font-black uppercase tracking-tight text-white">Server Setup</h1><p class="mt-2 max-w-3xl text-sm text-zinc-400">Configure the software, resource limits, and launcher path. Releu accepts the Minecraft EULA automatically during install.</p></header><div class="grid grid-cols-1 gap-4 md:grid-cols-12"><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Selected Server</h2></div><div class="space-y-6"><div><label class="${C.label} mb-2 block">Server Name</label><p class="text-2xl font-semibold text-white">${escapeHtml(server.name)}</p></div><div><label class="${C.label} mb-2 block">Auto Folder</label><div class="border border-outline bg-black p-4 font-mono text-[11px] text-zinc-300">${escapeHtml(server.serverDir)}</div></div><div class="grid grid-cols-2 gap-4"><div><label class="${C.label} mb-1 block">Port</label><p class="text-sm text-white">${escapeHtml(server.server.properties["server-port"] ?? 25565)}</p></div><div><label class="${C.label} mb-1 block">Backups</label><p class="text-sm text-white">${server.backups.enabled ? `Every ${escapeHtml(server.backups.intervalMinutes)} minutes` : "Disabled"}</p></div></div><div class="space-y-2 border-t border-zinc-900 pt-4 text-xs text-zinc-400"><p>Folders are created automatically in the Releu data folder.</p></div></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Choose Software</h2></div><div class="grid grid-cols-2 gap-4 lg:grid-cols-4">${softwareChoices().map((option) => { const selected = option.id === ui.installDraft.software; return `<button type="button" class="releu-button flex min-h-[148px] flex-col justify-between border ${selected ? "border-white bg-white text-black" : "border-outline bg-black text-white hover:border-zinc-600"} p-4 text-left transition" data-action="pick-software" data-software-id="${escapeHtml(option.id)}"><div class="flex items-start justify-between gap-3"><div class="${selected ? "text-black" : "text-zinc-500"}">${icon(selected ? "server" : "layers", "h-5 w-5")}</div>${selected ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}</div><div class="space-y-2"><div class="text-sm font-bold tracking-tight">${escapeHtml(option.name)}</div><div class="text-[10px] uppercase tracking-[0.18em] ${selected ? "text-zinc-700" : "text-zinc-500"}">${escapeHtml(option.latestHint ?? option.releaseChannel ?? option.id)}</div></div></button>`; }).join("")}</div><label class="flex flex-col gap-2"><span class="${C.label}">Minecraft Version</span><select data-install-field="version" class="w-full border border-outline bg-black px-4 py-3 text-white outline-none transition focus:border-white">${versionOptions.map((version) => `<option value="${escapeHtml(version)}" ${version === ui.installDraft.version ? "selected" : ""}>${escapeHtml(version)}</option>`).join("")}</select></label></section><section class="${C.card} flex flex-col gap-8 md:col-span-8"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Server Resources</h2></div><div class="grid grid-cols-1 gap-x-12 gap-y-8 md:grid-cols-2"><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Max RAM Allocation</span><span class="font-mono text-sm text-white" data-output="maxRamMb">${escapeHtml(mbToRamString(ui.installDraft.maxRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(runtime.data.host.totalMemoryMb)}" step="256" value="${escapeHtml(ui.installDraft.maxRamMb)}" data-install-field="maxRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">Min RAM Allocation</span><span class="font-mono text-sm text-white" data-output="minRamMb">${escapeHtml(mbToRamString(ui.installDraft.minRamMb))}</span></div><input type="range" min="512" max="${escapeHtml(ui.installDraft.maxRamMb)}" step="256" value="${escapeHtml(ui.installDraft.minRamMb)}" data-install-field="minRamMb" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">CPU Core Limit</span><span class="font-mono text-sm text-white" data-output="cpuCores">${escapeHtml(ui.installDraft.cpuCores)}</span></div><input type="range" min="1" max="${escapeHtml(runtime.data.host.cpuCores)}" step="1" value="${escapeHtml(ui.installDraft.cpuCores)}" data-install-field="cpuCores" class="w-full accent-white" /></label><label class="space-y-4"><div class="flex items-center justify-between"><span class="${C.label}">GPU Share</span><span class="font-mono text-sm text-white" data-output="gpuShare">${escapeHtml(`${ui.installDraft.gpuShare}%`)}</span></div><input type="range" min="0" max="100" step="5" value="${escapeHtml(ui.installDraft.gpuShare)}" data-install-field="gpuShare" class="w-full accent-white" /></label><label class="space-y-2 md:col-span-2"><span class="${C.label}">Java Executable Path</span><input data-install-field="javaPath" type="text" value="${escapeHtml(ui.installDraft.javaPath)}" class="${C.input} font-mono text-sm" /></label></div></section><section class="${C.card} flex flex-col gap-6 md:col-span-4"><div class="border-b border-zinc-900 pb-4"><h2 class="${C.label}">Install And Open</h2></div><div class="flex flex-1 flex-col justify-between gap-6"><div class="space-y-4 text-sm text-zinc-300"><p>${escapeHtml(installState.detail)}</p><div class="flex items-center gap-3"><div class="h-2 w-2 rounded-full ${server.server.operation?.active ? "bg-zinc-300" : "bg-white"}"></div><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">${escapeHtml(installState.label)}</span></div></div><button type="button" data-action="install-setup" class="w-full border border-white bg-white py-6 text-[11px] font-bold uppercase tracking-[0.18em] text-black transition hover:bg-zinc-200">${escapeHtml(server.server.operation?.active ? (server.server.operation.shortLabel ?? "Installing") : "Install Server")}</button></div></section></div></main></div>`;
+}
+
+function renderCreateServerScreen() {
+  const draft = ui.createDraft ?? buildCreateDraft();
+  const versionOptions = getVersionOptions(draft.software, draft.version);
+  return `<div class="space-y-6">
+      ${renderPelicanPageIntro({
+        eyebrow: "Servers",
+        title: "Create Server",
+        detail: "Create the server first, then Releu will open Setup with these software and runtime choices ready.",
+      })}
+      <form data-form="create-server-page" class="grid grid-cols-1 gap-4 xl:grid-cols-[1.3fr_1fr]">
+        <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+          <div class="border-b border-gray-200 px-6 py-4 dark:border-white/10">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Server Identity</div>
+          </div>
+          <div class="space-y-6 px-6 py-6">
+            <label class="block">
+              <span class="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Server Name</span>
+              <input name="name" type="text" value="${escapeHtml(draft.name ?? "")}" data-create-field="name" placeholder="Minecraft Test Server" autocomplete="off" autocapitalize="words" spellcheck="false" required class="mt-3 block w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-base text-gray-950 outline-none transition focus:border-primary-500 dark:border-white/10 dark:bg-gray-950 dark:text-white" />
+            </label>
+            <div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-4 text-sm text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
+              Releu creates the folder automatically, reserves a free port automatically, and opens the new server in Setup right after creation.
+            </div>
+          </div>
+        </section>
+        <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+          <div class="border-b border-gray-200 px-6 py-4 dark:border-white/10">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Create And Open</div>
+          </div>
+          <div class="space-y-6 px-6 py-6">
+            <div class="space-y-3 text-sm text-gray-600 dark:text-gray-300">
+              <p>The new server will be created now.</p>
+              <p>Software, Minecraft version, RAM, CPU, GPU share, and Java path will carry into Setup so you can install immediately.</p>
+            </div>
+            <div class="flex flex-wrap gap-3">
+              <button type="submit" class="fi-btn rounded-lg bg-primary-600 text-white hover:bg-primary-500 dark:bg-primary-500 dark:text-gray-950 dark:hover:bg-primary-400" data-busy-label="Creating...">Create Server</button>
+              <button type="button" class="fi-btn rounded-lg bg-transparent text-gray-700 ring-1 ring-gray-950/10 hover:bg-gray-50 dark:text-gray-200 dark:ring-white/10 dark:hover:bg-white/5" data-action="go-manager">Cancel</button>
+            </div>
+          </div>
+        </section>
+        <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+          <div class="border-b border-gray-200 px-6 py-4 dark:border-white/10">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Software / Version And Loader</div>
+          </div>
+          <div class="space-y-5 px-6 py-6">
+            <div class="grid grid-cols-2 gap-4 xl:grid-cols-3">
+              ${softwareChoices().map((option) => {
+                const selected = option.id === draft.software;
+                return `<button type="button" class="fi-btn block rounded-xl border px-4 py-4 text-left transition ${selected ? "border-primary-400 bg-primary-50 text-gray-950 dark:border-primary-400 dark:bg-primary-400 dark:text-gray-950" : "border-gray-200 bg-white text-gray-800 hover:border-primary-300 dark:border-white/10 dark:bg-gray-950 dark:text-white dark:hover:border-primary-400"}" data-action="pick-create-software" data-software-id="${escapeHtml(option.id)}"><div class="text-[11px] font-semibold uppercase tracking-[0.18em] ${selected ? "text-gray-600" : "text-gray-500 dark:text-gray-400"}">${escapeHtml(option.latestHint ?? option.releaseChannel ?? option.id)}</div><div class="mt-3 text-sm font-bold">${escapeHtml(option.name)}</div></button>`;
+              }).join("")}
+            </div>
+            <label class="block">
+              <span class="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Minecraft Version</span>
+              <select data-create-field="version" class="mt-3 block w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-sm text-gray-950 outline-none transition focus:border-primary-500 dark:border-white/10 dark:bg-gray-950 dark:text-white">${versionOptions.map((version) => `<option value="${escapeHtml(version)}" ${version === draft.version ? "selected" : ""}>${escapeHtml(version)}</option>`).join("")}</select>
+            </label>
+          </div>
+        </section>
+        <section class="fi-section overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-950/5 dark:bg-gray-900 dark:ring-white/10">
+          <div class="border-b border-gray-200 px-6 py-4 dark:border-white/10">
+            <div class="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500 dark:text-gray-400">Resources / Runtime</div>
+          </div>
+          <div class="space-y-6 px-6 py-6">
+            <label class="block">
+              <div class="flex items-center justify-between gap-4 text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                <span>Max RAM</span><span data-create-output="maxRamMb">${escapeHtml(mbToRamString(draft.maxRamMb))}</span>
+              </div>
+              <input type="range" min="512" max="${escapeHtml(runtime.data.host.totalMemoryMb)}" step="256" value="${escapeHtml(draft.maxRamMb)}" data-create-field="maxRamMb" class="mt-3 w-full accent-current" />
+            </label>
+            <label class="block">
+              <div class="flex items-center justify-between gap-4 text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                <span>Min RAM</span><span data-create-output="minRamMb">${escapeHtml(mbToRamString(draft.minRamMb))}</span>
+              </div>
+              <input type="range" min="512" max="${escapeHtml(draft.maxRamMb)}" step="256" value="${escapeHtml(draft.minRamMb)}" data-create-field="minRamMb" class="mt-3 w-full accent-current" />
+            </label>
+            <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
+              <label class="block">
+                <div class="flex items-center justify-between gap-4 text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                  <span>CPU Cores</span><span data-create-output="cpuCores">${escapeHtml(String(draft.cpuCores))}</span>
+                </div>
+                <input type="range" min="1" max="${escapeHtml(runtime.data.host.cpuCores)}" step="1" value="${escapeHtml(draft.cpuCores)}" data-create-field="cpuCores" class="mt-3 w-full accent-current" />
+              </label>
+              <label class="block">
+                <div class="flex items-center justify-between gap-4 text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+                  <span>GPU Share</span><span data-create-output="gpuShare">${escapeHtml(`${draft.gpuShare}%`)}</span>
+                </div>
+                <input type="range" min="0" max="100" step="5" value="${escapeHtml(draft.gpuShare)}" data-create-field="gpuShare" class="mt-3 w-full accent-current" />
+              </label>
+            </div>
+            <label class="block">
+              <span class="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">Java Executable Path</span>
+              <input type="text" value="${escapeHtml(draft.javaPath)}" data-create-field="javaPath" class="mt-3 block w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-sm text-gray-950 outline-none transition focus:border-primary-500 dark:border-white/10 dark:bg-gray-950 dark:text-white" />
+            </label>
+          </div>
+        </section>
+      </form>
+    </div>`;
 }
 
 function renderOverviewSection(server) {
@@ -1321,11 +2272,14 @@ function renderSoftwareSection(server) {
 }
 
 function renderConsoleSection(server) {
+  if (isPelicanBlueprintVariant()) {
+    return renderPelicanConsoleSection(server);
+  }
   const metrics = server.server.metrics ?? {};
   const ramMaxMb = Number(metrics.ramMaxMb ?? ramStringToMb(server.launcher.maxRam, 4096));
   const ramUsedMb = Number(metrics.ramUsedMb ?? 0);
   const commandDraft = getConsoleDraft(server.id);
-  return `<main class="flex min-h-[calc(100vh-180px)] flex-col overflow-hidden bg-black"><div class="mb-4 flex items-center justify-between px-2"><div class="flex items-center gap-4"><div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="${C.labelOn}">${escapeHtml(server.name)}</span></div><span class="font-mono text-[11px] text-zinc-600">|</span><span class="font-mono text-[11px] text-zinc-500">LAST START: ${escapeHtml(formatTimestamp(server.server.lastStartedAt))}</span></div></div><div class="flex flex-1 flex-col overflow-hidden border border-outline bg-black"><div class="flex-1 overflow-y-auto p-6 font-mono text-xs text-zinc-300"><pre data-role="console-output" class="whitespace-pre-wrap">${escapeHtml(runtime.consoleText || "Console output will appear here once the server starts.")}</pre></div><form data-form="console-command" class="flex items-center gap-3 border-t border-outline bg-black p-4"><span class="text-zinc-500">${icon("terminal")}</span><input name="command" type="text" value="${escapeHtml(commandDraft)}" autocomplete="off" spellcheck="false" placeholder="Enter server command..." class="flex-1 border-none bg-transparent font-mono text-sm text-white outline-none placeholder:text-zinc-700" /></form></div><div class="mt-4 flex flex-wrap gap-6 px-2 pb-2"><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">CPU Load</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, Number(metrics.cpuPercent ?? 0)))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(formatPercent(metrics.cpuPercent ?? 0))}</span></div><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">RAM Alloc</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(`${formatMemoryFromMb(ramUsedMb)} / ${formatMemoryFromMb(ramMaxMb)}`)}</span></div><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">Players</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, (Number(server.server.playerCount ?? 0) / playerCapacity(server)) * 100))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(`${server.server.playerCount} / ${playerCapacity(server)}`)}</span></div><div class="ml-auto flex items-center gap-3"><button type="button" class="${C.btnPrimary}" data-action="server-control" data-server-command="restart">Restart Server</button><button type="button" class="${C.btnGhost}" data-action="server-control" data-server-command="backup">Backup Now</button></div></div></main>`;
+  return `<main class="flex min-h-[calc(100vh-180px)] flex-col overflow-hidden bg-black"><div class="mb-4 flex items-center justify-between px-2"><div class="flex items-center gap-4"><div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="${C.labelOn}">${escapeHtml(server.name)}</span></div><span class="font-mono text-[11px] text-zinc-600">|</span><span class="font-mono text-[11px] text-zinc-500">LAST START: ${escapeHtml(formatTimestamp(serverLastStartedAt(server)))}</span></div></div><div class="flex flex-1 flex-col overflow-hidden border border-outline bg-black"><div class="flex-1 overflow-y-auto p-6 font-mono text-xs text-zinc-300"><pre data-role="console-output" class="whitespace-pre-wrap">${escapeHtml(runtime.consoleText || "Console output will appear here once the server starts.")}</pre></div><form data-form="console-command" class="flex items-center gap-3 border-t border-outline bg-black p-4"><span class="text-zinc-500">${icon("terminal")}</span><input name="command" type="text" value="${escapeHtml(commandDraft)}" autocomplete="off" spellcheck="false" placeholder="Enter server command..." class="flex-1 border-none bg-transparent font-mono text-sm text-white outline-none placeholder:text-zinc-700" /></form></div><div class="mt-4 flex flex-wrap gap-6 px-2 pb-2"><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">CPU Load</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, Number(metrics.cpuPercent ?? 0)))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(formatPercent(metrics.cpuPercent ?? 0))}</span></div><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">RAM Alloc</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, ramMaxMb ? (ramUsedMb / ramMaxMb) * 100 : 0))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(`${formatMemoryFromMb(ramUsedMb)} / ${formatMemoryFromMb(ramMaxMb)}`)}</span></div><div class="min-w-[140px] space-y-1"><span class="text-[9px] font-bold uppercase tracking-[0.18em] text-zinc-500">Players</span><div class="relative h-1 w-full bg-zinc-900"><div class="absolute inset-y-0 left-0 bg-white" style="width:${Math.max(0, Math.min(100, (Number(server.server.playerCount ?? 0) / playerCapacity(server)) * 100))}%"></div></div><span class="font-mono text-[11px] text-white">${escapeHtml(`${server.server.playerCount} / ${playerCapacity(server)}`)}</span></div><div class="ml-auto flex items-center gap-3"><button type="button" class="${C.btnPrimary}" data-action="server-control" data-server-command="restart">Restart Server</button><button type="button" class="${C.btnGhost}" data-action="server-control" data-server-command="backup">Backup Now</button></div></div></main>`;
 }
 
 function renderPlayersSection(server) {
@@ -1397,7 +2351,7 @@ function renderResourcePackSection(server) {
     </div>
     <div class="border border-outline bg-surfaceAlt p-4">
       <p class="${C.label} mb-2">Server Resource Pack</p>
-      <p class="text-sm leading-7 text-zinc-400">Send a resource pack URL through Minecraft itself. Players will see it after the next server restart.</p>
+      <p class="text-sm leading-7 text-zinc-400">Send a resource pack URL through Minecraft itself. Players will see it after the next server restart. Some packs still need client-side support such as Continuity or OptiFine for connected textures, or ETF/EMF for custom entity models and Fresh Animations.</p>
     </div>
     <form data-form="resource-pack-settings" class="grid grid-cols-1 gap-4 md:grid-cols-2">
       <label class="flex flex-col gap-2 md:col-span-2">
@@ -1422,6 +2376,13 @@ function renderResourcePackSection(server) {
 }
 
 function renderAddonsSection(server) {
+  if (isPelicanBlueprintVariant()) {
+    return `<div class="space-y-8">
+      ${renderBlueprintAddonColumn("plugin", server.catalog.pluginProfiles, server.plugins, ui.catalog.plugin)}
+      ${renderBlueprintAddonColumn("mod", server.catalog.modProfiles, server.mods, ui.catalog.mod)}
+      ${renderResourcePackSection(server)}
+    </div>`;
+  }
   return `<div class="grid grid-cols-1 gap-8 xl:grid-cols-2">${renderAddonColumn("plugin", server.catalog.pluginProfiles, server.plugins, ui.catalog.plugin)}${renderAddonColumn("mod", server.catalog.modProfiles, server.mods, ui.catalog.mod)}${renderResourcePackSection(server)}</div>`;
 }
 
@@ -1429,9 +2390,93 @@ function renderBackupsSection(server) {
   return `<div class="grid grid-cols-1 gap-4 md:grid-cols-12"><section class="${C.card} space-y-6 md:col-span-4"><div class="space-y-2"><h2 class="${C.labelOn}">Protection</h2><div class="h-px w-full bg-outline"></div></div><form data-form="backup-settings" class="space-y-4"><label class="flex items-center gap-3"><input name="autoBackups" type="checkbox" class="h-4 w-4 accent-white" ${server.backups.enabled ? "checked" : ""} /><span class="text-[12px] text-zinc-300">Enable automatic backups</span></label><input name="backupIntervalMinutes" type="number" min="5" value="${escapeHtml(server.backups.intervalMinutes ?? 60)}" class="${C.input} font-mono" /><button type="submit" class="w-full ${C.btnPrimary} py-4">Save Backup Schedule</button></form><button type="button" class="w-full ${C.btnGhost} py-4" data-action="server-control" data-server-command="backup">Create Backup Now</button></section><section class="flex min-h-[600px] flex-col border border-outline bg-surface md:col-span-8"><div class="space-y-2 p-6"><h2 class="${C.labelOn}">Backup History</h2><div class="h-px w-full bg-outline"></div></div><div class="flex-1 overflow-hidden"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-zinc-900"><th class="p-4 ${C.label}">Timestamp</th><th class="p-4 ${C.label}">Folder Path</th><th class="p-4 text-right ${C.label}">Actions</th></tr></thead><tbody class="font-mono text-[13px]">${server.backups.recent.length ? server.backups.recent.map((backup) => `<tr class="border-b border-zinc-900 transition hover:bg-surfaceAlt"><td class="p-4 text-white">${escapeHtml(formatTimestamp(backup.createdAt))}</td><td class="p-4 text-zinc-500">${escapeHtml(backup.path)}</td><td class="space-x-3 p-4 text-right">${isDesktopApp() ? `<button type="button" class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:text-white" data-action="open-path" data-path="${escapeHtml(backup.path)}">Open Folder</button>` : ""}</td></tr>`).join("") : `<tr><td colspan="3" class="p-6 text-sm text-zinc-500">No backups have been created yet.</td></tr>`}</tbody></table></div></section></div>`;
 }
 
+function renderUiPreferencePanel() {
+  const uiSettings = currentUiSettings();
+  const currentVariant = uiSettings.variant === UI_VARIANT_PELICAN_BLUEPRINT
+    ? UI_VARIANT_PELICAN_BLUEPRINT
+    : UI_VARIANT_CLASSIC;
+  const variantCards = [
+    {
+      id: UI_VARIANT_CLASSIC,
+      title: "Legacy UI",
+      detail:
+        "The original Releu layout. This remains the default and gets new features first when you have not chosen a UI yet.",
+      pros: [
+        "Most complete and battle-tested control surface",
+        "Faster access to dense server actions",
+        "Best fallback when a newer page flow is still being refined",
+      ],
+      cons: [
+        "Heavier and more utilitarian visually",
+        "Less like a hosted game-panel shell",
+      ],
+    },
+    {
+      id: UI_VARIANT_PELICAN_BLUEPRINT,
+      title: "New UI",
+      detail:
+        "A Pelican-based shell wired to the Releu backend. Cleaner browsing and calmer page structure, but still a newer surface.",
+      pros: [
+        "Cleaner hosted-panel style layout",
+        "Better page hierarchy for browsing and setup",
+        "Pelican-based navigation and presentation",
+      ],
+      cons: [
+        "Newer shell, so edge-case flows can need more verification",
+        "Some advanced pages still depend on newer bridge wiring",
+      ],
+    },
+  ];
+
+  return `<div class="${C.card}">
+    <div class="mb-4 border-b border-zinc-900 pb-2">
+      <h2 class="text-xl font-semibold uppercase tracking-[0.12em] text-white">Interface Mode</h2>
+    </div>
+    <p class="mb-4 text-sm text-zinc-400">Pick which Releu shell this PC should open by default. If you have never chosen one before, Releu stays on the Legacy UI until you decide.</p>
+    <div class="space-y-4">
+      ${variantCards
+        .map((entry) => {
+          const selected = currentVariant === entry.id;
+          return `<section class="border ${selected ? "border-white bg-black" : "border-outline bg-surfaceAlt"} p-5">
+            <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div class="space-y-2">
+                <div class="flex items-center gap-3">
+                  <h3 class="text-lg font-semibold text-white">${escapeHtml(entry.title)}</h3>
+                  <span class="${C.chip} ${selected ? "!border-white !text-white" : ""}">${selected ? "Current" : "Available"}</span>
+                </div>
+                <p class="max-w-2xl text-sm text-zinc-400">${escapeHtml(entry.detail)}</p>
+              </div>
+              <button type="button" class="${selected ? C.btnPrimary : C.btnGhost}" data-action="choose-ui-variant" data-ui-variant="${escapeHtml(entry.id)}">
+                ${selected ? "Keep This UI" : `Use ${escapeHtml(entry.title)}`}
+              </button>
+            </div>
+            <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div class="border border-outline bg-black p-4">
+                <div class="${C.labelOn} mb-3">Pros</div>
+                <div class="space-y-2 text-sm text-zinc-300">${entry.pros.map((point) => `<div>${escapeHtml(point)}</div>`).join("")}</div>
+              </div>
+              <div class="border border-outline bg-black p-4">
+                <div class="${C.labelOn} mb-3">Cons</div>
+                <div class="space-y-2 text-sm text-zinc-300">${entry.cons.map((point) => `<div>${escapeHtml(point)}</div>`).join("")}</div>
+              </div>
+            </div>
+          </section>`;
+        })
+        .join("")}
+    </div>
+    <div class="mt-4 flex flex-wrap gap-2">
+      <button type="button" class="${C.btnGhost}" data-action="open-ui-picker">Open UI Picker</button>
+    </div>
+  </div>`;
+}
+
 function renderSettingsSection(server) {
   const playit = runtime.data.playit;
   const appUpdate = runtime.data.appUpdate;
+  const cloud = ui.cloudBackupStatus ?? {};
+  const cloudConfig = runtime.data.cloudBackupSettings ?? {};
+  const cloudUploadLimitBytes =
+    Number(cloud.uploadLimitBytes ?? (cloudConfig.uploadLimitMb ?? 50) * 1024 * 1024) || 0;
   const joinState = playitAddressState(server);
   const crackedClientsEnabled =
     String(server.server.properties["online-mode"] ?? "true").toLowerCase() !== "true";
@@ -1493,6 +2538,7 @@ function renderSettingsSection(server) {
       </form>
     </section>
     <section class="col-span-12 space-y-4 lg:col-span-4">
+      ${renderUiPreferencePanel()}
       <div class="${C.card}">
         <div class="mb-4 border-b border-zinc-900 pb-2">
           <h2 class="text-xl font-semibold uppercase tracking-[0.12em] text-white">Public Access</h2>
@@ -1551,6 +2597,63 @@ function renderSettingsSection(server) {
       </div>
       <div class="${C.card}">
         <div class="mb-4 border-b border-zinc-900 pb-2">
+          <h2 class="text-xl font-semibold uppercase tracking-[0.12em] text-white">Cloud Backup</h2>
+        </div>
+        <form data-form="cloud-backup-settings" class="space-y-4">
+          <label class="flex items-center gap-3">
+            <input name="enabled" type="checkbox" class="h-4 w-4 accent-white" ${cloudConfig.enabled ? "checked" : ""} />
+            <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Enable Cloud Backup</span>
+          </label>
+          <label class="block">
+            <span class="${C.label} mb-2 block">Device Label</span>
+            <input name="deviceLabel" type="text" value="${escapeHtml(cloud.deviceLabel ?? cloudConfig.deviceLabel ?? "")}" placeholder="My desktop PC" class="${C.input} w-full" />
+          </label>
+          <label class="block">
+            <span class="${C.label} mb-2 block">Restore Key</span>
+            <input type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first" class="${C.input} w-full font-mono text-xs" />
+          </label>
+          <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
+            <div>Function: <span class="font-mono text-zinc-200">${escapeHtml(cloud.functionReady ? "ready" : ui.cloudBackupStatusLoading ? "checking" : "not ready")}</span></div>
+            <div class="mt-1">Upload limit: <span class="font-mono text-zinc-200">${escapeHtml(formatBytes(cloudUploadLimitBytes))}</span></div>
+            <div class="mt-1">Cloud used: <span class="font-mono text-zinc-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
+            <div class="mt-1">Saved backups: <span class="font-mono text-zinc-200">${escapeHtml(formatCount(cloud.backupsCount ?? 0))}</span></div>
+            <div class="mt-1">Latest backup: <span class="font-mono text-zinc-200">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>
+            ${cloud.functionError ? `<div class="mt-2 text-red-300">${escapeHtml(cloud.functionError)}</div>` : ""}
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button type="submit" class="${C.btnPrimary}">Save Cloud Settings</button>
+            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-refresh">Refresh Cloud Status</button>
+            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-issue-key">${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
+            ${cloud.restoreKeyPresent ? `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>` : ""}
+            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled ? "disabled" : ""}>Backup To Cloud Now</button>
+          </div>
+          <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
+            <div class="mb-3 text-[11px] font-bold uppercase tracking-[0.18em] text-white">Cloud Backups</div>
+            ${
+              cloud.backups?.length
+                ? cloud.backups
+                    .map(
+                      (entry) => `
+                <div class="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-900 py-3 last:border-b-0 last:pb-0 first:pt-0">
+                  <div>
+                    <div class="font-mono text-xs text-zinc-200">${escapeHtml(entry.backup_name ?? "Backup")}</div>
+                    <div class="mt-1 text-[11px] text-zinc-500">${escapeHtml(formatTimestamp(entry.created_at ?? entry.updated_at))}</div>
+                    <div class="mt-1 text-[11px] text-zinc-500">${escapeHtml(formatBytes(entry.size_bytes ?? 0))}</div>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <button type="button" class="${C.btnGhost}" data-action="cloud-backup-download" data-backup-id="${escapeHtml(entry.id)}">Download</button>
+                    <button type="button" class="${C.btnGhost}" data-action="cloud-backup-restore" data-backup-id="${escapeHtml(entry.id)}">Restore</button>
+                  </div>
+                </div>`,
+                    )
+                    .join("")
+                : `<div class="text-[11px] text-zinc-500">No cloud backups uploaded yet.</div>`
+            }
+          </div>
+        </form>
+      </div>
+      <div class="${C.card}">
+        <div class="mb-4 border-b border-zinc-900 pb-2">
           <h2 class="text-xl font-semibold uppercase tracking-[0.12em] text-white">Server Folder</h2>
         </div>
         <p class="break-all font-mono text-xs text-zinc-400">${escapeHtml(server.serverDir)}</p>
@@ -1578,10 +2681,12 @@ function renderPanelScreen() {
       : ui.section === "backups" ? renderBackupsSection(server)
       : ui.section === "settings" ? renderSettingsSection(server)
       : "";
-  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-6 lg:p-8">${content || renderOverviewSection(server)}</main></div>`;
+  const overview = isPelicanBlueprintVariant() ? renderPelicanOverviewSection(server) : renderOverviewSection(server);
+  return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-6 lg:p-8">${content || overview}</main></div>`;
 }
 
 function render() {
+  syncVariantAssets();
   const focusSnapshot = captureEditableFocus();
   let page;
   if (ui.bootstrap.active) {
@@ -1607,10 +2712,36 @@ function render() {
   }
   stopPlayitGatePolling();
   const server = activeServer();
-  if (!server || ui.screen === "manager") page = renderManagerScreen();
-  else if (!server.setupComplete || ui.screen === "setup") page = renderSetupScreen(server);
-  else page = renderPanelScreen(server);
+  if (ui.screen === "create-server") {
+    const createScreen = renderCreateServerScreen();
+    page = isPelicanBlueprintVariant()
+      ? renderPelicanBlueprintShell(createScreen, server)
+      : createScreen;
+  } else if (!server || ui.screen === "manager") {
+    const managerScreen = renderManagerScreen();
+    page = isPelicanBlueprintVariant()
+      ? renderPelicanBlueprintShell(managerScreen, server)
+      : managerScreen;
+  } else if (!server.setupComplete || ui.screen === "setup") {
+    const setupScreen = renderSetupScreen(server);
+    page = isPelicanBlueprintVariant()
+      ? renderPelicanBlueprintShell(setupScreen, server)
+      : setupScreen;
+  } else {
+    const panelScreen = renderPanelScreen(server);
+    page = isPelicanBlueprintVariant()
+      ? renderPelicanBlueprintShell(panelScreen, server)
+      : panelScreen;
+  }
   app.innerHTML = `${page}${renderModal()}${renderOperationOverlay()}`;
+  if (
+    ui.screen === "panel" &&
+    ui.section === "settings" &&
+    !ui.cloudBackupStatusLoading &&
+    (!ui.cloudBackupStatus || Date.now() - ui.cloudBackupStatusFetchedAt > 15000)
+  ) {
+    refreshCloudBackupStatus().catch(() => {});
+  }
   updateConsoleElement();
   restoreEditableFocus(focusSnapshot);
   if (ui.modal?.type === "create-server" && ui.modal.justOpened) {
@@ -1675,6 +2806,10 @@ async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activ
   const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
   const payload = await api(`/api/state${query}`);
   runtime.data = payload.state;
+  syncUiPickerPrompt();
+  if (maybeRedirectToPreferredUi()) {
+    return;
+  }
   syncPlayerDrafts();
   syncInstallDraft();
   if (ui.installDraft?.software) await ensureVersions(ui.installDraft.software);
@@ -1684,6 +2819,28 @@ async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activ
       ui.bootstrap.active = false;
     }
     render();
+  }
+}
+
+async function refreshCloudBackupStatus(force = false) {
+  if (ui.cloudBackupStatusLoading) {
+    return ui.cloudBackupStatus;
+  }
+  if (!force && ui.cloudBackupStatus && Date.now() - ui.cloudBackupStatusFetchedAt < 15000) {
+    return ui.cloudBackupStatus;
+  }
+  ui.cloudBackupStatusLoading = true;
+  try {
+    const query = activeServer()?.id ?? runtime.data?.activeServerId
+      ? `?serverId=${encodeURIComponent(activeServer()?.id ?? runtime.data?.activeServerId)}`
+      : "";
+    const payload = await api(`/api/cloud-backup/status${query}`);
+    ui.cloudBackupStatus = payload.cloudBackup ?? null;
+    ui.cloudBackupStatusFetchedAt = Date.now();
+    render();
+    return ui.cloudBackupStatus;
+  } finally {
+    ui.cloudBackupStatusLoading = false;
   }
 }
 
@@ -1921,17 +3078,30 @@ async function handleAction(event) {
     "remove-asset",
     "install-catalog",
     "player-action",
+    "cloud-backup-refresh",
+    "cloud-backup-issue-key",
+    "cloud-backup-rotate-key",
+    "cloud-backup-upload",
+    "cloud-backup-download",
+    "cloud-backup-restore",
+    "choose-ui-variant",
   ]);
 
   const run = async () => {
     switch (button.dataset.action) {
       case "go-manager":
+        ui.createDraft = null;
         ui.screen = "manager";
         render();
         break;
       case "add-server-prompt":
       case "focus-add-server": {
-        openCreateServerModal();
+        if (isPelicanBlueprintVariant()) {
+          await ensureVersions((ui.createDraft ?? buildCreateDraft()).software);
+          openCreateServerScreen();
+        } else {
+          openCreateServerModal();
+        }
         break;
       }
       case "close-modal":
@@ -1972,6 +3142,14 @@ async function handleAction(event) {
         await ensureVersions(ui.installDraft.software);
         render();
         break;
+      case "pick-create-software":
+        if (!ui.createDraft) ui.createDraft = buildCreateDraft();
+        ui.createDraft.software = button.dataset.softwareId;
+        ui.createDraft.version = "latest";
+        syncCreateDraftBounds();
+        await ensureVersions(ui.createDraft.software);
+        render();
+        break;
       case "switch-section":
         ui.section = button.dataset.section;
         render();
@@ -2000,6 +3178,18 @@ async function handleAction(event) {
       case "playit-reset-prompt":
         openPlayitResetModal();
         break;
+      case "open-ui-picker":
+        ui.modal = { type: "ui-picker" };
+        render();
+        break;
+      case "choose-ui-variant": {
+        ui.modal = null;
+        await saveUiPreference(button.dataset.uiVariant, {
+          redirect: true,
+          hasChosenVariant: true,
+        });
+        break;
+      }
       case "check-app-update": {
         const payload = await api("/api/app-update/check", { method: "POST" });
         runtime.data = payload.state;
@@ -2054,12 +3244,86 @@ async function handleAction(event) {
       case "refresh-playit-gate":
         await refreshState();
         break;
+      case "cloud-backup-refresh":
+        await refreshCloudBackupStatus(true);
+        break;
+      case "cloud-backup-issue-key": {
+        const deviceLabel =
+          document.querySelector('[data-form="cloud-backup-settings"] [name="deviceLabel"]')
+            ?.value ?? "";
+        const payload = await api("/api/cloud-backup/issue-key", {
+          method: "POST",
+          body: { deviceLabel },
+        });
+        runtime.data = payload.state;
+        ui.cloudBackupStatus = payload.cloudBackup ?? null;
+        ui.cloudBackupStatusFetchedAt = Date.now();
+        render();
+        break;
+      }
+      case "cloud-backup-rotate-key": {
+        const payload = await api("/api/cloud-backup/rotate-key", { method: "POST" });
+        runtime.data = payload.state;
+        ui.cloudBackupStatus = payload.cloudBackup ?? null;
+        ui.cloudBackupStatusFetchedAt = Date.now();
+        render();
+        break;
+      }
+      case "cloud-backup-upload": {
+        const payload = await api(activeServerPath("/cloud-backup/upload"), { method: "POST" });
+        runtime.data = payload.state;
+        ui.cloudBackupStatus = payload.upload?.cloudBackup ?? null;
+        ui.cloudBackupStatusFetchedAt = Date.now();
+        await refreshLogs();
+        render();
+        break;
+      }
+      case "cloud-backup-download": {
+        await api(activeServerPath("/cloud-backup/download"), {
+          method: "POST",
+          body: { backupId: button.dataset.backupId },
+        });
+        await refreshState();
+        break;
+      }
+      case "cloud-backup-restore": {
+        if (!window.confirm("Restore this cloud backup onto the current server? The server must stay stopped during the restore.")) {
+          break;
+        }
+        const payload = await api(activeServerPath("/cloud-backup/restore"), {
+          method: "POST",
+          body: { backupId: button.dataset.backupId },
+        });
+        runtime.data = payload.state;
+        ui.cloudBackupStatus = payload.restore?.cloudBackup ?? null;
+        ui.cloudBackupStatusFetchedAt = Date.now();
+        await refreshLogs();
+        render();
+        break;
+      }
       case "remove-asset":
         await api(activeServerPath("/assets/remove"), { method: "POST", body: { kind: button.dataset.kind, fileName: button.dataset.fileName } });
         await refreshState();
         await refreshLogs();
         break;
       case "install-catalog":
+        {
+          const item =
+            ui.catalog?.[button.dataset.kind]?.results?.find(
+              (entry) => String(entry.id) === String(button.dataset.projectId),
+            ) ?? null;
+          const warning = addonInstallWarning(
+            item ?? {
+              title: button.dataset.projectTitle,
+              clientSide: button.dataset.clientSide,
+              serverSide: button.dataset.serverSide,
+            },
+            button.dataset.kind,
+          );
+          if (warning && !window.confirm(`${warning.title}\n\n${warning.message}`)) {
+            break;
+          }
+        }
         await api(activeServerPath("/catalog/install"), {
           method: "POST",
           body: {
@@ -2143,6 +3407,29 @@ async function handleSubmit(event) {
         ui.screen = "setup";
         ui.section = "server";
         syncInstallDraft();
+        await ensureVersions(ui.installDraft.software);
+        render();
+        break;
+      }
+      case "create-server-page": {
+        const draft = ui.createDraft ?? buildCreateDraft();
+        const trimmedName = String(form.elements.name.value ?? draft.name ?? "").trim();
+        if (!trimmedName) {
+          throw new Error("Enter a server name first.");
+        }
+        resetLogs();
+        ui.catalog.plugin = null;
+        ui.catalog.mod = null;
+        const payload = await api("/api/servers", {
+          method: "POST",
+          body: { name: trimmedName, installNow: false, acceptEula: true },
+        });
+        runtime.data = payload.state;
+        const newServerId = runtime.data?.activeServerId ?? activeServer()?.id;
+        applyCreateDraftToInstallDraft(newServerId);
+        ui.createDraft = null;
+        ui.screen = "setup";
+        ui.section = "server";
         await ensureVersions(ui.installDraft.software);
         render();
         break;
@@ -2254,6 +3541,20 @@ async function handleSubmit(event) {
         await api(activeServerPath("/settings/eula"), { method: "POST", body: { accepted: true } });
         await refreshState();
         break;
+      case "cloud-backup-settings": {
+        const payload = await api("/api/cloud-backup/settings", {
+          method: "POST",
+          body: {
+            enabled: form.elements.enabled.checked,
+            deviceLabel: form.elements.deviceLabel.value,
+          },
+        });
+        runtime.data = payload.state;
+        ui.cloudBackupStatus = payload.status ?? null;
+        ui.cloudBackupStatusFetchedAt = Date.now();
+        render();
+        break;
+      }
       case "app-update-settings": {
         const payload = await api("/api/settings/updater", {
           method: "POST",
@@ -2284,6 +3585,35 @@ function handleInput(event) {
     ui.modal.name = event.target.value;
     ui.modal.selectionStart = event.target.selectionStart ?? ui.modal.name.length;
     ui.modal.selectionEnd = event.target.selectionEnd ?? ui.modal.name.length;
+  }
+  if (event.target?.dataset?.createField) {
+    if (!ui.createDraft) ui.createDraft = buildCreateDraft();
+    const field = event.target.dataset.createField;
+    let value = event.target.value;
+    if (["minRamMb", "maxRamMb", "cpuCores", "gpuShare"].includes(field)) value = Number(value);
+    ui.createDraft[field] = value;
+    syncCreateDraftBounds();
+    const outputs = {
+      minRamMb: mbToRamString(ui.createDraft.minRamMb),
+      maxRamMb: mbToRamString(ui.createDraft.maxRamMb),
+      cpuCores: String(ui.createDraft.cpuCores),
+      gpuShare: `${ui.createDraft.gpuShare}%`,
+    };
+    for (const [key, outputValue] of Object.entries(outputs)) {
+      const output = document.querySelector(`[data-create-output="${key}"]`);
+      if (output) output.textContent = outputValue;
+    }
+    if (field === "maxRamMb") {
+      const minInput = document.querySelector('[data-create-field="minRamMb"]');
+      if (minInput) {
+        minInput.value = String(ui.createDraft.minRamMb);
+        minInput.max = String(ui.createDraft.maxRamMb);
+      }
+    }
+    if (field === "minRamMb") {
+      const maxInput = document.querySelector('[data-create-field="maxRamMb"]');
+      if (maxInput) maxInput.min = String(ui.createDraft.minRamMb);
+    }
   }
   const commandForm = event.target?.closest?.('form[data-form="console-command"]');
   if (commandForm && event.target?.name === "command") {

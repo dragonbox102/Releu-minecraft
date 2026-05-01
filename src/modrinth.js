@@ -55,11 +55,29 @@ export const modCatalogProfiles = [
   },
 ];
 
+export const resourcePackCatalogProfiles = [
+  {
+    id: "resourcepack",
+    label: "Resource Pack",
+    searchLoaders: [],
+    installLoaders: [],
+  },
+];
+
 function getProfiles(kind) {
-  return kind === "plugin" ? pluginCatalogProfiles : modCatalogProfiles;
+  if (kind === "plugin") {
+    return pluginCatalogProfiles;
+  }
+  if (kind === "resourcepack") {
+    return resourcePackCatalogProfiles;
+  }
+  return modCatalogProfiles;
 }
 
 export function getDefaultCatalogProfileId(kind, serverSoftware) {
+  if (kind === "resourcepack") {
+    return "resourcepack";
+  }
   if (kind === "plugin") {
     if (serverSoftware === "purpur") {
       return "purpur";
@@ -125,10 +143,22 @@ async function fetchProjectInfo(projectId) {
 }
 
 function buildSearchFacets({ kind, profile, gameVersion }) {
-  void kind;
-  const facets = [profile.searchLoaders.map((loader) => `categories:${loader}`)];
+  const facets = [];
+  if (profile.searchLoaders?.length) {
+    facets.push(profile.searchLoaders.map((loader) => `categories:${loader}`));
+  }
+  if (kind === "plugin" || kind === "mod") {
+    facets.push(["server_side:required", "server_side:optional", "server_side:unknown"]);
+  }
   const normalizedGameVersion = String(gameVersion ?? "").trim();
-  if (normalizedGameVersion) {
+  const shouldUseVersionFacet =
+    normalizedGameVersion &&
+    normalizedGameVersion.toLowerCase() !== "latest" &&
+    !(
+      /^\d+(?:\.\d+){2,3}$/i.test(normalizedGameVersion) &&
+      !normalizedGameVersion.startsWith("1.")
+    );
+  if (shouldUseVersionFacet) {
     facets.push([`versions:${normalizedGameVersion}`]);
   }
   return JSON.stringify(facets);
@@ -141,60 +171,125 @@ export async function searchCatalogProjects({
   serverSoftware,
   gameVersion,
   limit = 12,
+  page = 1,
   index = "relevance",
 }) {
   const profile = resolveCatalogProfile(kind, profileId, serverSoftware);
-  const payload = await fetchModrinthJson("/search", {
-    query: String(query ?? "").trim(),
-    facets: buildSearchFacets({ kind, profile, gameVersion }),
-    limit: String(limit),
-    index,
-  });
+  const requestedQuery = String(query ?? "").trim();
+  const effectiveQuery =
+    requestedQuery || (kind === "resourcepack" ? "resource pack" : "");
+  const pageSize = Math.max(1, Math.min(24, Number(limit) || 12));
+  const currentPage = Math.max(1, Number(page) || 1);
+  const upstreamLimit = Math.min(
+    80,
+    Math.max(pageSize, kind === "resourcepack" ? pageSize * 4 : pageSize * 2),
+  );
+  let offset = Math.max(0, (currentPage - 1) * pageSize);
+  let totalHits = 0;
+  let exhausted = false;
+  let batches = 0;
+  const compatibleResults = [];
 
-  const rawResults = (payload.hits ?? []).map((entry) => ({
-    id: entry.project_id,
-    slug: entry.slug,
-    title: entry.name ?? entry.title,
-    author: entry.author,
-    description: entry.summary ?? entry.description,
-    iconUrl: entry.icon_url,
-    downloads: entry.downloads,
-    followers: entry.follows,
-    latestGameVersion:
-      entry.game_versions?.at?.(-1) ?? entry.latest_version ?? null,
-    gameVersions: entry.game_versions ?? entry.versions ?? [],
-    categories: entry.display_categories ?? entry.categories ?? entry.loaders ?? [],
-    dateModified: entry.date_modified,
-  }));
+  while (compatibleResults.length < pageSize && !exhausted && batches < 4) {
+    const payload = await fetchModrinthJson("/search", {
+      query: effectiveQuery,
+      facets: buildSearchFacets({ kind, profile, gameVersion }),
+      limit: String(upstreamLimit),
+      offset: String(offset),
+      index,
+    });
 
-  const compatibilityChecks = await Promise.all(
-    rawResults.map(async (entry) => {
-      try {
-        const { selectedVersion } = await fetchCompatibleProjectVersion(
-          entry.id,
-          profile,
-          gameVersion,
-        );
-        if (!selectedVersion) {
+    totalHits = Math.max(
+      totalHits,
+      Number(payload.total_hits ?? payload.totalHits ?? 0) || 0,
+    );
+
+    const rawResults = (payload.hits ?? []).map((entry) => ({
+      id: entry.project_id,
+      slug: entry.slug,
+      title: entry.name ?? entry.title,
+      author: entry.author,
+      description: entry.summary ?? entry.description,
+      iconUrl: entry.icon_url,
+      downloads: entry.downloads,
+      followers: entry.follows,
+      latestGameVersion:
+        entry.game_versions?.at?.(-1) ?? entry.latest_version ?? null,
+      gameVersions: entry.game_versions ?? entry.versions ?? [],
+      categories: entry.display_categories ?? entry.categories ?? entry.loaders ?? [],
+      dateModified: entry.date_modified,
+      clientSide: entry.client_side ?? null,
+      serverSide: entry.server_side ?? null,
+    }));
+
+    if (!rawResults.length) {
+      break;
+    }
+
+    const compatibilityChecks = await Promise.all(
+      rawResults.map(async (entry) => {
+        try {
+          const projectInfo = await fetchProjectInfo(entry.id);
+          const projectTypes = Array.isArray(projectInfo.project_types)
+            ? projectInfo.project_types
+            : [];
+          if (kind === "plugin" && !projectTypes.includes("plugin")) {
+            return null;
+          }
+          if (kind === "mod" && !projectTypes.includes("mod")) {
+            return null;
+          }
+          if (kind === "resourcepack" && !projectTypes.includes("resourcepack")) {
+            return null;
+          }
+          if (
+            (kind === "plugin" || kind === "mod") &&
+            String(projectInfo.server_side ?? entry.serverSide ?? "unknown").toLowerCase() ===
+              "unsupported"
+          ) {
+            return null;
+          }
+
+          const { versions, selectedVersion } = await fetchCompatibleProjectVersion(
+            entry.id,
+            profile,
+            gameVersion,
+          );
+          if (!selectedVersion) {
+            return null;
+          }
+
+          return {
+            ...entry,
+            title: projectInfo.name ?? entry.title,
+            description: projectInfo.summary ?? entry.description,
+            iconUrl: projectInfo.icon_url ?? entry.iconUrl,
+            clientSide: projectInfo.client_side ?? entry.clientSide ?? "unknown",
+            serverSide: projectInfo.server_side ?? entry.serverSide ?? "unknown",
+            compatibleVersionNumber: selectedVersion.version_number ?? null,
+            compatibleGameVersions: selectedVersion.game_versions ?? [],
+            availableVersions: listCompatibleVersions(versions, gameVersion).slice(0, 12),
+          };
+        } catch {
           return null;
         }
+      }),
+    );
 
-        return {
-          ...entry,
-          compatibleVersionNumber: selectedVersion.version_number ?? null,
-          compatibleGameVersions: selectedVersion.game_versions ?? [],
-        };
-      } catch {
-        return null;
-      }
-    }),
-  );
+    compatibleResults.push(...compatibilityChecks.filter(Boolean));
+    offset += rawResults.length;
+    batches += 1;
+    exhausted = rawResults.length < upstreamLimit || (totalHits > 0 && offset >= totalHits);
+  }
 
-  const results = compatibilityChecks.filter(Boolean);
+  const results = compatibleResults.slice(0, pageSize);
 
   return {
     profile,
-    totalHits: results.length,
+    page: currentPage,
+    pageSize,
+    totalHits: totalHits || results.length,
+    totalPages: Math.max(1, Math.ceil(Math.max(totalHits || results.length, 1) / pageSize)),
     results,
   };
 }
@@ -236,14 +331,29 @@ function selectCompatibleVersion(versions, gameVersion) {
   return candidates.find((entry) => pickPrimaryFile(entry)) ?? null;
 }
 
+function listCompatibleVersions(versions, gameVersion) {
+  return filterVersionsForGameVersion(versions, gameVersion)
+    .filter((entry) => entry.status === "listed" || entry.status === "archived" || !entry.status)
+    .sort(sortVersionsDescending)
+    .filter((entry) => pickPrimaryFile(entry))
+    .map((entry) => ({
+      id: entry.id,
+      versionNumber: entry.version_number ?? null,
+      name: entry.name ?? null,
+      gameVersions: entry.game_versions ?? [],
+      publishedAt: entry.date_published ?? null,
+      fileName: pickPrimaryFile(entry)?.filename ?? null,
+    }));
+}
+
 async function fetchCompatibleProjectVersion(projectId, profile, gameVersion) {
-  const versions = await fetchModrinthJson(
-    `/project/${encodeURIComponent(projectId)}/version`,
-    {
-      loaders: JSON.stringify(profile.installLoaders),
-      include_changelog: "false",
-    },
-  );
+  const searchParams = {
+    include_changelog: "false",
+  };
+  if (profile.installLoaders?.length) {
+    searchParams.loaders = JSON.stringify(profile.installLoaders);
+  }
+  const versions = await fetchModrinthJson(`/project/${encodeURIComponent(projectId)}/version`, searchParams);
 
   return {
     versions,
@@ -257,20 +367,26 @@ export async function resolveCatalogInstall({
   profileId,
   serverSoftware,
   gameVersion,
+  versionId = null,
 }) {
   const profile = resolveCatalogProfile(kind, profileId, serverSoftware);
   const projectInfo = await fetchProjectInfo(projectId);
-  const { selectedVersion } = await fetchCompatibleProjectVersion(
+  const { versions, selectedVersion: compatibleVersion } = await fetchCompatibleProjectVersion(
     projectId,
     profile,
     gameVersion,
   );
+  const selectedVersion = versionId
+    ? versions.find((entry) => entry.id === versionId && pickPrimaryFile(entry))
+    : compatibleVersion;
   if (!selectedVersion) {
     const title = projectInfo.title ?? projectInfo.name ?? "This project";
     const requestedGameVersion =
       String(gameVersion ?? "").trim() || "the selected Minecraft version";
     throw new Error(
-      `${title} does not have a listed ${profile.label} version for ${requestedGameVersion}. Try a different project or change the server version.`,
+      versionId
+        ? `${title} does not expose that installable ${profile.label} version for ${requestedGameVersion}.`
+        : `${title} does not have a listed ${profile.label} version for ${requestedGameVersion}. Try a different project or change the server version.`,
     );
   }
 
@@ -289,8 +405,11 @@ export async function resolveCatalogInstall({
     versionId: selectedVersion.id,
     versionNumber: selectedVersion.version_number,
     versionName: selectedVersion.name,
+    clientSide: projectInfo.client_side ?? "unknown",
+    serverSide: projectInfo.server_side ?? "unknown",
     fileName: file.filename,
     fileUrl: file.url,
+    fileSha1: file.hashes?.sha1 ?? null,
     gameVersions: selectedVersion.game_versions ?? [],
     loaders: selectedVersion.loaders ?? [],
     dependencies: (selectedVersion.dependencies ?? []).map((entry) => ({

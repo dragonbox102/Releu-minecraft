@@ -1,6 +1,6 @@
 {
   "name": "minecraft-server",
-  "version": "1.1.18",
+  "version": "1.2.0",
   "description": "Localhost Minecraft control panel with multi-server, playit.gg, and addon catalog support",
   "bin": "src/app.js",
   "main": "electron/main.cjs",
@@ -8,7 +8,7 @@
     "start": "node src/app.js",
     "start:desktop": "node scripts/start-desktop.cjs",
     "test": "node --check src/app.js && node --check public/app.js && node --check electron/main.cjs && node --check electron/preload.cjs",
-    "build:exe": "electron-builder --win portable",
+    "build:exe": "electron-builder --win portable && node scripts/sync-desktop-runtime.cjs",
     "build:linux": "electron-builder --linux AppImage"
   },
   "keywords": [],
@@ -16,8 +16,11 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@supabase/supabase-js": "^2.105.1",
+    "archiver": "^7.0.1",
     "express": "^5.2.1",
     "extract-zip": "^2.0.1",
+    "pg": "^8.20.0",
     "tar": "^7.5.13"
   },
   "devDependencies": {
@@ -33,6 +36,11 @@
   "build": {
     "appId": "local.minecraft.panel",
     "productName": "Releu-minecraft",
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false
+    },
     "directories": {
       "output": "dist"
     },
@@ -54,7 +62,7 @@
       "!Releu-minecraft.AppImage",
       "!*.zip"
     ],
-    "asar": true,
+    "asar": false,
     "win": {
       "artifactName": "Releu-minecraft.exe",
       "signAndEditExecutable": false,

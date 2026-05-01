@@ -1,4 +1,5 @@
 import express from "express";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,11 +29,44 @@ function sendOk(response, data) {
   });
 }
 
-function resolveServerId(request) {
+function firstAvailableServerId() {
   return (
-    String(request.params.serverId ?? request.query.serverId ?? panel.activeServerId ?? "").trim() ||
-    panel.activeServerId
+    panel.activeServerId ||
+    panel.registry?.servers?.[0]?.id ||
+    Array.from(panel.serverContexts?.keys?.() ?? [])[0] ||
+    null
   );
+}
+
+function resolveServerId(request) {
+  const requestedServerId = String(
+    request.params.serverId ?? request.query.serverId ?? panel.activeServerId ?? "",
+  ).trim();
+  if (requestedServerId && panel.serverContexts?.has(requestedServerId)) {
+    return requestedServerId;
+  }
+
+  const activeServerId = String(panel.activeServerId ?? "").trim();
+  if (activeServerId && panel.serverContexts?.has(activeServerId)) {
+    return activeServerId;
+  }
+
+  return firstAvailableServerId();
+}
+
+function mapPelicanSectionToPage(section) {
+  const normalized = String(section ?? "").trim().toLowerCase();
+  if (!normalized) return "overview.html";
+  if (normalized === "console") return "console.html";
+  if (normalized === "files") return "files.html";
+  if (normalized === "backups") return "backups.html";
+  if (normalized === "settings") return "settings.html";
+  if (normalized === "players") return "players.html";
+  if (normalized === "worlds") return "worlds.html";
+  if (normalized === "software") return "software.html";
+  if (normalized === "create" || normalized === "new" || normalized === "install") return "create-server.html";
+  if (normalized === "extensions" || normalized === "addons" || normalized === "mods" || normalized === "add-ons") return "addons-mods.html";
+  return "overview.html";
 }
 
 export async function startPanelServer() {
@@ -45,6 +79,26 @@ export async function startPanelServer() {
   const app = express();
   app.use(express.json({ limit: "2mb" }));
   app.use(express.static(paths.publicDir));
+  app.get("/server/:serverId", (request, response) => {
+    response.redirect(
+      302,
+      `/pelican-demo/overview.html?serverId=${encodeURIComponent(request.params.serverId)}`,
+    );
+  });
+  app.get("/server/:serverId/:section", (request, response) => {
+    const page = mapPelicanSectionToPage(request.params.section);
+    response.redirect(
+      302,
+      `/pelican-demo/${page}?serverId=${encodeURIComponent(request.params.serverId)}`,
+    );
+  });
+  app.all("/livewire/update", (_request, response) => {
+    response.status(200).json({
+      ok: true,
+      effects: {},
+      serverMemo: {},
+    });
+  });
 
   app.get(
     "/api/dependencies/state",
@@ -91,6 +145,55 @@ export async function startPanelServer() {
     }),
   );
 
+  app.get(
+    "/api/cloud-backup/config",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        cloudBackup: (await panel.getState(resolveServerId(request))).cloudBackupSettings,
+      });
+    }),
+  );
+
+  app.get(
+    "/api/cloud-backup/status",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        cloudBackup: await panel.getCloudBackupStatus(resolveServerId(request)),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/cloud-backup/settings",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        cloudBackup: await panel.updateCloudBackupSettings(request.body ?? {}),
+        status: await panel.getCloudBackupStatus(resolveServerId(request)),
+        state: await panel.getState(resolveServerId(request)),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/cloud-backup/issue-key",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        cloudBackup: await panel.issueCloudBackupKey(request.body ?? {}),
+        state: await panel.getState(resolveServerId(request)),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/cloud-backup/rotate-key",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        cloudBackup: await panel.rotateCloudBackupKey(),
+        state: await panel.getState(resolveServerId(request)),
+      });
+    }),
+  );
+
   app.post(
     "/api/servers",
     asyncRoute(async (request, response) => {
@@ -105,6 +208,39 @@ export async function startPanelServer() {
     asyncRoute(async (request, response) => {
       sendOk(response, {
         state: await panel.selectServer(request.params.serverId),
+      });
+    }),
+  );
+
+  app.get(
+    "/api/servers/:serverId/icon",
+    asyncRoute(async (request, response) => {
+      const icon = await panel.getServerIconInfo(request.params.serverId);
+      if (!icon) {
+        response.status(404).end();
+        return;
+      }
+      response.setHeader("Content-Type", icon.contentType);
+      response.setHeader("Cache-Control", "no-cache");
+      response.send(await fs.readFile(icon.path));
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/icon",
+    express.raw({ limit: "8mb", type: "application/octet-stream" }),
+    asyncRoute(async (request, response) => {
+      const fileName =
+        request.headers["x-file-name"] ??
+        request.query.fileName ??
+        "server-icon.png";
+      sendOk(response, {
+        icon: await panel.uploadServerIcon(
+          request.params.serverId,
+          String(fileName),
+          request.body,
+        ),
+        state: await panel.getState(request.params.serverId),
       });
     }),
   );
@@ -143,6 +279,16 @@ export async function startPanelServer() {
       sendOk(response, {
         config: await panel.updatePlayitSettings(request.body ?? {}),
         state: await panel.getState(panel.activeServerId),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/settings/ui",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        config: await panel.updateUiSettings(request.body ?? {}),
+        state: await panel.getState(resolveServerId(request)),
       });
     }),
   );
@@ -242,6 +388,42 @@ export async function startPanelServer() {
     asyncRoute(async (request, response) => {
       sendOk(response, {
         backupPath: await panel.createBackup(request.params.serverId),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/cloud-backup/upload",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        upload: await panel.uploadCloudBackup(request.params.serverId),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/cloud-backup/download",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        download: await panel.downloadCloudBackup(
+          request.params.serverId,
+          request.body.backupId,
+        ),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/cloud-backup/restore",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        restore: await panel.restoreCloudBackup(
+          request.params.serverId,
+          request.body.backupId,
+        ),
         state: await panel.getState(request.params.serverId),
       });
     }),
@@ -408,6 +590,7 @@ export async function startPanelServer() {
           profileId: request.query.profileId,
           gameVersion: request.query.gameVersion,
           limit: request.query.limit,
+          page: request.query.page,
           index: request.query.index,
         }),
       });
