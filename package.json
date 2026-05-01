@@ -1,6 +1,6 @@
 {
   "name": "minecraft-server",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Localhost Minecraft control panel with multi-server, playit.gg, and addon catalog support",
   "bin": "src/app.js",
   "main": "electron/main.cjs",
@@ -8,8 +8,8 @@
     "start": "node src/app.js",
     "start:desktop": "node scripts/start-desktop.cjs",
     "test": "node --check src/app.js && node --check public/app.js && node --check electron/main.cjs && node --check electron/preload.cjs",
-    "build:exe": "electron-builder --win portable && node scripts/sync-desktop-runtime.cjs",
-    "build:linux": "electron-builder --linux AppImage"
+    "build:exe": "electron-builder --win portable && node scripts/sync-desktop-runtime.cjs && node scripts/sync-release-assets.cjs win",
+    "build:linux": "electron-builder --linux AppImage && node scripts/sync-release-assets.cjs linux"
   },
   "keywords": [],
   "author": "",
