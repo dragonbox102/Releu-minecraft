@@ -12,6 +12,7 @@ secrets/
 *.exe
 *.AppImage
 *.log
+latest-linux.yml
 chrome_100_percent.pak
 chrome_200_percent.pak
 LICENSE.electron.txt

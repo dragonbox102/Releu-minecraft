@@ -257,7 +257,7 @@ export class AppUpdater {
     this.syncConfig();
     if (!this.state.supported) {
       this.state.statusMessage =
-        "Self-update is supported on Windows portable builds and Linux AppImage builds.";
+        "Self-update is supported on Windows .exe builds and Linux AppImage builds.";
       return this.snapshot();
     }
 
