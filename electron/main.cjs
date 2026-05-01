@@ -9,13 +9,30 @@ let mainWindow = null;
 let panelRuntimeClosePromise = null;
 let updateRestartScheduled = false;
 
+function desktopStartupLog(message) {
+  try {
+    const targetPath = path.join(
+      process.env.TEMP || process.env.TMP || app.getPath("temp"),
+      "releu-desktop-startup.log",
+    );
+    fs.appendFileSync(
+      targetPath,
+      `${new Date().toISOString()} ${message}\n`,
+      "utf8",
+    );
+  } catch {}
+}
+
 async function loadPanelServer() {
   const moduleUrl = pathToFileURL(path.join(__dirname, "..", "src", "app.js")).href;
+  desktopStartupLog(`Importing panel server module from ${moduleUrl}`);
   const module = await import(moduleUrl);
+  desktopStartupLog("Panel server module imported.");
   return module.startPanelServer;
 }
 
 function createWindow(url) {
+  desktopStartupLog(`Creating browser window for ${url}`);
   const window = new BrowserWindow({
     width: 1440,
     height: 960,
@@ -38,6 +55,12 @@ function createWindow(url) {
   });
 
   window.loadURL(url);
+  window.webContents.once("did-finish-load", () => {
+    desktopStartupLog(`Window finished loading ${url}`);
+  });
+  window.webContents.once("render-process-gone", (_event, details) => {
+    desktopStartupLog(`Renderer exited: ${JSON.stringify(details)}`);
+  });
   return window;
 }
 
@@ -362,23 +385,34 @@ ipcMain.handle("desktop:install-app-update", async (_event, stagedPath) => {
 });
 
 app.whenReady().then(async () => {
+  desktopStartupLog("Electron app ready.");
+  if (app.isPackaged) {
+    process.env.RELEU_DESKTOP_PACKAGED = "true";
+    desktopStartupLog("Packaged desktop mode enabled.");
+  }
   const startPanelServer = await loadPanelServer();
+  desktopStartupLog("Starting embedded panel server.");
   panelRuntime = await startPanelServer();
+  desktopStartupLog(`Embedded panel server started at ${panelRuntime?.url ?? "unknown"}.`);
   mainWindow = createWindow(panelRuntime.url);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0 && panelRuntime) {
+      desktopStartupLog("Recreating main window on activate.");
       mainWindow = createWindow(panelRuntime.url);
     }
   });
 }).catch((error) => {
+  desktopStartupLog(`Fatal desktop startup error: ${error?.stack || error?.message || String(error)}`);
   console.error(error);
   app.quit();
 });
 
 app.on("window-all-closed", async () => {
+  desktopStartupLog("All windows closed.");
   if (process.platform !== "darwin" || updateRestartScheduled) {
     await closePanelRuntimeOnce();
+    desktopStartupLog("Closed embedded panel runtime.");
     app.quit();
   }
 });

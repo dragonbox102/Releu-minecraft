@@ -2,8 +2,10 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 
+import archiver from "archiver";
 import extractZip from "extract-zip";
 
 import {
@@ -38,6 +40,7 @@ import {
   getDefaultCatalogProfileId,
   modCatalogProfiles,
   pluginCatalogProfiles,
+  resourcePackCatalogProfiles,
   resolveCatalogInstall,
   searchCatalogProjects,
 } from "./modrinth.js";
@@ -55,6 +58,12 @@ import {
   isLinux,
   withHiddenConsole,
 } from "./platform.js";
+import {
+  createSupabasePublicClient,
+  getCloudBackupConfig,
+  getPublicCloudBackupConfig,
+  invokeSupabaseEdgeFunction,
+} from "./supabase.js";
 
 async function ensureJsonFile(targetPath, defaultValue) {
   if (await fileExists(targetPath)) {
@@ -65,6 +74,227 @@ async function ensureJsonFile(targetPath, defaultValue) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function createZipArchive(sourceDir, targetPath) {
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  return new Promise((resolve, reject) => {
+    const output = fsSync.createWriteStream(targetPath);
+    const archive = archiver("zip", {
+      zlib: { level: 9 },
+    });
+
+    output.on("close", () => {
+      resolve({
+        path: targetPath,
+        sizeBytes: archive.pointer(),
+      });
+    });
+    output.on("error", reject);
+    archive.on("error", reject);
+    archive.pipe(output);
+    archive.directory(sourceDir, false);
+    archive.finalize();
+  });
+}
+
+async function copyDirectoryForBackup(sourceDir, targetDir) {
+  await fs.cp(sourceDir, targetDir, {
+    recursive: true,
+    filter: (entry) => path.basename(entry) !== "session.lock",
+  });
+}
+
+const cloudBackupManifestFormat = "releu-cloud-backup-manifest-v1";
+const cloudBackupManifestSuffix = "__releu-manifest-v1";
+const cloudBackupPartPattern = /^(.*)__releu-part-(\d+)-of-(\d+)$/i;
+const singleCloudBackupIdPrefix = "single:";
+const chunkedCloudBackupIdPrefix = "chunked:";
+
+function formatChunkedBackupManifestName(baseName) {
+  return `${baseName}${cloudBackupManifestSuffix}`;
+}
+
+function formatChunkedBackupPartName(baseName, partNumber, partCount) {
+  return `${baseName}__releu-part-${String(partNumber).padStart(4, "0")}-of-${String(partCount).padStart(4, "0")}`;
+}
+
+function parseChunkedBackupEntry(entry) {
+  const backupName = String(entry?.backup_name ?? "").trim();
+  if (!backupName) {
+    return { kind: "single", baseName: "" };
+  }
+  if (backupName.endsWith(cloudBackupManifestSuffix)) {
+    return {
+      kind: "manifest",
+      baseName: backupName.slice(0, -cloudBackupManifestSuffix.length),
+    };
+  }
+
+  const match = backupName.match(cloudBackupPartPattern);
+  if (match) {
+    return {
+      kind: "part",
+      baseName: String(match[1] ?? "").trim(),
+      partNumber: Number(match[2] ?? 0) || 0,
+      partCount: Number(match[3] ?? 0) || 0,
+    };
+  }
+
+  return {
+    kind: "single",
+    baseName: backupName,
+  };
+}
+
+function cloudBackupTimestampValue(entry) {
+  const candidate = entry?.updated_at ?? entry?.created_at ?? null;
+  const timestamp = Date.parse(candidate ?? "");
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sha256HexForBuffer(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+async function sha256HexForFile(targetPath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fsSync.createReadStream(targetPath);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+async function readFileChunk(handle, position, length) {
+  const buffer = Buffer.allocUnsafe(length);
+  const { bytesRead } = await handle.read(buffer, 0, length, position);
+  return buffer.subarray(0, bytesRead);
+}
+
+async function uploadToSignedStorageUrlWithRetry(
+  publicClient,
+  bucket,
+  objectPath,
+  token,
+  bytes,
+  {
+    attempts = 4,
+    contentType = "application/zip",
+  } = {},
+) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const { error } = await publicClient.storage
+        .from(bucket)
+        .uploadToSignedUrl(objectPath, token, bytes, {
+          contentType,
+          upsert: false,
+        });
+      if (!error) {
+        return;
+      }
+      lastError = error;
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < attempts) {
+      await wait(750 * attempt);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "Upload failed."));
+}
+
+function buildLogicalCloudBackups(entries) {
+  const logical = [];
+  const chunkGroups = new Map();
+
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const parsed = parseChunkedBackupEntry(entry);
+    if (parsed.kind === "single") {
+      logical.push({
+        ...entry,
+        id: `${singleCloudBackupIdPrefix}${entry.id}`,
+        logicalKind: "single",
+      });
+      continue;
+    }
+
+    const group = chunkGroups.get(parsed.baseName) ?? {
+      baseName: parsed.baseName,
+      manifest: null,
+      parts: [],
+    };
+    if (parsed.kind === "manifest") {
+      group.manifest = entry;
+    } else {
+      group.parts.push({
+        ...entry,
+        partNumber: parsed.partNumber,
+        partCount: parsed.partCount,
+      });
+    }
+    chunkGroups.set(parsed.baseName, group);
+  }
+
+  for (const group of chunkGroups.values()) {
+    if (!group.manifest) {
+      continue;
+    }
+
+    const orderedParts = [...group.parts].sort((left, right) => left.partNumber - right.partNumber);
+    const latestEntry = [group.manifest, ...orderedParts]
+      .filter(Boolean)
+      .sort((left, right) => cloudBackupTimestampValue(right) - cloudBackupTimestampValue(left))[0];
+
+    logical.push({
+      id: `${chunkedCloudBackupIdPrefix}${group.manifest.id}`,
+      backup_name: group.baseName,
+      size_bytes: orderedParts.reduce(
+        (total, entry) => total + Math.max(0, Number(entry?.size_bytes ?? 0) || 0),
+        0,
+      ),
+      created_at: group.manifest.created_at ?? latestEntry?.created_at ?? null,
+      updated_at: latestEntry?.updated_at ?? group.manifest.updated_at ?? null,
+      status:
+        group.manifest.status === "ready" &&
+        orderedParts.length > 0 &&
+        orderedParts.every((entry) => entry.status === "ready")
+          ? "ready"
+          : group.manifest.status,
+      logicalKind: "chunked",
+      partCount: orderedParts.length,
+    });
+  }
+
+  return logical.sort((left, right) => cloudBackupTimestampValue(right) - cloudBackupTimestampValue(left));
+}
+
+function parseLogicalCloudBackupId(backupId) {
+  const normalized = String(backupId ?? "").trim();
+  if (!normalized) {
+    return { kind: "single", id: "" };
+  }
+  if (normalized.startsWith(chunkedCloudBackupIdPrefix)) {
+    return {
+      kind: "chunked",
+      id: normalized.slice(chunkedCloudBackupIdPrefix.length),
+    };
+  }
+  if (normalized.startsWith(singleCloudBackupIdPrefix)) {
+    return {
+      kind: "single",
+      id: normalized.slice(singleCloudBackupIdPrefix.length),
+    };
+  }
+  return {
+    kind: "single",
+    id: normalized,
+  };
 }
 
 const minecraftVersionSorter = new Intl.Collator(undefined, {
@@ -262,6 +492,22 @@ function trimArchiveExtension(fileName) {
   return path.basename(String(fileName ?? "").trim()).replace(/\.(zip|mcworld)$/i, "");
 }
 
+const serverIconMimeByExt = Object.freeze({
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+});
+
+function normalizeServerIconExtension(fileName) {
+  const ext = path.extname(String(fileName ?? "").trim()).toLowerCase();
+  if (!serverIconMimeByExt[ext]) {
+    throw new Error("Server icon must be a PNG, JPG, WEBP, or GIF image.");
+  }
+  return ext;
+}
+
 function hasPath(targetPath) {
   try {
     fsSync.accessSync(targetPath);
@@ -431,6 +677,69 @@ export class MinecraftPanelService {
     if (!(await fileExists(context.paths.eulaFile))) {
       await fs.writeFile(context.paths.eulaFile, "eula=false\n", "utf8");
     }
+  }
+
+  getServerIconCandidates(context) {
+    return Object.keys(serverIconMimeByExt).map((extension) => ({
+      path: path.join(context.paths.dataDir, `server-icon${extension}`),
+      extension,
+      contentType: serverIconMimeByExt[extension],
+    }));
+  }
+
+  async getServerIconInfo(serverId) {
+    const context = this.getServerContext(serverId);
+    for (const candidate of this.getServerIconCandidates(context)) {
+      if (!(await fileExists(candidate.path))) {
+        continue;
+      }
+      const stats = await fs.stat(candidate.path);
+      if (candidate.extension === ".png") {
+        const minecraftIconPath = path.join(context.paths.serverDir, "server-icon.png");
+        let shouldSyncMinecraftIcon = !(await fileExists(minecraftIconPath));
+        if (!shouldSyncMinecraftIcon) {
+          try {
+            const minecraftIconStats = await fs.stat(minecraftIconPath);
+            shouldSyncMinecraftIcon = minecraftIconStats.mtimeMs + 1 < stats.mtimeMs;
+          } catch {
+            shouldSyncMinecraftIcon = true;
+          }
+        }
+        if (shouldSyncMinecraftIcon) {
+          await fs.copyFile(candidate.path, minecraftIconPath);
+        }
+      }
+      return {
+        ...candidate,
+        updatedAt: stats.mtime.toISOString(),
+        updatedAtMs: stats.mtimeMs,
+      };
+    }
+    return null;
+  }
+
+  async uploadServerIcon(serverId, fileName, bytes) {
+    const context = this.getServerContext(serverId);
+    const extension = normalizeServerIconExtension(fileName);
+    const targetPath = path.join(context.paths.dataDir, `server-icon${extension}`);
+    const minecraftIconPath = path.join(context.paths.serverDir, "server-icon.png");
+    await fs.mkdir(context.paths.dataDir, { recursive: true });
+    await Promise.all(
+      this.getServerIconCandidates(context)
+        .filter((candidate) => candidate.path !== targetPath)
+        .map((candidate) => fs.rm(candidate.path, { force: true })),
+    );
+    await fs.writeFile(targetPath, Buffer.from(bytes));
+    if (extension === ".png") {
+      await fs.writeFile(minecraftIconPath, Buffer.from(bytes));
+    }
+    context.record.updatedAt = currentTimestamp();
+    this.registry.servers = this.registry.servers.map((entry) =>
+      entry.id === serverId ? context.record : entry,
+    );
+    this.registry = await saveServerRegistry(this.registry);
+    this.appendLog(serverId, "panel", "Updated server icon.");
+    return this.getServerIconInfo(serverId);
   }
 
   getServerContext(serverId = this.activeServerId) {
@@ -805,9 +1114,11 @@ if (-not $sample) { exit 0 }
     return {
       pluginProfiles: pluginCatalogProfiles,
       modProfiles: modCatalogProfiles,
+      resourcePackProfiles: resourcePackCatalogProfiles,
       defaults: {
         plugin: getDefaultCatalogProfileId("plugin", effectiveSoftware),
         mod: getDefaultCatalogProfileId("mod", effectiveSoftware),
+        resourcepack: getDefaultCatalogProfileId("resourcepack", effectiveSoftware),
       },
     };
   }
@@ -985,9 +1296,14 @@ if (-not $sample) { exit 0 }
   async serializeServerSummary(context) {
     const metrics = await this.refreshServerMetrics(context);
     const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
+    const iconInfo = await this.getServerIconInfo(context.record.id);
     return {
       id: context.record.id,
       name: context.record.name,
+      description: context.record.description ?? "",
+      iconUrl: iconInfo
+        ? `/api/servers/${encodeURIComponent(context.record.id)}/icon?v=${encodeURIComponent(String(iconInfo.updatedAtMs))}`
+        : null,
       status: context.state.serverStatus,
       ready: context.state.serverReady,
       pid: context.state.serverPid,
@@ -1003,6 +1319,9 @@ if (-not $sample) { exit 0 }
         ...context.config.install,
         installedSoftware: effectiveSoftware,
       },
+      launcher: {
+        ...context.config.launcher,
+      },
       backups: {
         ...context.config.backups,
         nextBackupAt: this.getNextBackupAt(context),
@@ -1015,9 +1334,14 @@ if (-not $sample) { exit 0 }
     const jarInstalled = await this.hasInstalledJar(context);
     const metrics = await this.refreshServerMetrics(context);
     const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
+    const iconInfo = await this.getServerIconInfo(context.record.id);
     return {
       id: context.record.id,
       name: context.record.name,
+      description: context.record.description ?? "",
+      iconUrl: iconInfo
+        ? `/api/servers/${encodeURIComponent(context.record.id)}/icon?v=${encodeURIComponent(String(iconInfo.updatedAtMs))}`
+        : null,
       serverDir: context.paths.serverDir,
       dataDir: context.paths.dataDir,
       setupComplete: jarInstalled,
@@ -1082,8 +1406,10 @@ if (-not $sample) { exit 0 }
 
     return {
       panel: this.panelConfig.panel,
+      uiSettings: this.panelConfig.ui,
       playitSettings: this.panelConfig.playit,
       updaterSettings: this.panelConfig.updater,
+      cloudBackupSettings: getPublicCloudBackupConfig(this.panelConfig),
       host: this.getHostResources(),
       dependencies: this.dependencies.snapshot(),
       softwareOptions: serverSoftwareOptions,
@@ -1180,6 +1506,7 @@ if (-not $sample) { exit 0 }
     const record = {
       id: serverId,
       name,
+      description: String(payload.description ?? "").trim(),
       serverDir: path.join(paths.managedServersRootDir, serverId),
       createdAt: now,
       updatedAt: now,
@@ -1342,6 +1669,35 @@ if (-not $sample) { exit 0 }
     return this.panelConfig;
   }
 
+  async updateUiSettings(payload = {}) {
+    const current = this.panelConfig.ui ?? {};
+    const requestedVariant = String(
+      payload.variant ?? current.variant ?? "classic",
+    )
+      .trim()
+      .toLowerCase();
+    this.panelConfig.ui = {
+      ...current,
+      variant:
+        requestedVariant === "pelican-blueprint"
+          ? "pelican-blueprint"
+          : "classic",
+      hasChosenVariant: Boolean(
+        payload.hasChosenVariant ?? current.hasChosenVariant ?? false,
+      ),
+    };
+
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    this.appendLog(
+      null,
+      "panel",
+      `Updated preferred Releu UI to ${
+        this.panelConfig.ui.variant === "pelican-blueprint" ? "Pelican-based New UI" : "Legacy UI"
+      }.`,
+    );
+    return this.panelConfig.ui;
+  }
+
   async updateUpdaterSettings(payload) {
     this.panelConfig.updater = {
       ...this.panelConfig.updater,
@@ -1360,6 +1716,675 @@ if (-not $sample) { exit 0 }
     this.updater.syncConfig();
     this.appendLog(null, "panel", "Updated Releu app update settings.");
     return this.panelConfig;
+  }
+
+  async updateCloudBackupSettings(payload = {}) {
+    const current = getCloudBackupConfig(this.panelConfig);
+    this.panelConfig.cloudBackup = {
+      ...this.panelConfig.cloudBackup,
+      enabled: Boolean(payload.enabled ?? current.enabled),
+      deviceLabel:
+        String(payload.deviceLabel ?? current.deviceLabel ?? "").trim().slice(0, 80) ||
+        os.hostname(),
+    };
+
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    this.appendLog(null, "panel", "Updated cloud backup settings.");
+    return getPublicCloudBackupConfig(this.panelConfig);
+  }
+
+  async getCloudBackupStatus(serverId = this.activeServerId) {
+    const cloud = getCloudBackupConfig(this.panelConfig);
+    const status = {
+      ...getPublicCloudBackupConfig(this.panelConfig),
+      configured: Boolean(cloud.projectUrl && cloud.publishableKey && cloud.functionName),
+      restoreKeyPresent: Boolean(cloud.restoreKey),
+      restoreKey: cloud.restoreKey,
+      deviceLabel: cloud.deviceLabel || os.hostname(),
+      uploadLimitBytes: Math.max(1, Number(cloud.uploadLimitMb ?? 50) || 50) * 1024 * 1024,
+      backups: [],
+      backupsCount: 0,
+      usedBytes: 0,
+      latestBackup: null,
+      functionReady: false,
+      functionError: null,
+    };
+
+    if (!status.configured) {
+      return status;
+    }
+
+    try {
+      const health = await invokeSupabaseEdgeFunction(this.panelConfig, "health");
+      status.functionReady = true;
+      if (health?.bucket) {
+        status.bucket = String(health.bucket);
+      }
+      if (Number.isFinite(Number(health?.uploadLimitBytes))) {
+        status.uploadLimitBytes = Number(health.uploadLimitBytes);
+      }
+    } catch (error) {
+      status.functionError = error.message ?? "Cloud backup function check failed.";
+      return status;
+    }
+
+    if (!cloud.restoreKey) {
+      return status;
+    }
+
+    try {
+      const rawBackups = await this.listRawCloudBackups();
+      status.backups = buildLogicalCloudBackups(rawBackups);
+      status.backupsCount = status.backups.length;
+      status.usedBytes = rawBackups.reduce(
+        (total, entry) => total + Math.max(0, Number(entry?.size_bytes ?? 0) || 0),
+        0,
+      );
+      status.latestBackup = status.backups[0] ?? null;
+    } catch (error) {
+      status.functionError = error.message ?? "Cloud backup list failed.";
+    }
+
+    return status;
+  }
+
+  async issueCloudBackupKey(payload = {}) {
+    const deviceLabel =
+      String(payload.deviceLabel ?? getCloudBackupConfig(this.panelConfig).deviceLabel ?? "")
+        .trim()
+        .slice(0, 80) || os.hostname();
+    const result = await invokeSupabaseEdgeFunction(this.panelConfig, "issue_key", {
+      deviceLabel,
+    });
+
+    this.panelConfig.cloudBackup = {
+      ...this.panelConfig.cloudBackup,
+      enabled: true,
+      deviceLabel,
+      restoreKey: String(result.restoreKey ?? "").trim(),
+    };
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    this.appendLog(null, "panel", "Issued a new cloud backup restore key.");
+    return this.getCloudBackupStatus();
+  }
+
+  async rotateCloudBackupKey() {
+    const current = getCloudBackupConfig(this.panelConfig);
+    if (!current.restoreKey) {
+      throw new Error("Generate a cloud backup key first.");
+    }
+
+    const result = await invokeSupabaseEdgeFunction(this.panelConfig, "rotate_key", {
+      restoreKey: current.restoreKey,
+    });
+
+    this.panelConfig.cloudBackup = {
+      ...this.panelConfig.cloudBackup,
+      restoreKey: String(result.restoreKey ?? "").trim(),
+    };
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    this.appendLog(null, "panel", "Rotated the cloud backup restore key.");
+    return this.getCloudBackupStatus();
+  }
+
+  getCloudBackupChunkSizeBytes(uploadLimitBytes) {
+    const limit = Math.max(1, Number(uploadLimitBytes ?? 0) || 0);
+    const reservedBytes = 1024 * 1024;
+    const preferredMaxBytes = 10 * 1024 * 1024;
+    const safeLimit = limit > reservedBytes ? limit - reservedBytes : limit;
+    return Math.max(1024 * 1024, Math.min(safeLimit, preferredMaxBytes));
+  }
+
+  async listRawCloudBackups() {
+    const cloud = getCloudBackupConfig(this.panelConfig);
+    if (!cloud.restoreKey) {
+      return [];
+    }
+    const listing = await invokeSupabaseEdgeFunction(this.panelConfig, "list_backups", {
+      restoreKey: cloud.restoreKey,
+    });
+    return Array.isArray(listing?.backups) ? listing.backups : [];
+  }
+
+  async uploadSingleCloudBackup(context, backupDir, zipPath, archive, cloud, cloudStatus) {
+    const session = await invokeSupabaseEdgeFunction(
+      this.panelConfig,
+      "create_upload_session",
+      {
+        restoreKey: cloud.restoreKey,
+        serverId: context.record.id,
+        serverName: context.record.name,
+        backupName: path.basename(backupDir),
+        sizeBytes: archive.sizeBytes,
+        bucket: cloudStatus.bucket,
+      },
+    );
+
+    const publicClient = createSupabasePublicClient(this.panelConfig);
+    const zipBytes = await fs.readFile(zipPath);
+    await uploadToSignedStorageUrlWithRetry(
+      publicClient,
+      session.bucket ?? cloudStatus.bucket,
+      session.objectPath,
+      session.token,
+      zipBytes,
+    );
+
+    const marked = await invokeSupabaseEdgeFunction(this.panelConfig, "mark_upload_ready", {
+      restoreKey: cloud.restoreKey,
+      backupId: session.backupId,
+    });
+
+    this.appendLog(
+      context.record.id,
+      "panel",
+      `Uploaded cloud backup ${path.basename(backupDir)} (${Math.round(archive.sizeBytes / 1024)} KB).`,
+    );
+    return marked?.backup ?? null;
+  }
+
+  async uploadChunkedCloudBackup(context, backupDir, zipPath, archive, cloud, cloudStatus) {
+    const publicClient = createSupabasePublicClient(this.panelConfig);
+    const backupName = path.basename(backupDir);
+    const chunkSizeBytes = this.getCloudBackupChunkSizeBytes(cloudStatus.uploadLimitBytes);
+    const totalParts = Math.ceil(archive.sizeBytes / chunkSizeBytes);
+    const archiveSha256 = await sha256HexForFile(zipPath);
+    const uploadedParts = [];
+    const handle = await fs.open(zipPath, "r");
+
+    try {
+      for (let partIndex = 0; partIndex < totalParts; partIndex += 1) {
+        const partNumber = partIndex + 1;
+        const offset = partIndex * chunkSizeBytes;
+        const sizeBytes = Math.min(chunkSizeBytes, archive.sizeBytes - offset);
+        const chunkBytes = await readFileChunk(handle, offset, sizeBytes);
+        const chunkSha256 = sha256HexForBuffer(chunkBytes);
+        const partBackupName = formatChunkedBackupPartName(backupName, partNumber, totalParts);
+        const session = await invokeSupabaseEdgeFunction(
+          this.panelConfig,
+          "create_upload_session",
+          {
+            restoreKey: cloud.restoreKey,
+            serverId: context.record.id,
+            serverName: context.record.name,
+            backupName: partBackupName,
+            sizeBytes: chunkBytes.length,
+            bucket: cloudStatus.bucket,
+          },
+        );
+
+        await uploadToSignedStorageUrlWithRetry(
+          publicClient,
+          session.bucket ?? cloudStatus.bucket,
+          session.objectPath,
+          session.token,
+          chunkBytes,
+        );
+
+        await invokeSupabaseEdgeFunction(this.panelConfig, "mark_upload_ready", {
+          restoreKey: cloud.restoreKey,
+          backupId: session.backupId,
+        });
+
+        uploadedParts.push({
+          backupId: session.backupId,
+          backupName: partBackupName,
+          order: partNumber,
+          partCount: totalParts,
+          sizeBytes: chunkBytes.length,
+          sha256: chunkSha256,
+        });
+      }
+    } finally {
+      await handle.close().catch(() => {});
+    }
+
+    const manifestPayload = {
+      format: cloudBackupManifestFormat,
+      backupName,
+      createdAt: currentTimestamp(),
+      serverId: context.record.id,
+      serverName: context.record.name,
+      archiveFileName: `${backupName}.zip`,
+      archiveSizeBytes: archive.sizeBytes,
+      archiveSha256,
+      chunkSizeBytes,
+      partCount: uploadedParts.length,
+      parts: uploadedParts,
+    };
+    const manifestBytes = Buffer.from(JSON.stringify(manifestPayload, null, 2), "utf8");
+    const manifestBackupName = formatChunkedBackupManifestName(backupName);
+    const manifestSession = await invokeSupabaseEdgeFunction(
+      this.panelConfig,
+      "create_upload_session",
+      {
+        restoreKey: cloud.restoreKey,
+        serverId: context.record.id,
+        serverName: context.record.name,
+        backupName: manifestBackupName,
+        sizeBytes: manifestBytes.length,
+        bucket: cloudStatus.bucket,
+      },
+    );
+
+    await uploadToSignedStorageUrlWithRetry(
+      publicClient,
+      manifestSession.bucket ?? cloudStatus.bucket,
+      manifestSession.objectPath,
+      manifestSession.token,
+      manifestBytes,
+    );
+
+    const markedManifest = await invokeSupabaseEdgeFunction(this.panelConfig, "mark_upload_ready", {
+      restoreKey: cloud.restoreKey,
+      backupId: manifestSession.backupId,
+    });
+
+    this.appendLog(
+      context.record.id,
+      "panel",
+      `Uploaded cloud backup ${backupName} in ${uploadedParts.length} parts (${Math.round(archive.sizeBytes / 1024)} KB total).`,
+    );
+    return {
+      backup: {
+        id: `${chunkedCloudBackupIdPrefix}${manifestSession.backupId}`,
+        backup_name: backupName,
+        size_bytes: archive.sizeBytes,
+        created_at: markedManifest?.backup?.created_at ?? currentTimestamp(),
+        updated_at: markedManifest?.backup?.updated_at ?? currentTimestamp(),
+        status: "ready",
+        logicalKind: "chunked",
+        partCount: uploadedParts.length,
+      },
+      manifest: markedManifest?.backup ?? null,
+    };
+  }
+
+  async resolveCloudBackupSelection(backupId) {
+    const rawBackups = await this.listRawCloudBackups();
+    const parsedId = parseLogicalCloudBackupId(backupId);
+    if (!parsedId.id) {
+      throw new Error("Choose a cloud backup first.");
+    }
+
+    if (parsedId.kind === "single") {
+      const entry = rawBackups.find((candidate) => candidate.id === parsedId.id) ?? null;
+      if (!entry) {
+        throw new Error("The selected cloud backup no longer exists.");
+      }
+      return {
+        kind: "single",
+        entry,
+        logicalBackup: {
+          ...entry,
+          id: `${singleCloudBackupIdPrefix}${entry.id}`,
+          logicalKind: "single",
+        },
+      };
+    }
+
+    const manifestEntry = rawBackups.find((candidate) => candidate.id === parsedId.id) ?? null;
+    if (!manifestEntry) {
+      throw new Error("The selected cloud backup no longer exists.");
+    }
+
+    const parsedManifest = parseChunkedBackupEntry(manifestEntry);
+    if (parsedManifest.kind !== "manifest") {
+      throw new Error("The selected cloud backup is not a valid multipart backup.");
+    }
+
+    const partEntries = rawBackups
+      .map((entry) => ({
+        entry,
+        parsed: parseChunkedBackupEntry(entry),
+      }))
+      .filter(({ parsed }) => parsed.kind === "part" && parsed.baseName === parsedManifest.baseName)
+      .sort((left, right) => left.parsed.partNumber - right.parsed.partNumber)
+      .map(({ entry, parsed }) => ({
+        ...entry,
+        partNumber: parsed.partNumber,
+        partCount: parsed.partCount,
+      }));
+
+    return {
+      kind: "chunked",
+      manifestEntry,
+      partEntries,
+      logicalBackup: {
+        id: `${chunkedCloudBackupIdPrefix}${manifestEntry.id}`,
+        backup_name: parsedManifest.baseName,
+        size_bytes: partEntries.reduce(
+          (total, entry) => total + Math.max(0, Number(entry?.size_bytes ?? 0) || 0),
+          0,
+        ),
+        created_at: manifestEntry.created_at,
+        updated_at: manifestEntry.updated_at,
+        status: manifestEntry.status,
+        logicalKind: "chunked",
+        partCount: partEntries.length,
+      },
+    };
+  }
+
+  async uploadCloudBackup(serverId) {
+    const context = this.getServerContext(serverId);
+    const cloud = getCloudBackupConfig(this.panelConfig);
+    if (!cloud.enabled) {
+      throw new Error("Enable cloud backup first.");
+    }
+    if (!cloud.restoreKey) {
+      throw new Error("Generate a cloud backup restore key first.");
+    }
+
+    const cloudStatus = await this.getCloudBackupStatus(serverId);
+    if (!cloudStatus.functionReady) {
+      throw new Error(
+        cloudStatus.functionError || "Cloud backup function is not ready yet.",
+      );
+    }
+
+    const backupDir = await this.createBackup(serverId, "cloud upload");
+    const zipPath = path.join(context.paths.backupsDir, `${path.basename(backupDir)}.zip`);
+    let archive = null;
+    try {
+      archive = await createZipArchive(backupDir, zipPath);
+      const uploaded =
+        archive.sizeBytes <= cloudStatus.uploadLimitBytes
+          ? await this.uploadSingleCloudBackup(
+              context,
+              backupDir,
+              zipPath,
+              archive,
+              cloud,
+              cloudStatus,
+            )
+          : await this.uploadChunkedCloudBackup(
+              context,
+              backupDir,
+              zipPath,
+              archive,
+              cloud,
+              cloudStatus,
+            );
+
+      return {
+        backupName: path.basename(backupDir),
+        sizeBytes: archive.sizeBytes,
+        uploaded,
+        cloudBackup: await this.getCloudBackupStatus(serverId),
+      };
+    } finally {
+      await fs.rm(zipPath, { force: true }).catch(() => {});
+    }
+  }
+
+  async downloadCloudBackup(serverId, backupId) {
+    const context = this.getServerContext(serverId);
+    const cloud = getCloudBackupConfig(this.panelConfig);
+    if (!cloud.enabled) {
+      throw new Error("Enable cloud backup first.");
+    }
+    if (!cloud.restoreKey) {
+      throw new Error("Generate a cloud backup restore key first.");
+    }
+    if (!String(backupId ?? "").trim()) {
+      throw new Error("Choose a cloud backup first.");
+    }
+
+    const cloudStatus = await this.getCloudBackupStatus(serverId);
+    if (!cloudStatus.functionReady) {
+      throw new Error(
+        cloudStatus.functionError || "Cloud backup function is not ready yet.",
+      );
+    }
+
+    const selection = await this.resolveCloudBackupSelection(backupId);
+    const backupName =
+      String(selection.logicalBackup?.backup_name ?? backupId).trim() || String(backupId);
+    const safeArchiveName = sanitizeAssetFilename(`${backupName}.zip`);
+    const tempRoot = path.join(context.paths.dataDir, "cloud-backup-downloads", slugTimestamp());
+    const archivePath = path.join(tempRoot, safeArchiveName);
+    await fs.mkdir(tempRoot, { recursive: true });
+
+    if (selection.kind === "single") {
+      const download = await invokeSupabaseEdgeFunction(
+        this.panelConfig,
+        "create_download_url",
+        {
+          restoreKey: cloud.restoreKey,
+          backupId: selection.entry.id,
+        },
+      );
+
+      const response = await fetch(String(download.signedUrl ?? ""));
+      if (!response.ok) {
+        throw new Error(`Unable to download cloud backup (${response.status}).`);
+      }
+
+      await fs.writeFile(archivePath, Buffer.from(await response.arrayBuffer()));
+
+      this.appendLog(
+        serverId,
+        "panel",
+        `Downloaded cloud backup ${backupName} from Supabase.`,
+      );
+
+      return {
+        archivePath,
+        tempRoot,
+        backup: selection.logicalBackup,
+      };
+    }
+
+    const manifestDownload = await invokeSupabaseEdgeFunction(
+      this.panelConfig,
+      "create_download_url",
+      {
+        restoreKey: cloud.restoreKey,
+        backupId: selection.manifestEntry.id,
+      },
+    );
+    const manifestResponse = await fetch(String(manifestDownload.signedUrl ?? ""));
+    if (!manifestResponse.ok) {
+      throw new Error(`Unable to download cloud backup manifest (${manifestResponse.status}).`);
+    }
+
+    let manifest = null;
+    try {
+      manifest = JSON.parse(await manifestResponse.text());
+    } catch {
+      throw new Error("The cloud backup manifest is invalid.");
+    }
+
+    if (manifest?.format !== cloudBackupManifestFormat) {
+      throw new Error("The cloud backup manifest format is not supported.");
+    }
+
+    const manifestParts = Array.isArray(manifest?.parts) ? manifest.parts : [];
+    if (!manifestParts.length) {
+      throw new Error("The cloud backup manifest does not contain any uploaded parts.");
+    }
+
+    const archiveHandle = await fs.open(archivePath, "w");
+    try {
+      for (const part of manifestParts.sort((left, right) => Number(left.order ?? 0) - Number(right.order ?? 0))) {
+        const partBackupId = String(part?.backupId ?? "").trim();
+        if (!partBackupId) {
+          throw new Error("The cloud backup manifest is missing a part backup id.");
+        }
+
+        const partDownload = await invokeSupabaseEdgeFunction(
+          this.panelConfig,
+          "create_download_url",
+          {
+            restoreKey: cloud.restoreKey,
+            backupId: partBackupId,
+          },
+        );
+        const partResponse = await fetch(String(partDownload.signedUrl ?? ""));
+        if (!partResponse.ok) {
+          throw new Error(`Unable to download backup part ${part.order ?? "?"} (${partResponse.status}).`);
+        }
+
+        const partBytes = Buffer.from(await partResponse.arrayBuffer());
+        const expectedSize = Math.max(0, Number(part?.sizeBytes ?? 0) || 0);
+        if (expectedSize && partBytes.length !== expectedSize) {
+          throw new Error(`Backup part ${part.order ?? "?"} size mismatch during download.`);
+        }
+
+        const expectedSha256 = String(part?.sha256 ?? "").trim().toLowerCase();
+        if (expectedSha256 && sha256HexForBuffer(partBytes) !== expectedSha256) {
+          throw new Error(`Backup part ${part.order ?? "?"} failed integrity verification.`);
+        }
+
+        await archiveHandle.write(partBytes);
+      }
+    } finally {
+      await archiveHandle.close().catch(() => {});
+    }
+
+    const expectedArchiveSize = Math.max(0, Number(manifest?.archiveSizeBytes ?? 0) || 0);
+    if (expectedArchiveSize) {
+      const archiveStats = await fs.stat(archivePath);
+      if (archiveStats.size !== expectedArchiveSize) {
+        throw new Error("The reconstructed cloud backup size does not match the original archive.");
+      }
+    }
+
+    const expectedArchiveSha256 = String(manifest?.archiveSha256 ?? "").trim().toLowerCase();
+    if (expectedArchiveSha256) {
+      const archiveSha256 = await sha256HexForFile(archivePath);
+      if (archiveSha256 !== expectedArchiveSha256) {
+        throw new Error("The reconstructed cloud backup failed integrity verification.");
+      }
+    }
+
+    this.appendLog(
+      serverId,
+      "panel",
+      `Downloaded cloud backup ${backupName} from Supabase.`,
+    );
+
+    return {
+      archivePath,
+      tempRoot,
+      backup: selection.logicalBackup,
+      manifest,
+    };
+  }
+
+  async restoreCloudBackup(serverId, backupId) {
+    const context = this.getServerContext(serverId);
+    if (context.serverProcess) {
+      throw new Error("Stop the server before restoring a cloud backup.");
+    }
+
+    const download = await this.downloadCloudBackup(serverId, backupId);
+    const extractDir = path.join(download.tempRoot, "extracted");
+    const knownFileTargets = new Map([
+      ["server.properties", context.paths.serverPropertiesFile],
+      ["eula.txt", context.paths.eulaFile],
+      ["ops.json", context.paths.opsFile],
+      ["whitelist.json", context.paths.whitelistFile],
+      ["banned-players.json", context.paths.bannedPlayersFile],
+      ["banned-ips.json", context.paths.bannedIpsFile],
+      ["usercache.json", context.paths.usercacheFile],
+      ["config.json", context.paths.configFile],
+      ["asset-index.json", context.paths.assetIndexFile],
+      ["player-index.json", context.paths.playerIndexFile],
+      ["server-icon.png", path.join(context.paths.dataDir, "server-icon.png")],
+    ]);
+
+    try {
+      await this.extractArchiveToDirectory(download.archivePath, extractDir);
+
+      if (await this.serverHasBackupContent(context)) {
+        await this.createBackup(serverId, "pre-cloud-restore");
+      }
+
+      const entries = await fs.readdir(extractDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+
+        const sourceDir = path.join(extractDir, entry.name);
+        const targetDir =
+          entry.name === "plugins" ||
+          entry.name === "mods" ||
+          entry.name === "config" ||
+          entry.name === "defaultconfigs" ||
+          (await fileExists(path.join(sourceDir, "level.dat"))) ||
+          /_(nether|the_end)$/i.test(entry.name)
+            ? path.join(context.paths.serverDir, entry.name)
+            : null;
+        if (!targetDir) {
+          continue;
+        }
+
+        await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+        await fs.cp(sourceDir, targetDir, { recursive: true });
+      }
+
+      for (const [fileName, targetPath] of knownFileTargets.entries()) {
+        const sourceFile = path.join(extractDir, fileName);
+        if (!(await fileExists(sourceFile))) {
+          continue;
+        }
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        await fs.copyFile(sourceFile, targetPath);
+      }
+
+      const rootFiles = await fs.readdir(extractDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of rootFiles) {
+        if (!entry.isFile() || !/\.jar$/i.test(entry.name)) {
+          continue;
+        }
+        await fs.copyFile(
+          path.join(extractDir, entry.name),
+          path.join(context.paths.serverDir, entry.name),
+        );
+      }
+
+      const restoredProfilePath = path.join(extractDir, "server-profile.json");
+      if (await fileExists(restoredProfilePath)) {
+        const restoredProfile = await readJsonFile(restoredProfilePath, null);
+        if (restoredProfile && typeof restoredProfile === "object") {
+          context.record.name =
+            String(restoredProfile.name ?? context.record.name).trim() || context.record.name;
+          context.record.description = String(
+            restoredProfile.description ?? context.record.description ?? "",
+          ).trim();
+          context.record.updatedAt = currentTimestamp();
+          this.registry.servers = this.registry.servers.map((entry) =>
+            entry.id === serverId ? context.record : entry,
+          );
+          this.registry = await saveServerRegistry(this.registry);
+        }
+      }
+
+      const restoredServerIcon = path.join(context.paths.dataDir, "server-icon.png");
+      if (await fileExists(restoredServerIcon)) {
+        await fs.copyFile(
+          restoredServerIcon,
+          path.join(context.paths.serverDir, "server-icon.png"),
+        );
+      }
+
+      context.config = await loadServerConfig(serverId);
+      context.cachedProperties = await ensureServerPropertyFile(context.paths);
+      this.appendLog(
+        serverId,
+        "panel",
+        `Restored cloud backup ${download.backup?.backup_name ?? backupId}.`,
+      );
+      return {
+        restored: download.backup ?? { id: backupId },
+        cloudBackup: await this.getCloudBackupStatus(serverId),
+      };
+    } finally {
+      await fs.rm(download.tempRoot, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   async checkForAppUpdate() {
@@ -1429,8 +2454,12 @@ if (-not $sample) { exit 0 }
     if (!nextName) {
       throw new Error("Server name cannot be empty.");
     }
+    const nextDescription = String(
+      payload.description ?? context.record.description ?? "",
+    ).trim();
 
     context.record.name = nextName;
+    context.record.description = nextDescription;
     context.record.updatedAt = currentTimestamp();
     context.config.backups = {
       ...context.config.backups,
@@ -1969,7 +2998,7 @@ if (-not $sample) { exit 0 }
       for (const worldName of candidateWorlds) {
         const source = path.join(context.paths.serverDir, worldName);
         if (await fileExists(source)) {
-          await fs.cp(source, path.join(targetDir, worldName), { recursive: true });
+          await copyDirectoryForBackup(source, path.join(targetDir, worldName));
         }
       }
 
@@ -1983,6 +3012,7 @@ if (-not $sample) { exit 0 }
         context.paths.usercacheFile,
         context.paths.configFile,
         context.paths.assetIndexFile,
+        context.paths.playerIndexFile,
       ]) {
         if (await fileExists(filePath)) {
           await fs.copyFile(filePath, path.join(targetDir, path.basename(filePath)));
@@ -1995,16 +3025,31 @@ if (-not $sample) { exit 0 }
       }
 
       if (await fileExists(context.paths.pluginsDir)) {
-        await fs.cp(context.paths.pluginsDir, path.join(targetDir, "plugins"), {
-          recursive: true,
-        });
+        await copyDirectoryForBackup(context.paths.pluginsDir, path.join(targetDir, "plugins"));
       }
 
       if (await fileExists(context.paths.modsDir)) {
-        await fs.cp(context.paths.modsDir, path.join(targetDir, "mods"), {
-          recursive: true,
-        });
+        await copyDirectoryForBackup(context.paths.modsDir, path.join(targetDir, "mods"));
       }
+
+      for (const optionalDir of ["config", "defaultconfigs"]) {
+        const sourceDir = path.join(context.paths.serverDir, optionalDir);
+        if (await fileExists(sourceDir)) {
+          await copyDirectoryForBackup(sourceDir, path.join(targetDir, optionalDir));
+        }
+      }
+
+      const icon = await this.getServerIconInfo(serverId);
+      if (icon?.path && (await fileExists(icon.path))) {
+        await fs.copyFile(icon.path, path.join(targetDir, "server-icon.png"));
+      }
+
+      await writeJsonFile(path.join(targetDir, "server-profile.json"), {
+        id: context.record.id,
+        name: context.record.name,
+        description: context.record.description ?? "",
+        backedUpAt: currentTimestamp(),
+      });
     } finally {
       if (saveDisabled && context.serverProcess) {
         try {
@@ -2586,6 +3631,8 @@ if (-not $sample) { exit 0 }
       versionNumber: metadata.versionNumber ?? index[label][safeName]?.versionNumber ?? null,
       versionName: metadata.versionName ?? index[label][safeName]?.versionName ?? null,
       profileId: metadata.profileId ?? index[label][safeName]?.profileId ?? null,
+      clientSide: metadata.clientSide ?? index[label][safeName]?.clientSide ?? "unknown",
+      serverSide: metadata.serverSide ?? index[label][safeName]?.serverSide ?? "unknown",
       gameVersions: metadata.gameVersions ?? index[label][safeName]?.gameVersions ?? [],
       loaders: metadata.loaders ?? index[label][safeName]?.loaders ?? [],
       dependencyOf: metadata.dependencyOf ?? index[label][safeName]?.dependencyOf ?? null,
@@ -3002,10 +4049,15 @@ if (-not $sample) { exit 0 }
 
   async searchCatalog(serverId, payload = {}) {
     const context = this.getServerContext(serverId);
-    const kind = payload.kind === "mod" ? "mod" : "plugin";
-    this.assertAssetCompatibility(context, kind, {
-      profileId: String(payload.profileId ?? "").trim() || null,
-    });
+    const requestedKind = String(payload.kind ?? "").trim().toLowerCase();
+    const kind = ["plugin", "mod", "resourcepack"].includes(requestedKind)
+      ? requestedKind
+      : "plugin";
+    if (kind !== "resourcepack") {
+      this.assertAssetCompatibility(context, kind, {
+        profileId: String(payload.profileId ?? "").trim() || null,
+      });
+    }
     const gameVersion =
       String(payload.gameVersion ?? this.getServerGameVersion(serverId) ?? "").trim() || null;
 
@@ -3016,6 +4068,7 @@ if (-not $sample) { exit 0 }
       serverSoftware: this.getEffectiveServerSoftwareId(context),
       gameVersion,
       limit: Math.max(1, Math.min(24, Number(payload.limit ?? 12) || 12)),
+      page: Math.max(1, Number(payload.page ?? 1) || 1),
       index: String(payload.index ?? "relevance"),
     });
 
@@ -3028,25 +4081,78 @@ if (-not $sample) { exit 0 }
       kind,
       gameVersion,
       profile: result.profile,
+      page: result.page,
+      pageSize: result.pageSize,
       totalHits: result.totalHits,
+      totalPages: result.totalPages,
       results: result.results,
     };
   }
 
   async installCatalogProject(serverId, payload = {}) {
     const context = this.getServerContext(serverId);
-    const kind = payload.kind === "mod" ? "mod" : "plugin";
+    const requestedKind = String(payload.kind ?? "").trim().toLowerCase();
+    const kind = ["plugin", "mod", "resourcepack"].includes(requestedKind)
+      ? requestedKind
+      : "plugin";
     const projectId = String(payload.projectId ?? "").trim();
     if (!projectId) {
       throw new Error("A catalog project ID is required.");
     }
 
-    this.assertAssetCompatibility(context, kind, {
-      profileId: String(payload.profileId ?? "").trim() || null,
-    });
+    if (kind !== "resourcepack") {
+      this.assertAssetCompatibility(context, kind, {
+        profileId: String(payload.profileId ?? "").trim() || null,
+      });
+    }
 
     const gameVersion =
       String(payload.gameVersion ?? this.getServerGameVersion(serverId) ?? "").trim() || null;
+
+    if (kind === "resourcepack") {
+      const selection = await resolveCatalogInstall({
+        projectId,
+        kind,
+        profileId: String(payload.profileId ?? "").trim() || null,
+        serverSoftware: this.getEffectiveServerSoftwareId(context),
+        gameVersion,
+        versionId: String(payload.versionId ?? "").trim() || null,
+      });
+
+      await this.updateServerProperties(serverId, {
+        "resource-pack": selection.fileUrl,
+        "resource-pack-sha1": selection.fileSha1 ?? "",
+      });
+
+      this.appendLog(
+        serverId,
+        "panel",
+        `Configured resource pack ${selection.projectTitle ?? selection.fileName} in server.properties. Restart the server to apply it to joining players.`,
+      );
+      if (
+        /fresh animations|better animations?|connected textures|continuity|optifine|entity texture features|entity model features|custom entity model|ctm|etf|emf/i.test(
+          `${selection.projectTitle ?? ""} ${selection.fileName ?? ""}`,
+        )
+      ) {
+        this.appendLog(
+          serverId,
+          "panel",
+          "That resource pack reaches players through server.properties, but some packs still need client-side support such as Continuity or OptiFine for connected textures, or ETF/EMF for custom entity models and Fresh Animations.",
+          "warn",
+        );
+      }
+      return {
+        installedTo: "server.properties",
+        selection,
+        installed: [
+          {
+            installedTo: "server.properties",
+            selection,
+          },
+        ],
+      };
+    }
+
     const visited = new Set();
     const installChain = [];
 
@@ -3063,6 +4169,10 @@ if (-not $sample) { exit 0 }
         profileId: String(payload.profileId ?? "").trim() || null,
         serverSoftware: this.getEffectiveServerSoftwareId(context),
         gameVersion,
+        versionId:
+          dependencyOf || targetProjectId !== projectId
+            ? null
+            : String(payload.versionId ?? "").trim() || null,
       });
 
       this.assertAssetCompatibility(context, kind, {
@@ -3086,6 +4196,8 @@ if (-not $sample) { exit 0 }
         versionNumber: selection.versionNumber,
         versionName: selection.versionName,
         profileId: selection.profile?.id ?? null,
+        clientSide: selection.clientSide ?? "unknown",
+        serverSide: selection.serverSide ?? "unknown",
         gameVersions: selection.gameVersions,
         loaders: selection.loaders,
         dependencyOf,
@@ -3150,6 +4262,8 @@ if (-not $sample) { exit 0 }
           versionName: meta.versionName ?? null,
           projectId: meta.projectId ?? null,
           projectSlug: meta.projectSlug ?? null,
+          clientSide: meta.clientSide ?? "unknown",
+          serverSide: meta.serverSide ?? "unknown",
           loaders: meta.loaders ?? [],
           gameVersions: meta.gameVersions ?? [],
           dependencyOf: meta.dependencyOf ?? null,
