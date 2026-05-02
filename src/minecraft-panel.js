@@ -78,6 +78,50 @@ async function ensureJsonFile(targetPath, defaultValue) {
   await writeJsonFile(targetPath, defaultValue);
 }
 
+function parseMinecraftVersionParts(version) {
+  const normalized = String(version ?? "").trim().split("-")[0];
+  if (!normalized) {
+    return [];
+  }
+  return normalized
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .filter((part) => Number.isFinite(part));
+}
+
+function usesModernGameruleIds(version) {
+  const parts = parseMinecraftVersionParts(version);
+  if (!parts.length) {
+    return false;
+  }
+  if (String(version ?? "").trim().startsWith("26.")) {
+    return true;
+  }
+  if (parts[0] !== 1 || parts.length < 3) {
+    return false;
+  }
+  if (parts[1] > 21) {
+    return true;
+  }
+  if (parts[1] < 21) {
+    return false;
+  }
+  return parts[2] >= 11;
+}
+
+function getKeepInventoryGameruleId(version) {
+  return usesModernGameruleIds(version) ? "minecraft:keep_inventory" : "keepInventory";
+}
+
+function hasCompatibleSharedHealthMod(context) {
+  const installedMods = context.state?.installedAssets?.mods ?? [];
+  return installedMods.some((entry) => {
+    const slug = String(entry.projectSlug ?? "").trim().toLowerCase();
+    const displayName = String(entry.displayName ?? entry.name ?? "").trim().toLowerCase();
+    return slug === "sharedhealth" || slug === "shared-health" || displayName === "shared health";
+  });
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2883,15 +2927,35 @@ if (-not $sample) { exit 0 }
     }
 
     const keepInventoryEnabled = Boolean(context.config.misc?.keepInventory);
+    const keepInventoryRule = getKeepInventoryGameruleId(
+      context.state.install?.installedVersion ?? context.config.install?.installedVersion ?? context.config.install?.requestedVersion,
+    );
     await this.sendCommand(
       serverId,
-      `gamerule keepInventory ${keepInventoryEnabled ? "true" : "false"}`,
+      `gamerule ${keepInventoryRule} ${keepInventoryEnabled ? "true" : "false"}`,
     );
     this.appendLog(
       serverId,
       "panel",
-      `Applied keepInventory=${keepInventoryEnabled ? "true" : "false"} from Misc settings.`,
+      `Applied ${keepInventoryRule}=${keepInventoryEnabled ? "true" : "false"} from Misc settings.`,
     );
+
+    const sharedHealthEnabled = Boolean(context.config.misc?.sharedHealth);
+    if (sharedHealthEnabled) {
+      if (hasCompatibleSharedHealthMod(context)) {
+        this.appendLog(
+          serverId,
+          "panel",
+          "A compatible shared-health mod is installed. Releu only saves the preference right now; mod-specific shared-health gamerules still need to be configured for that mod.",
+        );
+      } else {
+        this.appendLog(
+          serverId,
+          "panel",
+          "Shared Health is only a Releu preference right now. No compatible shared-health mod was detected on this server.",
+        );
+      }
+    }
     return true;
   }
 
@@ -2925,7 +2989,11 @@ if (-not $sample) { exit 0 }
     this.appendLog(
       serverId,
       "panel",
-      `Saved shared health preference: ${context.config.misc.sharedHealth ? "enabled" : "disabled"}.`,
+      context.config.misc.sharedHealth
+        ? hasCompatibleSharedHealthMod(context)
+          ? "Saved shared health preference. A compatible shared-health mod was detected, but Releu does not yet auto-configure that mod's own gamerules."
+          : "Saved shared health preference, but no compatible shared-health mod is installed on this server."
+        : "Saved shared health preference: disabled.",
     );
 
     return this.getState(serverId);
