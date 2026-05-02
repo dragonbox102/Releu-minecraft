@@ -4318,20 +4318,35 @@ if (-not $sample) { exit 0 }
     }
 
     const requiresRunningServer = new Set(["kick", "gamemode", "heal", "feed", "teleport"]);
+    const prefersLiveIdentity = new Set([
+      "op",
+      "deop",
+      "whitelist-add",
+      "whitelist-remove",
+      "ban",
+      "pardon",
+      "kick",
+      "gamemode",
+      "heal",
+      "feed",
+      "teleport",
+    ]);
 
     if (requiresRunningServer.has(action) && !context.serverProcess) {
       throw new Error(`Player action "${action}" requires the server to be running.`);
     }
 
-    const identity = requiresRunningServer.has(action)
+    const identity = context.serverProcess && prefersLiveIdentity.has(action)
       ? await this.resolvePlayerIdentity(serverId, normalized)
-      : { name: normalized, uuid: null };
+      : requiresRunningServer.has(action)
+        ? await this.resolvePlayerIdentity(serverId, normalized)
+        : { name: normalized, uuid: null };
     const liveCommandTarget = identity.name ?? normalized;
 
     switch (action) {
       case "op":
         if (context.serverProcess) {
-          await this.sendCommand(serverId, `op ${normalized}`);
+          await this.sendCommand(serverId, `op ${liveCommandTarget}`);
         } else {
           await this.mutatePlayerList(serverId, context.paths.opsFile, normalized, (identity) => ({
             uuid: identity.uuid,
@@ -4343,14 +4358,14 @@ if (-not $sample) { exit 0 }
         break;
       case "deop":
         if (context.serverProcess) {
-          await this.sendCommand(serverId, `deop ${normalized}`);
+          await this.sendCommand(serverId, `deop ${liveCommandTarget}`);
         } else {
           await this.mutatePlayerList(serverId, context.paths.opsFile, normalized, null);
         }
         break;
       case "whitelist-add":
         if (context.serverProcess) {
-          await this.sendCommand(serverId, `whitelist add ${normalized}`);
+          await this.sendCommand(serverId, `whitelist add ${liveCommandTarget}`);
         } else {
           await this.mutatePlayerList(
             serverId,
@@ -4365,7 +4380,7 @@ if (-not $sample) { exit 0 }
         break;
       case "whitelist-remove":
         if (context.serverProcess) {
-          await this.sendCommand(serverId, `whitelist remove ${normalized}`);
+          await this.sendCommand(serverId, `whitelist remove ${liveCommandTarget}`);
         } else {
           await this.mutatePlayerList(serverId, context.paths.whitelistFile, normalized, null);
         }
@@ -4373,7 +4388,7 @@ if (-not $sample) { exit 0 }
       case "ban":
         if (context.serverProcess) {
           const reason = String(payload.reason ?? "Banned from panel").trim();
-          await this.sendCommand(serverId, `ban ${normalized} ${reason}`);
+          await this.sendCommand(serverId, `ban ${liveCommandTarget} ${reason}`);
         } else {
           await this.mutatePlayerList(
             serverId,
@@ -4392,7 +4407,7 @@ if (-not $sample) { exit 0 }
         break;
       case "pardon":
         if (context.serverProcess) {
-          await this.sendCommand(serverId, `pardon ${normalized}`);
+          await this.sendCommand(serverId, `pardon ${liveCommandTarget}`);
         } else {
           await this.mutatePlayerList(serverId, context.paths.bannedPlayersFile, normalized, null);
         }
