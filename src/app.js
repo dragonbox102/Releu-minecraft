@@ -314,6 +314,16 @@ export async function startPanelServer() {
   );
 
   app.post(
+    "/api/servers/:serverId/settings/misc",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        misc: await panel.updateMiscSettings(request.params.serverId, request.body ?? {}),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
+  app.post(
     "/api/servers/:serverId/settings/eula",
     asyncRoute(async (request, response) => {
       sendOk(response, {

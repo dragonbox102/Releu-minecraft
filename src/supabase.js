@@ -18,6 +18,9 @@ function normalizeCloudBackupConfig(config = {}) {
     serviceKey: String(merged.serviceKey ?? "").trim(),
     restoreKey: String(merged.restoreKey ?? "").trim(),
     deviceLabel: String(merged.deviceLabel ?? "").trim(),
+    tailscaleHost: String(merged.tailscaleHost ?? "").trim(),
+    tailscaleUser: String(merged.tailscaleUser ?? "").trim(),
+    tailscaleRemoteDir: String(merged.tailscaleRemoteDir ?? "").trim(),
   };
 }
 
@@ -42,6 +45,9 @@ export function getPublicCloudBackupConfig(config = null) {
     publishableKey: cloud.publishableKey,
     restoreKey: cloud.restoreKey,
     deviceLabel: cloud.deviceLabel,
+    tailscaleHost: cloud.tailscaleHost,
+    tailscaleUser: cloud.tailscaleUser,
+    tailscaleRemoteDir: cloud.tailscaleRemoteDir,
     functionUrl: getSupabaseFunctionUrl(cloud),
   };
 }

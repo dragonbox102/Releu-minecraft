@@ -8,6 +8,7 @@ const SERVER_PAGES = new Set([
   "worlds.html",
   "addons-mods.html",
   "software.html",
+  "misc.html",
   "settings.html",
 ]);
 
@@ -179,6 +180,27 @@ function ensureServersSidebarLink() {
   item.dataset.releuSidebarServers = "true";
   item.innerHTML = `<a href="${escapeHtml(buildLocalPageHref("servers.html"))}" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Servers</span></a>`;
   list.prepend(item);
+}
+
+function ensureMiscSidebarLink() {
+  if (PAGE === "servers.html") return;
+  const list = document.querySelector(".fi-sidebar-group-items");
+  if (!list) return;
+  const existing = [...list.querySelectorAll(".fi-sidebar-item-label")].find(
+    (node) => node.textContent?.trim().toLowerCase() === "misc",
+  );
+  if (existing) return;
+  const item = document.createElement("li");
+  item.className = `fi-sidebar-item fi-sidebar-item-has-url${PAGE === "misc.html" ? " fi-active" : ""}`;
+  item.innerHTML = `<a href="${escapeHtml(buildLocalPageHref("misc.html"))}" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Misc</span></a>`;
+  const settingsItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "settings",
+  );
+  if (settingsItem?.parentNode) {
+    settingsItem.parentNode.insertBefore(item, settingsItem);
+  } else {
+    list.append(item);
+  }
 }
 
 function stripReleaseBranding() {
@@ -439,6 +461,7 @@ function normalizeSavedServerRoute(rawHref, serverIdFallback = activeServerId())
     : section === "console" ? "console.html"
     : section === "files" ? "files.html"
     : section === "backups" ? "backups.html"
+    : section === "misc" ? "misc.html"
     : section === "settings" ? "settings.html"
     : section === "players" ? "players.html"
     : section === "worlds" ? "worlds.html"
@@ -522,6 +545,7 @@ function updateChrome(state) {
   });
   updateLocalLinks();
   ensureServersSidebarLink();
+  ensureMiscSidebarLink();
   stripReleaseBranding();
   stripUnusedTopbarChrome();
 }
@@ -890,6 +914,7 @@ function patchServersPage() {
                   ["Worlds", "worlds.html"],
                   ["Add-ons / Mods", "addons-mods.html"],
                   ["Software", "software.html"],
+                  ["Misc", "misc.html"],
                   ["Settings", "settings.html"],
                 ]
                   .map(
@@ -1069,6 +1094,7 @@ function patchServersPage() {
                       ["Worlds", "worlds.html"],
                       ["Add-ons / Mods", "addons-mods.html"],
                       ["Software", "software.html"],
+                      ["Misc", "misc.html"],
                       ["Settings", "settings.html"],
                     ]
                       .map(
@@ -3121,6 +3147,59 @@ function patchFilesPage() {
   content.prepend(note);
 }
 
+function patchMiscPage() {
+  const server = activeServer();
+  if (!server) return;
+  const properties = server.server?.properties ?? {};
+  const misc = server.misc ?? {};
+  const form = document.querySelector("[data-releu-misc-form]");
+  if (!form) return;
+
+  const setValue = (name, enabled) => {
+    const input = form.elements[name];
+    if (!input) return;
+    input.value = enabled ? "true" : "false";
+  };
+
+  setValue("allowCrackedClients", String(properties["online-mode"] ?? "true").toLowerCase() !== "true");
+  setValue("whitelist", String(properties["white-list"] ?? "false").toLowerCase() === "true");
+  setValue("commandBlocks", String(properties["enable-command-block"] ?? "false").toLowerCase() === "true");
+  setValue("pvp", String(properties.pvp ?? "true").toLowerCase() === "true");
+  setValue("allowFlight", String(properties["allow-flight"] ?? "false").toLowerCase() === "true");
+  setValue("keepInventory", Boolean(misc.keepInventory));
+  setValue("sharedHealth", Boolean(misc.sharedHealth));
+
+  if (form.dataset.releuBound === "true") return;
+  form.dataset.releuBound = "true";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submitButton = form.querySelector('button[type="submit"]');
+    try {
+      setButtonBusy(submitButton, true, submitButton?.dataset.busyLabel ?? "Saving...");
+      await api(`/api/servers/${encodeURIComponent(activeServerId())}/settings/misc`, {
+        method: "POST",
+        body: {
+          allowCrackedClients: form.elements.allowCrackedClients.value === "true",
+          whitelist: form.elements.whitelist.value === "true",
+          commandBlocks: form.elements.commandBlocks.value === "true",
+          pvp: form.elements.pvp.value === "true",
+          allowFlight: form.elements.allowFlight.value === "true",
+          keepInventory: form.elements.keepInventory.value === "true",
+          sharedHealth: form.elements.sharedHealth.value === "true",
+        },
+      });
+      await refreshState(activeServerId());
+      patchMiscPage();
+      showStatus("Misc settings saved.", "success");
+      window.setTimeout(() => clearStatus(), 1400);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(submitButton, false);
+    }
+  });
+}
+
 function patchSettingsPage() {
   const state = APP_STATE.state;
   const server = activeServer();
@@ -3272,7 +3351,7 @@ function patchSettingsPage() {
     <header class="fi-section-header">
       <div class="fi-section-header-text-ctn">
         <h2 class="fi-section-header-heading">Server Properties</h2>
-        <p class="fi-section-header-description">Gameplay, cracked support, and core Minecraft server settings.</p>
+        <p class="fi-section-header-description">Core Minecraft server properties. Gameplay and access toggles now live in Misc.</p>
       </div>
     </header>
     <div class="fi-section-content-ctn">
@@ -3310,20 +3389,8 @@ function patchSettingsPage() {
             <span class="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">Spawn Protection</span>
             <input class="fi-input" name="spawn-protection" type="number" min="0" value="${escapeHtml(properties["spawn-protection"] ?? "0")}">
           </label>
-          <div class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4 text-sm text-slate-300">
-            <div class="font-semibold text-slate-100">Cracked Clients</div>
-            <p class="mt-1 text-xs text-slate-400">Turns <span class="font-mono">online-mode</span> off so offline clients can join.</p>
-            <label class="mt-4 flex items-center gap-3 text-sm">
-              <input type="checkbox" name="allow-cracked-clients" ${String(properties["online-mode"] ?? "true").toLowerCase() !== "true" ? "checked" : ""}>
-              <span>Allow cracked clients</span>
-            </label>
-          </div>
           <div class="md:col-span-2 grid gap-4 md:grid-cols-3 xl:grid-cols-4">
             ${[
-              ["pvp", "PvP", boolProp("pvp", true)],
-              ["allow-flight", "Allow Flight", boolProp("allow-flight", false)],
-              ["enable-command-block", "Command Blocks", boolProp("enable-command-block", false)],
-              ["white-list", "Whitelist", boolProp("white-list", false)],
               ["force-gamemode", "Force Gamemode", boolProp("force-gamemode", false)],
               ["hardcore", "Hardcore", boolProp("hardcore", false)],
             ].map(([key, label, checked]) => `
@@ -3333,6 +3400,13 @@ function patchSettingsPage() {
                   <input type="checkbox" name="${escapeHtml(key)}" ${checked ? "checked" : ""}>
                 </span>
               </label>`).join("")}
+          </div>
+          <div class="md:col-span-2 flex items-center justify-between gap-4 rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4">
+            <div>
+              <div class="font-semibold text-slate-100">Gameplay And Access</div>
+              <p class="mt-1 text-xs text-slate-400">Cracked support, PvP, whitelist, command blocks, keep inventory, and shared health moved to the Misc page.</p>
+            </div>
+            <a href="${escapeHtml(buildLocalPageHref("misc.html", serverId))}" class="fi-btn fi-size-md fi-ac-btn-action">Open Misc</a>
           </div>
           <div class="md:col-span-2 flex items-center justify-between gap-4 rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4">
             <div>
@@ -3361,11 +3435,6 @@ function patchSettingsPage() {
           "view-distance": form.elements["view-distance"].value,
           "simulation-distance": form.elements["simulation-distance"].value,
           "spawn-protection": form.elements["spawn-protection"].value,
-          "online-mode": !form.elements["allow-cracked-clients"].checked,
-          pvp: form.elements.pvp.checked,
-          "allow-flight": form.elements["allow-flight"].checked,
-          "enable-command-block": form.elements["enable-command-block"].checked,
-          "white-list": form.elements["white-list"].checked,
           "force-gamemode": form.elements["force-gamemode"].checked,
           hardcore: form.elements.hardcore.checked,
         },
@@ -3458,14 +3527,19 @@ function patchSettingsPage() {
     document.querySelector(".fi-page-content")?.append(cloudSection);
   }
   const cloud = APP_STATE.cloudBackup.status ?? {};
+  const cloudProvider = cloud.provider ?? state.cloudBackupSettings?.provider ?? "supabase";
+  const usingTailscaleCloud = cloudProvider === "tailscale-ssh";
   const uploadLimitBytes =
     Number(cloud.uploadLimitBytes ?? (state.cloudBackupSettings?.uploadLimitMb ?? 50) * 1024 * 1024) ||
     0;
+  const uploadLimitLabel = usingTailscaleCloud
+    ? (cloud.uploadLimitLabel ?? "Remote server disk")
+    : formatBytes(uploadLimitBytes);
   cloudSection.innerHTML = `
     <header class="fi-section-header">
       <div>
         <h2 class="fi-section-header-heading">Cloud Backup</h2>
-        <p class="fi-section-header-description">Upload full server backups to Supabase without exposing the private admin key in the public app.</p>
+        <p class="fi-section-header-description">${usingTailscaleCloud ? "Store one rolling full-server backup on your Linux machine over Tailscale SSH." : "Upload full server backups to Supabase without exposing the private admin key in the public app."}</p>
       </div>
     </header>
     <div class="fi-section-content-ctn">
@@ -3479,27 +3553,45 @@ function patchSettingsPage() {
             <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Device Label</span>
             <input class="fi-input" data-releu-cloud-device-label type="text" value="${escapeHtml(cloud.deviceLabel ?? state.cloudBackupSettings?.deviceLabel ?? "")}" placeholder="My desktop PC">
           </label>
+          ${
+            usingTailscaleCloud
+              ? `
+          <label style="display:grid;gap:.5rem;">
+            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Linux Backup Host</span>
+            <input class="fi-input" data-releu-cloud-host type="text" value="${escapeHtml(cloud.tailscaleHost ?? state.cloudBackupSettings?.tailscaleHost ?? "")}" placeholder="192">
+          </label>
+          <label style="display:grid;gap:.5rem;">
+            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Linux Username</span>
+            <input class="fi-input" data-releu-cloud-user type="text" value="${escapeHtml(cloud.tailscaleUser ?? state.cloudBackupSettings?.tailscaleUser ?? "")}" placeholder="alex">
+          </label>
+          <label style="display:grid;gap:.5rem;">
+            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Remote Backup Folder</span>
+            <input class="fi-input" data-releu-cloud-remote-dir type="text" value="${escapeHtml(cloud.tailscaleRemoteDir ?? state.cloudBackupSettings?.tailscaleRemoteDir ?? "")}" placeholder="/home/alex/releu-cloud">
+          </label>`
+              : `
           <label style="display:grid;gap:.5rem;">
             <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Restore Key</span>
             <input class="fi-input" type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first">
-          </label>
+          </label>`
+          }
           <div style="display:grid;gap:.65rem;" class="text-xs text-slate-400">
-            <div>Function: <span class="text-slate-200">${cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready"}</span></div>
-            <div>Upload limit: <span class="text-slate-200">${escapeHtml(formatBytes(uploadLimitBytes))}</span></div>
+            <div>${usingTailscaleCloud ? "Connection" : "Function"}: <span class="text-slate-200">${cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready"}</span></div>
+            ${usingTailscaleCloud ? `<div>Target: <span class="text-slate-200">${escapeHtml(cloud.targetLabel ?? "")}</span></div>` : ""}
+            <div>Upload limit: <span class="text-slate-200">${escapeHtml(uploadLimitLabel)}</span></div>
             <div>Cloud used: <span class="text-slate-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
             <div>Saved backups: <span class="text-slate-200">${escapeHtml(String(cloud.backupsCount ?? 0))}</span></div>
             ${cloud.functionError ? `<div style="color:#fca5a5;">${escapeHtml(cloud.functionError)}</div>` : `<div>Latest backup: <span class="text-slate-200">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>`}
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:.65rem;">
             <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-save>Save Settings</button>
-            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-issue>${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
-            ${cloud.restoreKeyPresent ? `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>` : ""}
+            ${usingTailscaleCloud ? "" : `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-issue>${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>`}
+            ${usingTailscaleCloud || !cloud.restoreKeyPresent ? "" : `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>`}
             <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled ? "disabled" : ""}>Backup To Cloud Now</button>
             <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-refresh>Refresh Status</button>
           </div>
         </div>
         <div class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4 text-sm text-slate-300" style="display:grid;gap:.75rem;">
-          <div class="font-semibold text-slate-100">Cloud Backups</div>
+          <div class="font-semibold text-slate-100">${usingTailscaleCloud ? "Rolling Cloud Backup" : "Cloud Backups"}</div>
           ${
             cloud.backups?.length
               ? cloud.backups
@@ -3525,6 +3617,9 @@ function patchSettingsPage() {
     </div>`;
   const cloudEnabled = cloudSection.querySelector("[data-releu-cloud-enabled]");
   const cloudDeviceLabel = cloudSection.querySelector("[data-releu-cloud-device-label]");
+  const cloudHost = cloudSection.querySelector("[data-releu-cloud-host]");
+  const cloudUser = cloudSection.querySelector("[data-releu-cloud-user]");
+  const cloudRemoteDir = cloudSection.querySelector("[data-releu-cloud-remote-dir]");
   const saveCloudButton = cloudSection.querySelector("[data-releu-cloud-save]");
   const issueCloudButton = cloudSection.querySelector("[data-releu-cloud-issue]");
   const rotateCloudButton = cloudSection.querySelector("[data-releu-cloud-rotate]");
@@ -3537,7 +3632,11 @@ function patchSettingsPage() {
         method: "POST",
         body: {
           enabled: Boolean(cloudEnabled?.checked),
+          provider: cloudProvider,
           deviceLabel: cloudDeviceLabel?.value ?? "",
+          tailscaleHost: cloudHost?.value ?? "",
+          tailscaleUser: cloudUser?.value ?? "",
+          tailscaleRemoteDir: cloudRemoteDir?.value ?? "",
         },
       });
       APP_STATE.state = payload.state ?? APP_STATE.state;
@@ -3820,6 +3919,7 @@ async function patchPage() {
   if (PAGE === "addons-mods.html") return patchAddonsPage();
   if (PAGE === "backups.html") return patchBackupsPage();
   if (PAGE === "files.html") return patchFilesPage();
+  if (PAGE === "misc.html") return patchMiscPage();
   if (PAGE === "settings.html") return patchSettingsPage();
 }
 

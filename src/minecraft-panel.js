@@ -64,6 +64,12 @@ import {
   getPublicCloudBackupConfig,
   invokeSupabaseEdgeFunction,
 } from "./supabase.js";
+import {
+  checkTailscaleBackupTarget,
+  downloadRollingRemoteBackup,
+  readRemoteBackupMetadata,
+  uploadRollingRemoteBackup,
+} from "./tailscale-cloud.js";
 
 async function ensureJsonFile(targetPath, defaultValue) {
   if (await fileExists(targetPath)) {
@@ -470,6 +476,26 @@ function normalizeWorldName(value) {
   return normalized;
 }
 
+function buildDeterministicUuidFromText(value) {
+  const hash = crypto.createHash("sha1").update(String(value ?? "")).digest("hex");
+  const base = hash.slice(0, 32).split("");
+  if (base.length < 32) {
+    throw new Error("Unable to derive a resource-pack-id.");
+  }
+
+  base[12] = "5";
+  const variant = parseInt(base[16], 16);
+  base[16] = ((variant & 0x3) | 0x8).toString(16);
+  const normalized = base.join("");
+  return [
+    normalized.slice(0, 8),
+    normalized.slice(8, 12),
+    normalized.slice(12, 16),
+    normalized.slice(16, 20),
+    normalized.slice(20, 32),
+  ].join("-");
+}
+
 function ensureChildPath(parentDir, targetDir) {
   const parent = path.resolve(parentDir);
   const target = path.resolve(targetDir);
@@ -515,6 +541,52 @@ function hasPath(targetPath) {
   } catch {
     return false;
   }
+}
+
+function getTailscaleTargetLabel(cloud) {
+  const host = String(cloud?.tailscaleHost ?? "").trim();
+  const user = String(cloud?.tailscaleUser ?? "").trim();
+  const remoteDir = String(cloud?.tailscaleRemoteDir ?? "").trim();
+  const login = host && user ? `${user}@${host}` : host || user || "";
+  return login && remoteDir ? `${login}:${remoteDir}` : login || remoteDir || "";
+}
+
+function buildTailscaleLogicalBackupEntry(metadata) {
+  if (!metadata || typeof metadata !== "object") {
+    return null;
+  }
+
+  const backupName = String(metadata.backupName ?? metadata.backup_name ?? "").trim();
+  if (!backupName) {
+    return null;
+  }
+
+  const sizeBytes = Math.max(
+    0,
+    Number(
+      metadata.archiveSizeBytes ??
+        metadata.archive_size_bytes ??
+        metadata.sizeBytes ??
+        metadata.size_bytes ??
+        0,
+    ) || 0,
+  );
+  const createdAt =
+    metadata.createdAt ??
+    metadata.created_at ??
+    metadata.uploadedAt ??
+    metadata.uploaded_at ??
+    currentTimestamp();
+
+  return {
+    id: "tailscale:latest",
+    backup_name: backupName,
+    size_bytes: sizeBytes,
+    created_at: createdAt,
+    updated_at: createdAt,
+    status: "ready",
+    logicalKind: "rolling",
+  };
 }
 
 export class MinecraftPanelService {
@@ -1326,6 +1398,9 @@ if (-not $sample) { exit 0 }
         ...context.config.backups,
         nextBackupAt: this.getNextBackupAt(context),
       },
+      misc: {
+        ...context.config.misc,
+      },
     };
   }
 
@@ -1354,6 +1429,9 @@ if (-not $sample) { exit 0 }
         ...context.config.backups,
         nextBackupAt: this.getNextBackupAt(context),
         recent: await this.listBackups(context.record.id),
+      },
+      misc: {
+        ...context.config.misc,
       },
       catalog: {
         ...this.getCatalogProfiles(context.record.id),
@@ -1720,12 +1798,22 @@ if (-not $sample) { exit 0 }
 
   async updateCloudBackupSettings(payload = {}) {
     const current = getCloudBackupConfig(this.panelConfig);
+    const provider =
+      String(payload.provider ?? current.provider ?? "supabase").trim().toLowerCase() ||
+      "supabase";
     this.panelConfig.cloudBackup = {
       ...this.panelConfig.cloudBackup,
       enabled: Boolean(payload.enabled ?? current.enabled),
+      provider,
       deviceLabel:
         String(payload.deviceLabel ?? current.deviceLabel ?? "").trim().slice(0, 80) ||
         os.hostname(),
+      tailscaleHost: String(payload.tailscaleHost ?? current.tailscaleHost ?? "").trim(),
+      tailscaleUser: String(payload.tailscaleUser ?? current.tailscaleUser ?? "").trim(),
+      tailscaleRemoteDir:
+        String(payload.tailscaleRemoteDir ?? current.tailscaleRemoteDir ?? "").trim() ||
+        current.tailscaleRemoteDir ||
+        "",
     };
 
     this.panelConfig = await savePanelConfig(this.panelConfig);
@@ -1735,22 +1823,55 @@ if (-not $sample) { exit 0 }
 
   async getCloudBackupStatus(serverId = this.activeServerId) {
     const cloud = getCloudBackupConfig(this.panelConfig);
+    const usingTailscale = cloud.provider === "tailscale-ssh";
     const status = {
       ...getPublicCloudBackupConfig(this.panelConfig),
-      configured: Boolean(cloud.projectUrl && cloud.publishableKey && cloud.functionName),
-      restoreKeyPresent: Boolean(cloud.restoreKey),
-      restoreKey: cloud.restoreKey,
+      configured: usingTailscale
+        ? Boolean(cloud.tailscaleHost && cloud.tailscaleUser && cloud.tailscaleRemoteDir)
+        : Boolean(cloud.projectUrl && cloud.publishableKey && cloud.functionName),
+      restoreKeyPresent: usingTailscale ? false : Boolean(cloud.restoreKey),
+      restoreKey: usingTailscale ? "" : cloud.restoreKey,
       deviceLabel: cloud.deviceLabel || os.hostname(),
-      uploadLimitBytes: Math.max(1, Number(cloud.uploadLimitMb ?? 50) || 50) * 1024 * 1024,
+      uploadLimitBytes: usingTailscale
+        ? 0
+        : Math.max(1, Number(cloud.uploadLimitMb ?? 50) || 50) * 1024 * 1024,
+      uploadLimitLabel: usingTailscale ? "Remote server disk" : null,
       backups: [],
       backupsCount: 0,
       usedBytes: 0,
       latestBackup: null,
       functionReady: false,
       functionError: null,
+      targetLabel: usingTailscale ? getTailscaleTargetLabel(cloud) : "",
     };
 
     if (!status.configured) {
+      return status;
+    }
+
+    if (usingTailscale) {
+      try {
+        const check = await checkTailscaleBackupTarget(cloud);
+        status.functionReady = Boolean(check.ready);
+        status.targetLabel = check.target && check.remoteDir ? `${check.target}:${check.remoteDir}` : status.targetLabel;
+      } catch (error) {
+        status.functionError = error.message ?? "Linux backup target check failed.";
+        return status;
+      }
+
+      try {
+        const metadata = await readRemoteBackupMetadata(cloud, serverId);
+        const latestBackup = buildTailscaleLogicalBackupEntry(metadata);
+        if (latestBackup) {
+          status.backups = [latestBackup];
+          status.backupsCount = 1;
+          status.usedBytes = latestBackup.size_bytes;
+          status.latestBackup = latestBackup;
+        }
+      } catch (error) {
+        status.functionError = error.message ?? "Remote backup status check failed.";
+      }
+
       return status;
     }
 
@@ -1789,6 +1910,9 @@ if (-not $sample) { exit 0 }
   }
 
   async issueCloudBackupKey(payload = {}) {
+    if (getCloudBackupConfig(this.panelConfig).provider === "tailscale-ssh") {
+      throw new Error("Restore keys are only used for Supabase cloud backup.");
+    }
     const deviceLabel =
       String(payload.deviceLabel ?? getCloudBackupConfig(this.panelConfig).deviceLabel ?? "")
         .trim()
@@ -1810,6 +1934,9 @@ if (-not $sample) { exit 0 }
 
   async rotateCloudBackupKey() {
     const current = getCloudBackupConfig(this.panelConfig);
+    if (current.provider === "tailscale-ssh") {
+      throw new Error("Restore keys are only used for Supabase cloud backup.");
+    }
     if (!current.restoreKey) {
       throw new Error("Generate a cloud backup key first.");
     }
@@ -1837,6 +1964,9 @@ if (-not $sample) { exit 0 }
 
   async listRawCloudBackups() {
     const cloud = getCloudBackupConfig(this.panelConfig);
+    if (cloud.provider !== "supabase") {
+      return [];
+    }
     if (!cloud.restoreKey) {
       return [];
     }
@@ -2066,20 +2196,120 @@ if (-not $sample) { exit 0 }
     };
   }
 
+  async uploadTailscaleRollingBackup(context, backupDir, zipPath, archive, cloud) {
+    const archiveSha256 = await sha256HexForFile(zipPath);
+    const uploadedAt = currentTimestamp();
+    const metadata = {
+      format: "releu-tailscale-backup-v1",
+      id: "tailscale:latest",
+      backupName: path.basename(backupDir),
+      archiveFileName: "latest.zip",
+      archiveSizeBytes: archive.sizeBytes,
+      archiveSha256,
+      uploadedAt,
+      serverId: context.record.id,
+      serverName: context.record.name,
+      deviceLabel: cloud.deviceLabel || os.hostname(),
+    };
+
+    const remote = await uploadRollingRemoteBackup(
+      cloud,
+      context.record.id,
+      zipPath,
+      metadata,
+    );
+
+    this.appendLog(
+      context.record.id,
+      "panel",
+      `Uploaded rolling cloud backup ${metadata.backupName} to ${getTailscaleTargetLabel(cloud)}.`,
+    );
+
+    return {
+      backup: buildTailscaleLogicalBackupEntry(metadata),
+      remote,
+      metadata,
+    };
+  }
+
+  async downloadTailscaleRollingBackup(context, backupId, cloud) {
+    const cloudStatus = await this.getCloudBackupStatus(context.record.id);
+    if (!cloudStatus.functionReady) {
+      throw new Error(
+        cloudStatus.functionError || "Linux backup target is not ready yet.",
+      );
+    }
+
+    const latestBackup = cloudStatus.latestBackup ?? null;
+    if (!latestBackup) {
+      throw new Error("No cloud backup has been uploaded yet.");
+    }
+    if (String(backupId ?? "").trim() && String(backupId) !== String(latestBackup.id)) {
+      throw new Error("The selected cloud backup no longer exists.");
+    }
+
+    const safeArchiveName = sanitizeAssetFilename(`${latestBackup.backup_name}.zip`);
+    const tempRoot = path.join(context.paths.dataDir, "cloud-backup-downloads", slugTimestamp());
+    const archivePath = path.join(tempRoot, safeArchiveName);
+    await fs.mkdir(tempRoot, { recursive: true });
+
+    await downloadRollingRemoteBackup(cloud, context.record.id, archivePath);
+    const metadata = await readRemoteBackupMetadata(cloud, context.record.id);
+    if (!metadata) {
+      throw new Error("Remote backup metadata is missing.");
+    }
+
+    const expectedSize = Math.max(
+      0,
+      Number(metadata.archiveSizeBytes ?? metadata.sizeBytes ?? 0) || 0,
+    );
+    if (expectedSize) {
+      const archiveStats = await fs.stat(archivePath);
+      if (archiveStats.size !== expectedSize) {
+        throw new Error("The downloaded cloud backup size does not match the remote metadata.");
+      }
+    }
+
+    const expectedSha256 = String(metadata.archiveSha256 ?? "").trim().toLowerCase();
+    if (expectedSha256) {
+      const archiveSha256 = await sha256HexForFile(archivePath);
+      if (archiveSha256 !== expectedSha256) {
+        throw new Error("The downloaded cloud backup failed integrity verification.");
+      }
+    }
+
+    this.appendLog(
+      context.record.id,
+      "panel",
+      `Downloaded rolling cloud backup ${latestBackup.backup_name} from ${getTailscaleTargetLabel(cloud)}.`,
+    );
+
+    return {
+      archivePath,
+      tempRoot,
+      backup: latestBackup,
+      metadata,
+    };
+  }
+
   async uploadCloudBackup(serverId) {
     const context = this.getServerContext(serverId);
     const cloud = getCloudBackupConfig(this.panelConfig);
     if (!cloud.enabled) {
       throw new Error("Enable cloud backup first.");
     }
-    if (!cloud.restoreKey) {
+    const usingTailscale = cloud.provider === "tailscale-ssh";
+    if (!usingTailscale && !cloud.restoreKey) {
       throw new Error("Generate a cloud backup restore key first.");
     }
 
     const cloudStatus = await this.getCloudBackupStatus(serverId);
     if (!cloudStatus.functionReady) {
       throw new Error(
-        cloudStatus.functionError || "Cloud backup function is not ready yet.",
+        cloudStatus.functionError ||
+          (usingTailscale
+            ? "Linux backup target is not ready yet."
+            : "Cloud backup function is not ready yet."),
       );
     }
 
@@ -2088,8 +2318,9 @@ if (-not $sample) { exit 0 }
     let archive = null;
     try {
       archive = await createZipArchive(backupDir, zipPath);
-      const uploaded =
-        archive.sizeBytes <= cloudStatus.uploadLimitBytes
+      const uploaded = usingTailscale
+        ? await this.uploadTailscaleRollingBackup(context, backupDir, zipPath, archive, cloud)
+        : archive.sizeBytes <= cloudStatus.uploadLimitBytes
           ? await this.uploadSingleCloudBackup(
               context,
               backupDir,
@@ -2124,11 +2355,16 @@ if (-not $sample) { exit 0 }
     if (!cloud.enabled) {
       throw new Error("Enable cloud backup first.");
     }
-    if (!cloud.restoreKey) {
+    const usingTailscale = cloud.provider === "tailscale-ssh";
+    if (!usingTailscale && !cloud.restoreKey) {
       throw new Error("Generate a cloud backup restore key first.");
     }
     if (!String(backupId ?? "").trim()) {
       throw new Error("Choose a cloud backup first.");
+    }
+
+    if (usingTailscale) {
+      return this.downloadTailscaleRollingBackup(context, backupId, cloud);
     }
 
     const cloudStatus = await this.getCloudBackupStatus(serverId);
@@ -2596,9 +2832,79 @@ if (-not $sample) { exit 0 }
       next[key] = String(value);
     }
 
+    if (
+      Object.prototype.hasOwnProperty.call(changes ?? {}, "resource-pack") ||
+      Object.prototype.hasOwnProperty.call(changes ?? {}, "resource-pack-sha1")
+    ) {
+      const resourcePackUrl = String(next["resource-pack"] ?? "").trim();
+      const resourcePackSha1 = String(next["resource-pack-sha1"] ?? "").trim().toLowerCase();
+
+      if (!resourcePackUrl) {
+        next["resource-pack-id"] = "";
+      } else {
+        const resourcePackIdentitySource = resourcePackSha1 || resourcePackUrl;
+        next["resource-pack-id"] = buildDeterministicUuidFromText(resourcePackIdentitySource);
+      }
+    }
+
     context.cachedProperties = await writeServerProperties(context.paths, next);
     this.appendLog(serverId, "panel", "Saved server.properties changes.");
     return context.cachedProperties;
+  }
+
+  async applyConfiguredMiscSettings(serverId) {
+    const context = this.getServerContext(serverId);
+    if (!context.state.serverReady || context.state.serverStatus !== "running") {
+      return false;
+    }
+
+    const keepInventoryEnabled = Boolean(context.config.misc?.keepInventory);
+    await this.sendCommand(
+      serverId,
+      `gamerule keepInventory ${keepInventoryEnabled ? "true" : "false"}`,
+    );
+    this.appendLog(
+      serverId,
+      "panel",
+      `Applied keepInventory=${keepInventoryEnabled ? "true" : "false"} from Misc settings.`,
+    );
+    return true;
+  }
+
+  async updateMiscSettings(serverId, payload) {
+    const context = this.getServerContext(serverId);
+    await this.updateServerProperties(serverId, {
+      "online-mode": !Boolean(payload.allowCrackedClients),
+      "white-list": Boolean(payload.whitelist),
+      pvp: Boolean(payload.pvp),
+      "allow-flight": Boolean(payload.allowFlight),
+      "enable-command-block": Boolean(payload.commandBlocks),
+    });
+
+    context.config.misc = {
+      ...context.config.misc,
+      keepInventory: Boolean(payload.keepInventory),
+      sharedHealth: Boolean(payload.sharedHealth),
+    };
+    await this.saveContextConfig(context);
+
+    if (context.state.serverReady && context.state.serverStatus === "running") {
+      await this.applyConfiguredMiscSettings(serverId);
+    } else {
+      this.appendLog(
+        serverId,
+        "panel",
+        "Saved keep inventory preference. Releu will apply it the next time the server is running.",
+      );
+    }
+
+    this.appendLog(
+      serverId,
+      "panel",
+      `Saved shared health preference: ${context.config.misc.sharedHealth ? "enabled" : "disabled"}.`,
+    );
+
+    return this.getState(serverId);
   }
 
   async inspectJavaRuntime(javaPath) {
@@ -2886,6 +3192,7 @@ if (-not $sample) { exit 0 }
       context.state.serverStatus = "running";
       context.state.serverReady = true;
       this.markInstalledAssetsLoaded(serverId).catch(() => {});
+      this.applyConfiguredMiscSettings(serverId).catch(() => {});
       if (this.playit.snapshot().secretConfigured) {
         this.playit.refreshTunnels({ force: true }).catch(() => {});
       }

@@ -58,6 +58,7 @@ const sections = [
   { id: "worlds", label: "Worlds" },
   { id: "addons", label: "Add-ons" },
   { id: "backups", label: "Backups" },
+  { id: "misc", label: "Misc" },
   { id: "settings", label: "Settings" },
 ];
 
@@ -2390,6 +2391,55 @@ function renderBackupsSection(server) {
   return `<div class="grid grid-cols-1 gap-4 md:grid-cols-12"><section class="${C.card} space-y-6 md:col-span-4"><div class="space-y-2"><h2 class="${C.labelOn}">Protection</h2><div class="h-px w-full bg-outline"></div></div><form data-form="backup-settings" class="space-y-4"><label class="flex items-center gap-3"><input name="autoBackups" type="checkbox" class="h-4 w-4 accent-white" ${server.backups.enabled ? "checked" : ""} /><span class="text-[12px] text-zinc-300">Enable automatic backups</span></label><input name="backupIntervalMinutes" type="number" min="5" value="${escapeHtml(server.backups.intervalMinutes ?? 60)}" class="${C.input} font-mono" /><button type="submit" class="w-full ${C.btnPrimary} py-4">Save Backup Schedule</button></form><button type="button" class="w-full ${C.btnGhost} py-4" data-action="server-control" data-server-command="backup">Create Backup Now</button></section><section class="flex min-h-[600px] flex-col border border-outline bg-surface md:col-span-8"><div class="space-y-2 p-6"><h2 class="${C.labelOn}">Backup History</h2><div class="h-px w-full bg-outline"></div></div><div class="flex-1 overflow-hidden"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-zinc-900"><th class="p-4 ${C.label}">Timestamp</th><th class="p-4 ${C.label}">Folder Path</th><th class="p-4 text-right ${C.label}">Actions</th></tr></thead><tbody class="font-mono text-[13px]">${server.backups.recent.length ? server.backups.recent.map((backup) => `<tr class="border-b border-zinc-900 transition hover:bg-surfaceAlt"><td class="p-4 text-white">${escapeHtml(formatTimestamp(backup.createdAt))}</td><td class="p-4 text-zinc-500">${escapeHtml(backup.path)}</td><td class="space-x-3 p-4 text-right">${isDesktopApp() ? `<button type="button" class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:text-white" data-action="open-path" data-path="${escapeHtml(backup.path)}">Open Folder</button>` : ""}</td></tr>`).join("") : `<tr><td colspan="3" class="p-6 text-sm text-zinc-500">No backups have been created yet.</td></tr>`}</tbody></table></div></section></div>`;
 }
 
+function renderMiscSection(server) {
+  const crackedClientsEnabled =
+    String(server.server.properties["online-mode"] ?? "true").toLowerCase() !== "true";
+  const misc = server.misc ?? {};
+  const toggleSelect = (name, label, enabled, help = "") => `
+    <label class="block space-y-2">
+      <span class="${C.label} block">${escapeHtml(label)}</span>
+      <select name="${escapeHtml(name)}" class="${C.input} w-full font-mono text-sm">
+        <option value="false" ${enabled ? "" : "selected"}>Disabled</option>
+        <option value="true" ${enabled ? "selected" : ""}>Enabled</option>
+      </select>
+      ${help ? `<span class="block text-xs text-zinc-500">${escapeHtml(help)}</span>` : ""}
+    </label>`;
+
+  return `<div class="grid grid-cols-12 gap-4">
+    <section class="${C.card} col-span-12">
+      <div class="mb-6">
+        <h2 class="mb-4 border-b border-zinc-900 pb-2 text-xl font-semibold uppercase tracking-[0.12em] text-white">Misc</h2>
+        <p class="text-sm text-zinc-400">Gameplay and access controls that don't belong in the core Settings page.</p>
+      </div>
+      <form data-form="misc-settings" class="space-y-8">
+        <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+          <div class="border border-outline bg-black p-5">
+            <div class="${C.labelOn} mb-4">Player Access</div>
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+              ${toggleSelect("allowCrackedClients", "Allow Cracked Clients", crackedClientsEnabled)}
+              ${toggleSelect("whitelist", "Whitelist", String(server.server.properties["white-list"] ?? "false") === "true")}
+              ${toggleSelect("commandBlocks", "Command Blocks", String(server.server.properties["enable-command-block"] ?? "false") === "true")}
+            </div>
+          </div>
+          <div class="border border-outline bg-black p-5">
+            <div class="${C.labelOn} mb-4">World Rules</div>
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+              ${toggleSelect("pvp", "PvP", String(server.server.properties.pvp ?? "true") === "true")}
+              ${toggleSelect("allowFlight", "Allow Flight", String(server.server.properties["allow-flight"] ?? "false") === "true")}
+              ${toggleSelect("keepInventory", "Keep Inventory", Boolean(misc.keepInventory), "Applied immediately if the server is already running.")}
+              ${toggleSelect("sharedHealth", "Shared Health", Boolean(misc.sharedHealth), "Saved as a Releu misc preference for shared-health-compatible setups.")}
+            </div>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-3 border-t border-zinc-900 pt-4">
+          <button type="submit" class="${C.btnPrimary}">Save Misc Settings</button>
+          <button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="settings">Back To Settings</button>
+        </div>
+      </form>
+    </section>
+  </div>`;
+}
+
 function renderUiPreferencePanel() {
   const uiSettings = currentUiSettings();
   const currentVariant = uiSettings.variant === UI_VARIANT_PELICAN_BLUEPRINT
@@ -2475,17 +2525,14 @@ function renderSettingsSection(server) {
   const appUpdate = runtime.data.appUpdate;
   const cloud = ui.cloudBackupStatus ?? {};
   const cloudConfig = runtime.data.cloudBackupSettings ?? {};
+  const cloudProvider = cloud.provider ?? cloudConfig.provider ?? "supabase";
+  const usingTailscaleCloud = cloudProvider === "tailscale-ssh";
   const cloudUploadLimitBytes =
     Number(cloud.uploadLimitBytes ?? (cloudConfig.uploadLimitMb ?? 50) * 1024 * 1024) || 0;
+  const cloudUploadLimitLabel = usingTailscaleCloud
+    ? (cloud.uploadLimitLabel ?? "Remote server disk")
+    : formatBytes(cloudUploadLimitBytes);
   const joinState = playitAddressState(server);
-  const crackedClientsEnabled =
-    String(server.server.properties["online-mode"] ?? "true").toLowerCase() !== "true";
-  const settingToggles = [
-    ["white-list", "Whitelist"],
-    ["pvp", "PvP"],
-    ["allow-flight", "Allow Flight"],
-    ["enable-command-block", "Command Blocks"],
-  ];
   const playitAction = !playit.secretConfigured
     ? `<button type="button" class="${C.btnPrimary}" data-action="playit-connect">Connect Playit Agent</button>`
     : playit.claimWaiting
@@ -2519,20 +2566,14 @@ function renderSettingsSection(server) {
         </div>
         <div class="border-t border-zinc-900 pt-4">
           <div class="border border-outline bg-black p-4">
-            <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
               <div class="space-y-2">
-                <p class="${C.labelOn}">Cracked Support</p>
-                <p class="text-sm text-zinc-400">Turn this on only if you want offline or cracked clients to join. Releu will set <span class="font-mono text-zinc-300">online-mode=false</span> when enabled.</p>
+                <p class="${C.labelOn}">Gameplay And Access</p>
+                <p class="text-sm text-zinc-400">Cracked support, PvP, whitelist, command blocks, keep inventory, and shared health were moved into <span class="text-zinc-200">Misc</span>.</p>
               </div>
-              <label class="flex items-center gap-3">
-                <input name="allow-cracked-clients" type="checkbox" class="h-4 w-4 accent-white" ${crackedClientsEnabled ? "checked" : ""} />
-                <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Allow Cracked Clients</span>
-              </label>
+              <button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="misc">Open Misc</button>
             </div>
           </div>
-        </div>
-        <div class="grid grid-cols-2 gap-4 border-t border-zinc-900 pt-4 md:grid-cols-2 lg:grid-cols-4">
-          ${settingToggles.map(([key, label]) => `<label class="flex items-center gap-3"><input name="${escapeHtml(key)}" type="checkbox" class="h-4 w-4 accent-white" ${String(server.server.properties[key] ?? "false") === "true" ? "checked" : ""} /><span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">${escapeHtml(label)}</span></label>`).join("")}
         </div>
         <button type="submit" class="${C.btnPrimary} py-4">Save Server Settings</button>
       </form>
@@ -2608,13 +2649,32 @@ function renderSettingsSection(server) {
             <span class="${C.label} mb-2 block">Device Label</span>
             <input name="deviceLabel" type="text" value="${escapeHtml(cloud.deviceLabel ?? cloudConfig.deviceLabel ?? "")}" placeholder="My desktop PC" class="${C.input} w-full" />
           </label>
+          <input name="provider" type="hidden" value="${escapeHtml(cloudProvider)}" />
+          ${
+            usingTailscaleCloud
+              ? `
+          <label class="block">
+            <span class="${C.label} mb-2 block">Linux Backup Host</span>
+            <input name="tailscaleHost" type="text" value="${escapeHtml(cloud.tailscaleHost ?? cloudConfig.tailscaleHost ?? "")}" placeholder="192" class="${C.input} w-full font-mono text-xs" />
+          </label>
+          <label class="block">
+            <span class="${C.label} mb-2 block">Linux Username</span>
+            <input name="tailscaleUser" type="text" value="${escapeHtml(cloud.tailscaleUser ?? cloudConfig.tailscaleUser ?? "")}" placeholder="alex" class="${C.input} w-full font-mono text-xs" />
+          </label>
+          <label class="block">
+            <span class="${C.label} mb-2 block">Remote Backup Folder</span>
+            <input name="tailscaleRemoteDir" type="text" value="${escapeHtml(cloud.tailscaleRemoteDir ?? cloudConfig.tailscaleRemoteDir ?? "")}" placeholder="/home/alex/releu-cloud" class="${C.input} w-full font-mono text-xs" />
+          </label>`
+              : `
           <label class="block">
             <span class="${C.label} mb-2 block">Restore Key</span>
             <input type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first" class="${C.input} w-full font-mono text-xs" />
-          </label>
+          </label>`
+          }
           <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
-            <div>Function: <span class="font-mono text-zinc-200">${escapeHtml(cloud.functionReady ? "ready" : ui.cloudBackupStatusLoading ? "checking" : "not ready")}</span></div>
-            <div class="mt-1">Upload limit: <span class="font-mono text-zinc-200">${escapeHtml(formatBytes(cloudUploadLimitBytes))}</span></div>
+            <div>${usingTailscaleCloud ? "Connection" : "Function"}: <span class="font-mono text-zinc-200">${escapeHtml(cloud.functionReady ? "ready" : ui.cloudBackupStatusLoading ? "checking" : "not ready")}</span></div>
+            ${usingTailscaleCloud ? `<div class="mt-1">Target: <span class="font-mono text-zinc-200">${escapeHtml(cloud.targetLabel ?? "")}</span></div>` : ""}
+            <div class="mt-1">Upload limit: <span class="font-mono text-zinc-200">${escapeHtml(cloudUploadLimitLabel)}</span></div>
             <div class="mt-1">Cloud used: <span class="font-mono text-zinc-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
             <div class="mt-1">Saved backups: <span class="font-mono text-zinc-200">${escapeHtml(formatCount(cloud.backupsCount ?? 0))}</span></div>
             <div class="mt-1">Latest backup: <span class="font-mono text-zinc-200">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>
@@ -2623,12 +2683,12 @@ function renderSettingsSection(server) {
           <div class="flex flex-wrap gap-2">
             <button type="submit" class="${C.btnPrimary}">Save Cloud Settings</button>
             <button type="button" class="${C.btnGhost}" data-action="cloud-backup-refresh">Refresh Cloud Status</button>
-            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-issue-key">${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
-            ${cloud.restoreKeyPresent ? `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>` : ""}
+            ${usingTailscaleCloud ? "" : `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-issue-key">${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>`}
+            ${usingTailscaleCloud || !cloud.restoreKeyPresent ? "" : `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>`}
             <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled ? "disabled" : ""}>Backup To Cloud Now</button>
           </div>
           <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
-            <div class="mb-3 text-[11px] font-bold uppercase tracking-[0.18em] text-white">Cloud Backups</div>
+            <div class="mb-3 text-[11px] font-bold uppercase tracking-[0.18em] text-white">${usingTailscaleCloud ? "Rolling Cloud Backup" : "Cloud Backups"}</div>
             ${
               cloud.backups?.length
                 ? cloud.backups
@@ -2679,6 +2739,7 @@ function renderPanelScreen() {
       : ui.section === "worlds" ? renderWorldsSection(server)
       : ui.section === "addons" ? renderAddonsSection(server)
       : ui.section === "backups" ? renderBackupsSection(server)
+      : ui.section === "misc" ? renderMiscSection(server)
       : ui.section === "settings" ? renderSettingsSection(server)
       : "";
   const overview = isPelicanBlueprintVariant() ? renderPelicanOverviewSection(server) : renderOverviewSection(server);
@@ -3531,14 +3592,24 @@ async function handleSubmit(event) {
             "view-distance": form.elements["view-distance"].value,
             "simulation-distance": form.elements["simulation-distance"].value,
             "spawn-protection": form.elements["spawn-protection"].value,
-            "white-list": form.elements["white-list"].checked,
-            "online-mode": !form.elements["allow-cracked-clients"].checked,
-            pvp: form.elements.pvp.checked,
-            "allow-flight": form.elements["allow-flight"].checked,
-            "enable-command-block": form.elements["enable-command-block"].checked,
           },
         });
         await api(activeServerPath("/settings/eula"), { method: "POST", body: { accepted: true } });
+        await refreshState();
+        break;
+      case "misc-settings":
+        await api(activeServerPath("/settings/misc"), {
+          method: "POST",
+          body: {
+            allowCrackedClients: form.elements.allowCrackedClients.value === "true",
+            whitelist: form.elements.whitelist.value === "true",
+            commandBlocks: form.elements.commandBlocks.value === "true",
+            pvp: form.elements.pvp.value === "true",
+            allowFlight: form.elements.allowFlight.value === "true",
+            keepInventory: form.elements.keepInventory.value === "true",
+            sharedHealth: form.elements.sharedHealth.value === "true",
+          },
+        });
         await refreshState();
         break;
       case "cloud-backup-settings": {
@@ -3546,7 +3617,11 @@ async function handleSubmit(event) {
           method: "POST",
           body: {
             enabled: form.elements.enabled.checked,
+            provider: form.elements.provider?.value ?? "supabase",
             deviceLabel: form.elements.deviceLabel.value,
+            tailscaleHost: form.elements.tailscaleHost?.value ?? "",
+            tailscaleUser: form.elements.tailscaleUser?.value ?? "",
+            tailscaleRemoteDir: form.elements.tailscaleRemoteDir?.value ?? "",
           },
         });
         runtime.data = payload.state;

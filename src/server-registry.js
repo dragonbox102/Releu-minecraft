@@ -31,6 +31,10 @@ export const defaultServerConfig = {
     lastBackupAt: null,
     lastBackupPath: null,
   },
+  misc: {
+    keepInventory: false,
+    sharedHealth: false,
+  },
 };
 
 function normalizeServerName(value) {

@@ -73,6 +73,7 @@ export const defaultServerProperties = {
   "pvp": "true",
   "require-resource-pack": "false",
   "resource-pack": "",
+  "resource-pack-id": "",
   "resource-pack-prompt": "",
   "resource-pack-sha1": "",
   "server-ip": "",
@@ -116,6 +117,9 @@ export const defaultConfig = {
     serviceKey: "",
     restoreKey: "",
     deviceLabel: "",
+    tailscaleHost: "",
+    tailscaleUser: "",
+    tailscaleRemoteDir: "",
   },
 };
 
@@ -159,6 +163,9 @@ function normalizeCloudBackupConfig(config) {
   merged.serviceKey = String(merged.serviceKey ?? "").trim();
   merged.restoreKey = String(merged.restoreKey ?? "").trim();
   merged.deviceLabel = String(merged.deviceLabel ?? "").trim();
+  merged.tailscaleHost = String(merged.tailscaleHost ?? "").trim();
+  merged.tailscaleUser = String(merged.tailscaleUser ?? "").trim();
+  merged.tailscaleRemoteDir = String(merged.tailscaleRemoteDir ?? "").trim();
   return merged;
 }
 
