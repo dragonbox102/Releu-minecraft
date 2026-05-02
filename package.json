@@ -1,6 +1,6 @@
 {
   "name": "minecraft-server",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Localhost Minecraft control panel with multi-server, playit.gg, and addon catalog support",
   "bin": "src/app.js",
   "main": "electron/main.cjs",
