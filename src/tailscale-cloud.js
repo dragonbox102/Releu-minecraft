@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 
@@ -56,8 +57,28 @@ export function getTailscaleRemoteBaseDir(config) {
   return baseDir;
 }
 
+function deriveRemoteScopeHash(config, serverId) {
+  const restoreKey = String(config?.restoreKey ?? "").trim();
+  if (!restoreKey) {
+    throw new Error("Generate a cloud backup restore key first.");
+  }
+  return createHash("sha256")
+    .update(`${restoreKey}:${String(serverId ?? "").trim()}`, "utf8")
+    .digest("hex");
+}
+
 function getRemoteServerDir(config, serverId) {
-  return getTailscaleRemoteBaseDir(config).replace(/\/+$/g, "");
+  const baseDir = getTailscaleRemoteBaseDir(config).replace(/\/+$/g, "");
+  const scopeHash = deriveRemoteScopeHash(config, serverId);
+  return `${baseDir}/.releu-store/${scopeHash.slice(0, 2)}/${scopeHash.slice(2, 4)}/${scopeHash}`;
+}
+
+function getLegacyRemoteArchivePath(config) {
+  return `${getTailscaleRemoteBaseDir(config).replace(/\/+$/g, "")}/latest.zip`;
+}
+
+function getLegacyRemoteMetadataPath(config) {
+  return `${getTailscaleRemoteBaseDir(config).replace(/\/+$/g, "")}/latest.json`;
 }
 
 function getRemoteArchivePath(config, serverId) {
@@ -114,7 +135,7 @@ export async function checkTailscaleBackupTarget(config) {
   const remoteDir = getTailscaleRemoteBaseDir(config);
   const response = await runTailscaleSsh(
     config,
-    `mkdir -p ${quotePosix(remoteDir)} && printf ready`,
+    `umask 077 && mkdir -p ${quotePosix(remoteDir)} && chmod 700 ${quotePosix(remoteDir)} && printf ready`,
   );
   return {
     ready: response.stdout.trim() === "ready",
@@ -123,7 +144,27 @@ export async function checkTailscaleBackupTarget(config) {
   };
 }
 
+async function ensureRemoteServerLayout(config, serverId) {
+  const remoteDir = getRemoteServerDir(config, serverId);
+  const remoteArchivePath = getRemoteArchivePath(config, serverId);
+  const remoteMetadataPath = getRemoteMetadataPath(config, serverId);
+  const legacyArchivePath = getLegacyRemoteArchivePath(config);
+  const legacyMetadataPath = getLegacyRemoteMetadataPath(config);
+
+  await runTailscaleSsh(
+    config,
+    `umask 077 && mkdir -p ${quotePosix(remoteDir)} && chmod 700 ${quotePosix(getTailscaleRemoteBaseDir(config))} ${quotePosix(remoteDir)} 2>/dev/null || chmod 700 ${quotePosix(remoteDir)} && if [ -f ${quotePosix(legacyArchivePath)} ] && [ ! -f ${quotePosix(remoteArchivePath)} ]; then mv ${quotePosix(legacyArchivePath)} ${quotePosix(remoteArchivePath)} && chmod 600 ${quotePosix(remoteArchivePath)}; fi && if [ -f ${quotePosix(legacyMetadataPath)} ] && [ ! -f ${quotePosix(remoteMetadataPath)} ]; then mv ${quotePosix(legacyMetadataPath)} ${quotePosix(remoteMetadataPath)} && chmod 600 ${quotePosix(remoteMetadataPath)}; fi`,
+  );
+
+  return {
+    remoteDir,
+    remoteArchivePath,
+    remoteMetadataPath,
+  };
+}
+
 export async function readRemoteBackupMetadata(config, serverId) {
+  await ensureRemoteServerLayout(config, serverId);
   const metadataPath = getRemoteMetadataPath(config, serverId);
   try {
     const response = await runTailscaleSsh(
@@ -141,13 +182,14 @@ export async function readRemoteBackupMetadata(config, serverId) {
 }
 
 export async function uploadRollingRemoteBackup(config, serverId, archivePath, metadata) {
-  const remoteDir = getRemoteServerDir(config, serverId);
-  const remoteArchivePath = getRemoteArchivePath(config, serverId);
-  const remoteMetadataPath = getRemoteMetadataPath(config, serverId);
+  const { remoteDir, remoteArchivePath, remoteMetadataPath } = await ensureRemoteServerLayout(
+    config,
+    serverId,
+  );
 
   await runTailscaleSsh(
     config,
-    `mkdir -p ${quotePosix(remoteDir)} && cat > ${quotePosix(`${remoteArchivePath}.tmp`)} && mv ${quotePosix(`${remoteArchivePath}.tmp`)} ${quotePosix(remoteArchivePath)}`,
+    `umask 077 && mkdir -p ${quotePosix(remoteDir)} && chmod 700 ${quotePosix(remoteDir)} && cat > ${quotePosix(`${remoteArchivePath}.tmp`)} && chmod 600 ${quotePosix(`${remoteArchivePath}.tmp`)} && mv ${quotePosix(`${remoteArchivePath}.tmp`)} ${quotePosix(remoteArchivePath)} && chmod 600 ${quotePosix(remoteArchivePath)}`,
     {
       stdinFilePath: archivePath,
     },
@@ -155,7 +197,7 @@ export async function uploadRollingRemoteBackup(config, serverId, archivePath, m
 
   await runTailscaleSsh(
     config,
-    `mkdir -p ${quotePosix(remoteDir)} && cat > ${quotePosix(`${remoteMetadataPath}.tmp`)} && mv ${quotePosix(`${remoteMetadataPath}.tmp`)} ${quotePosix(remoteMetadataPath)}`,
+    `umask 077 && mkdir -p ${quotePosix(remoteDir)} && chmod 700 ${quotePosix(remoteDir)} && cat > ${quotePosix(`${remoteMetadataPath}.tmp`)} && chmod 600 ${quotePosix(`${remoteMetadataPath}.tmp`)} && mv ${quotePosix(`${remoteMetadataPath}.tmp`)} ${quotePosix(remoteMetadataPath)} && chmod 600 ${quotePosix(remoteMetadataPath)}`,
     {
       stdinBuffer: Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`, "utf8"),
     },
@@ -173,6 +215,7 @@ export async function uploadRollingRemoteBackup(config, serverId, archivePath, m
 }
 
 export async function downloadRollingRemoteBackup(config, serverId, localArchivePath) {
+  await ensureRemoteServerLayout(config, serverId);
   const remoteArchivePath = getRemoteArchivePath(config, serverId);
   const cliPath = await resolveTailscaleCliPath();
   const target = getRemoteTarget(config);

@@ -3569,6 +3569,14 @@ async function handleSubmit(event) {
         await refreshState();
         break;
       case "misc-settings":
+        if (Boolean(activeServer().misc?.keepInventory) !== (form.elements.keepInventory.value === "true")) {
+          const proceed = window.confirm(
+            "Warning: changing Keep Inventory can immediately affect what players are wearing or holding in their inventory. Do you want to continue?",
+          );
+          if (!proceed) {
+            break;
+          }
+        }
         await api(activeServerPath("/settings/misc"), {
           method: "POST",
           body: {

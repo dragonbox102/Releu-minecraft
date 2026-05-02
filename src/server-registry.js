@@ -25,6 +25,10 @@ export const defaultServerConfig = {
     installedVersion: null,
     installedBuild: null,
   },
+  profile: {
+    name: "",
+    description: "",
+  },
   backups: {
     enabled: true,
     intervalMinutes: 60,

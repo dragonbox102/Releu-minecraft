@@ -36,6 +36,7 @@
   "build": {
     "appId": "local.minecraft.panel",
     "productName": "Releu-minecraft",
+    "icon": "build/icon.png",
     "electronFuses": {
       "runAsNode": false,
       "enableNodeOptionsEnvironmentVariable": false,
@@ -64,6 +65,7 @@
     ],
     "asar": false,
     "win": {
+      "icon": "build/icon.ico",
       "artifactName": "Releu-minecraft.exe",
       "signAndEditExecutable": false,
       "target": [
@@ -76,6 +78,7 @@
       ]
     },
     "linux": {
+      "icon": "build/icon.png",
       "artifactName": "Releu-minecraft.AppImage",
       "target": [
         {

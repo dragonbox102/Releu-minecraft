@@ -726,6 +726,24 @@ export class MinecraftPanelService {
   }
 
   buildContext(serverRecord, config) {
+    const configProfileName = String(config.profile?.name ?? "").trim();
+    const configProfileDescription = String(config.profile?.description ?? "").trim();
+    const recordName = String(serverRecord.name ?? "").trim();
+    const recordDescription = String(serverRecord.description ?? "").trim();
+
+    if (!recordName && configProfileName) {
+      serverRecord.name = configProfileName;
+    }
+    if (!recordDescription && configProfileDescription) {
+      serverRecord.description = configProfileDescription;
+    }
+
+    config.profile = {
+      ...config.profile,
+      name: String(serverRecord.name ?? configProfileName).trim(),
+      description: String(serverRecord.description ?? configProfileDescription).trim(),
+    };
+
     const installMeta = config.install.installedVersion
       ? {
           software: config.install.installedSoftware,
@@ -2765,6 +2783,11 @@ if (-not $sample) { exit 0 }
     context.record.name = nextName;
     context.record.description = nextDescription;
     context.record.updatedAt = currentTimestamp();
+    context.config.profile = {
+      ...context.config.profile,
+      name: nextName,
+      description: nextDescription,
+    };
     context.config.backups = {
       ...context.config.backups,
       enabled: Boolean(payload.autoBackups ?? context.config.backups.enabled),

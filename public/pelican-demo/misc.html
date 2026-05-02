@@ -26,10 +26,33 @@
       }
 
       .misc-section { margin-bottom: .875rem; }
+      .misc-panel {
+        background: rgb(var(--gray-900, 17 24 32));
+        border: 1px solid #2b3642;
+        border-radius: .5rem;
+        overflow: hidden;
+      }
+      .misc-panel-head {
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid #2b3642;
+      }
+      .misc-panel-head h2 {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #f1f5f9;
+      }
+      .misc-panel-head p {
+        margin-top: .35rem;
+        font-size: .8125rem;
+        color: #94a3b8;
+      }
+      .misc-panel-body {
+        padding: 1rem 1.25rem;
+      }
       .misc-card {
         border: 1px solid #2b3642;
-        background: #0f141b;
-        border-radius: .875rem;
+        background: rgb(var(--gray-900, 17 24 32));
+        border-radius: .5rem;
         padding: 1rem;
       }
       .misc-fieldset {
@@ -156,15 +179,13 @@
 
             <div class="fi-page-content">
               <form data-releu-misc-form class="fi-sc fi-sc-has-gap fi-grid" style="--cols-default: repeat(1, minmax(0, 1fr));">
-                <section class="fi-section fi-section-has-header misc-section">
-                  <header class="fi-section-header">
-                    <div class="fi-section-header-text-ctn">
-                      <h2 class="fi-section-header-heading">Player Access</h2>
-                      <p class="fi-section-header-description">Who can join and how they are allowed in.</p>
-                    </div>
-                  </header>
-                  <div class="fi-section-content-ctn">
-                    <div class="fi-section-content misc-content-cols">
+                <section class="misc-panel misc-section">
+                  <div class="misc-panel-head">
+                    <h2>Player Access</h2>
+                    <p>Who can join and how they are allowed in.</p>
+                  </div>
+                  <div class="misc-panel-body">
+                    <div class="misc-content-cols">
                       <fieldset class="misc-fieldset">
                         <legend>
                           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
@@ -226,15 +247,13 @@
                   </div>
                 </section>
 
-                <section class="fi-section fi-section-has-header misc-section">
-                  <header class="fi-section-header">
-                    <div class="fi-section-header-text-ctn">
-                      <h2 class="fi-section-header-heading">World Rules</h2>
-                      <p class="fi-section-header-description">Combat and survival behavior for the active world.</p>
-                    </div>
-                  </header>
-                  <div class="fi-section-content-ctn">
-                    <div class="fi-section-content misc-fields-grid">
+                <section class="misc-panel misc-section">
+                  <div class="misc-panel-head">
+                    <h2>World Rules</h2>
+                    <p>Combat and survival behavior for the active world.</p>
+                  </div>
+                  <div class="misc-panel-body">
+                    <div class="misc-fields-grid">
                       <div class="misc-field misc-card">
                         <label class="misc-label" for="misc-pvp">
                           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><path d="M13 19l6-6"/><path d="M16 16l4 4"/><path d="M19 21l2-2"/><path d="M3 21l7-7"/><path d="M6 4l4 4"/></svg>
@@ -294,15 +313,13 @@
                   </div>
                 </section>
 
-                <section class="fi-section fi-section-has-header">
-                  <header class="fi-section-header">
-                    <div class="fi-section-header-text-ctn">
-                      <h2 class="fi-section-header-heading">Apply Changes</h2>
-                      <p class="fi-section-header-description">Save these misc rules back into Releu and the server.</p>
-                    </div>
-                  </header>
-                  <div class="fi-section-content-ctn">
-                    <div class="fi-section-content" style="display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; align-items: center;">
+                <section class="misc-panel">
+                  <div class="misc-panel-head">
+                    <h2>Apply Changes</h2>
+                    <p>Save these misc rules back into Releu and the server.</p>
+                  </div>
+                  <div class="misc-panel-body">
+                    <div style="display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; align-items: center;">
                       <div class="text-sm text-slate-400">Cracked support, whitelist, PvP, and command blocks save to the server. Keep inventory is applied when the server is running.</div>
                       <button type="submit" class="fi-btn fi-size-md fi-ac-btn-action" data-busy-label="Saving...">Save Misc Settings</button>
                     </div>

@@ -208,8 +208,20 @@ function stripReleaseBranding() {
     node.textContent = "Releu";
   });
   document.querySelectorAll(".fi-section-header-description").forEach((node) => {
-    if (node.textContent?.includes("Pelican-shell preview")) {
+    if (node.textContent?.includes("Pelican-shell")) {
       node.textContent = "Create a new Minecraft server in Releu.";
+    }
+    if (node.textContent?.includes("plugin and mod wiring")) {
+      node.textContent = "Browse, install, and manage plugins, mods, and resource packs for this server.";
+    }
+    if (node.textContent?.includes("world management wiring")) {
+      node.textContent = "Manage worlds, imports, and active world selection for this server.";
+    }
+    if (node.textContent?.includes("software selection and runtime limits")) {
+      node.textContent = "Choose server software and manage runtime limits for this server.";
+    }
+    if (node.textContent?.includes("summary tiles and console")) {
+      node.textContent = "Live server summary, status, and recent console activity.";
     }
   });
   document.querySelectorAll("p").forEach((node) => {
@@ -3175,6 +3187,16 @@ function patchMiscPage() {
     event.preventDefault();
     const submitButton = form.querySelector('button[type="submit"]');
     try {
+      const currentKeepInventory = Boolean(activeServer()?.misc?.keepInventory);
+      const nextKeepInventory = form.elements.keepInventory.value === "true";
+      if (currentKeepInventory !== nextKeepInventory) {
+        const proceed = window.confirm(
+          "Warning: changing Keep Inventory can immediately affect what players are wearing or holding in their inventory. Do you want to continue?",
+        );
+        if (!proceed) {
+          return;
+        }
+      }
       setButtonBusy(submitButton, true, submitButton?.dataset.busyLabel ?? "Saving...");
       await api(`/api/servers/${encodeURIComponent(activeServerId())}/settings/misc`, {
         method: "POST",
