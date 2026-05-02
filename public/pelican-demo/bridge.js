@@ -3351,7 +3351,7 @@ function patchSettingsPage() {
     <header class="fi-section-header">
       <div class="fi-section-header-text-ctn">
         <h2 class="fi-section-header-heading">Server Properties</h2>
-        <p class="fi-section-header-description">Core Minecraft server properties. Gameplay and access toggles now live in Misc.</p>
+        <p class="fi-section-header-description">Core Minecraft server properties.</p>
       </div>
     </header>
     <div class="fi-section-content-ctn">
@@ -3400,13 +3400,6 @@ function patchSettingsPage() {
                   <input type="checkbox" name="${escapeHtml(key)}" ${checked ? "checked" : ""}>
                 </span>
               </label>`).join("")}
-          </div>
-          <div class="md:col-span-2 flex items-center justify-between gap-4 rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4">
-            <div>
-              <div class="font-semibold text-slate-100">Gameplay And Access</div>
-              <p class="mt-1 text-xs text-slate-400">Cracked support, PvP, whitelist, command blocks, keep inventory, and shared health moved to the Misc page.</p>
-            </div>
-            <a href="${escapeHtml(buildLocalPageHref("misc.html", serverId))}" class="fi-btn fi-size-md fi-ac-btn-action">Open Misc</a>
           </div>
           <div class="md:col-span-2 flex items-center justify-between gap-4 rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4">
             <div>
@@ -3553,30 +3546,12 @@ function patchSettingsPage() {
             <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Device Label</span>
             <input class="fi-input" data-releu-cloud-device-label type="text" value="${escapeHtml(cloud.deviceLabel ?? state.cloudBackupSettings?.deviceLabel ?? "")}" placeholder="My desktop PC">
           </label>
-          ${
-            usingTailscaleCloud
-              ? `
-          <label style="display:grid;gap:.5rem;">
-            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Linux Backup Host</span>
-            <input class="fi-input" data-releu-cloud-host type="text" value="${escapeHtml(cloud.tailscaleHost ?? state.cloudBackupSettings?.tailscaleHost ?? "")}" placeholder="192">
-          </label>
-          <label style="display:grid;gap:.5rem;">
-            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Linux Username</span>
-            <input class="fi-input" data-releu-cloud-user type="text" value="${escapeHtml(cloud.tailscaleUser ?? state.cloudBackupSettings?.tailscaleUser ?? "")}" placeholder="alex">
-          </label>
-          <label style="display:grid;gap:.5rem;">
-            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Remote Backup Folder</span>
-            <input class="fi-input" data-releu-cloud-remote-dir type="text" value="${escapeHtml(cloud.tailscaleRemoteDir ?? state.cloudBackupSettings?.tailscaleRemoteDir ?? "")}" placeholder="/home/alex/releu-cloud">
-          </label>`
-              : `
           <label style="display:grid;gap:.5rem;">
             <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Restore Key</span>
             <input class="fi-input" type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first">
-          </label>`
-          }
+          </label>
           <div style="display:grid;gap:.65rem;" class="text-xs text-slate-400">
             <div>${usingTailscaleCloud ? "Connection" : "Function"}: <span class="text-slate-200">${cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready"}</span></div>
-            ${usingTailscaleCloud ? `<div>Target: <span class="text-slate-200">${escapeHtml(cloud.targetLabel ?? "")}</span></div>` : ""}
             <div>Upload limit: <span class="text-slate-200">${escapeHtml(uploadLimitLabel)}</span></div>
             <div>Cloud used: <span class="text-slate-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
             <div>Saved backups: <span class="text-slate-200">${escapeHtml(String(cloud.backupsCount ?? 0))}</span></div>
@@ -3584,9 +3559,9 @@ function patchSettingsPage() {
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:.65rem;">
             <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-save>Save Settings</button>
-            ${usingTailscaleCloud ? "" : `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-issue>${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>`}
-            ${usingTailscaleCloud || !cloud.restoreKeyPresent ? "" : `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>`}
-            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled ? "disabled" : ""}>Backup To Cloud Now</button>
+            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-issue>${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
+            ${!cloud.restoreKeyPresent ? "" : `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>`}
+            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled || !cloud.restoreKeyPresent ? "disabled" : ""}>Backup To Cloud Now</button>
             <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-refresh>Refresh Status</button>
           </div>
         </div>
@@ -3614,12 +3589,9 @@ function patchSettingsPage() {
           }
         </div>
       </div>
-    </div>`;
+    </div>`; 
   const cloudEnabled = cloudSection.querySelector("[data-releu-cloud-enabled]");
   const cloudDeviceLabel = cloudSection.querySelector("[data-releu-cloud-device-label]");
-  const cloudHost = cloudSection.querySelector("[data-releu-cloud-host]");
-  const cloudUser = cloudSection.querySelector("[data-releu-cloud-user]");
-  const cloudRemoteDir = cloudSection.querySelector("[data-releu-cloud-remote-dir]");
   const saveCloudButton = cloudSection.querySelector("[data-releu-cloud-save]");
   const issueCloudButton = cloudSection.querySelector("[data-releu-cloud-issue]");
   const rotateCloudButton = cloudSection.querySelector("[data-releu-cloud-rotate]");
@@ -3634,9 +3606,6 @@ function patchSettingsPage() {
           enabled: Boolean(cloudEnabled?.checked),
           provider: cloudProvider,
           deviceLabel: cloudDeviceLabel?.value ?? "",
-          tailscaleHost: cloudHost?.value ?? "",
-          tailscaleUser: cloudUser?.value ?? "",
-          tailscaleRemoteDir: cloudRemoteDir?.value ?? "",
         },
       });
       APP_STATE.state = payload.state ?? APP_STATE.state;

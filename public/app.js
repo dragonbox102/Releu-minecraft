@@ -2564,17 +2564,6 @@ function renderSettingsSection(server) {
             <input name="spawn-protection" type="number" value="${escapeHtml(server.server.properties["spawn-protection"] ?? 16)}" class="${C.input} font-mono text-sm" placeholder="Spawn protection" />
           </div>
         </div>
-        <div class="border-t border-zinc-900 pt-4">
-          <div class="border border-outline bg-black p-4">
-            <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-              <div class="space-y-2">
-                <p class="${C.labelOn}">Gameplay And Access</p>
-                <p class="text-sm text-zinc-400">Cracked support, PvP, whitelist, command blocks, keep inventory, and shared health were moved into <span class="text-zinc-200">Misc</span>.</p>
-              </div>
-              <button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="misc">Open Misc</button>
-            </div>
-          </div>
-        </div>
         <button type="submit" class="${C.btnPrimary} py-4">Save Server Settings</button>
       </form>
     </section>
@@ -2650,30 +2639,12 @@ function renderSettingsSection(server) {
             <input name="deviceLabel" type="text" value="${escapeHtml(cloud.deviceLabel ?? cloudConfig.deviceLabel ?? "")}" placeholder="My desktop PC" class="${C.input} w-full" />
           </label>
           <input name="provider" type="hidden" value="${escapeHtml(cloudProvider)}" />
-          ${
-            usingTailscaleCloud
-              ? `
-          <label class="block">
-            <span class="${C.label} mb-2 block">Linux Backup Host</span>
-            <input name="tailscaleHost" type="text" value="${escapeHtml(cloud.tailscaleHost ?? cloudConfig.tailscaleHost ?? "")}" placeholder="192" class="${C.input} w-full font-mono text-xs" />
-          </label>
-          <label class="block">
-            <span class="${C.label} mb-2 block">Linux Username</span>
-            <input name="tailscaleUser" type="text" value="${escapeHtml(cloud.tailscaleUser ?? cloudConfig.tailscaleUser ?? "")}" placeholder="alex" class="${C.input} w-full font-mono text-xs" />
-          </label>
-          <label class="block">
-            <span class="${C.label} mb-2 block">Remote Backup Folder</span>
-            <input name="tailscaleRemoteDir" type="text" value="${escapeHtml(cloud.tailscaleRemoteDir ?? cloudConfig.tailscaleRemoteDir ?? "")}" placeholder="/home/alex/releu-cloud" class="${C.input} w-full font-mono text-xs" />
-          </label>`
-              : `
           <label class="block">
             <span class="${C.label} mb-2 block">Restore Key</span>
             <input type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first" class="${C.input} w-full font-mono text-xs" />
-          </label>`
-          }
+          </label>
           <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
             <div>${usingTailscaleCloud ? "Connection" : "Function"}: <span class="font-mono text-zinc-200">${escapeHtml(cloud.functionReady ? "ready" : ui.cloudBackupStatusLoading ? "checking" : "not ready")}</span></div>
-            ${usingTailscaleCloud ? `<div class="mt-1">Target: <span class="font-mono text-zinc-200">${escapeHtml(cloud.targetLabel ?? "")}</span></div>` : ""}
             <div class="mt-1">Upload limit: <span class="font-mono text-zinc-200">${escapeHtml(cloudUploadLimitLabel)}</span></div>
             <div class="mt-1">Cloud used: <span class="font-mono text-zinc-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
             <div class="mt-1">Saved backups: <span class="font-mono text-zinc-200">${escapeHtml(formatCount(cloud.backupsCount ?? 0))}</span></div>
@@ -2683,9 +2654,9 @@ function renderSettingsSection(server) {
           <div class="flex flex-wrap gap-2">
             <button type="submit" class="${C.btnPrimary}">Save Cloud Settings</button>
             <button type="button" class="${C.btnGhost}" data-action="cloud-backup-refresh">Refresh Cloud Status</button>
-            ${usingTailscaleCloud ? "" : `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-issue-key">${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>`}
-            ${usingTailscaleCloud || !cloud.restoreKeyPresent ? "" : `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>`}
-            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled ? "disabled" : ""}>Backup To Cloud Now</button>
+            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-issue-key">${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
+            ${!cloud.restoreKeyPresent ? "" : `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>`}
+            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled || !cloud.restoreKeyPresent ? "disabled" : ""}>Backup To Cloud Now</button>
           </div>
           <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
             <div class="mb-3 text-[11px] font-bold uppercase tracking-[0.18em] text-white">${usingTailscaleCloud ? "Rolling Cloud Backup" : "Cloud Backups"}</div>
@@ -3613,16 +3584,23 @@ async function handleSubmit(event) {
         await refreshState();
         break;
       case "cloud-backup-settings": {
+        const body = {
+          enabled: form.elements.enabled.checked,
+          provider: form.elements.provider?.value ?? "supabase",
+          deviceLabel: form.elements.deviceLabel.value,
+        };
+        if (form.elements.tailscaleHost) {
+          body.tailscaleHost = form.elements.tailscaleHost.value;
+        }
+        if (form.elements.tailscaleUser) {
+          body.tailscaleUser = form.elements.tailscaleUser.value;
+        }
+        if (form.elements.tailscaleRemoteDir) {
+          body.tailscaleRemoteDir = form.elements.tailscaleRemoteDir.value;
+        }
         const payload = await api("/api/cloud-backup/settings", {
           method: "POST",
-          body: {
-            enabled: form.elements.enabled.checked,
-            provider: form.elements.provider?.value ?? "supabase",
-            deviceLabel: form.elements.deviceLabel.value,
-            tailscaleHost: form.elements.tailscaleHost?.value ?? "",
-            tailscaleUser: form.elements.tailscaleUser?.value ?? "",
-            tailscaleRemoteDir: form.elements.tailscaleRemoteDir?.value ?? "",
-          },
+          body,
         });
         runtime.data = payload.state;
         ui.cloudBackupStatus = payload.status ?? null;

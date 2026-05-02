@@ -49,7 +49,11 @@ function getRemoteTarget(config) {
 }
 
 export function getTailscaleRemoteBaseDir(config) {
-  return String(config?.tailscaleRemoteDir ?? "").trim() || "/home/alex/releu-cloud";
+  const baseDir = String(config?.tailscaleRemoteDir ?? "").trim();
+  if (!baseDir) {
+    throw new Error("The linked Linux backup folder is not configured.");
+  }
+  return baseDir;
 }
 
 function getRemoteServerDir(config, serverId) {

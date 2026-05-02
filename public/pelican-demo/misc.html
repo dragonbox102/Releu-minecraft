@@ -32,7 +32,7 @@
         font-weight: 700;
         letter-spacing: .12em;
         text-transform: uppercase;
-        color: #334155;
+        color: #64748b;
         padding: 0;
         margin-bottom: .625rem;
         display: flex;
@@ -49,9 +49,9 @@
         gap: .375rem;
         font-size: .75rem;
         font-weight: 500;
-        color: #94a3b8;
+        color: #cbd5e1;
       }
-      .misc-label svg { width: 13px; height: 13px; color: #475569; flex-shrink: 0; }
+      .misc-label svg { width: 13px; height: 13px; color: #64748b; flex-shrink: 0; }
       .misc-select-wrap { position: relative; }
       .misc-select-wrap svg.arr {
         position: absolute;
@@ -59,23 +59,18 @@
         top: 50%;
         transform: translateY(-50%);
         pointer-events: none;
-        color: #475569;
+        color: #64748b;
         width: 12px;
         height: 12px;
       }
       .misc-select {
         width: 100%;
-        background: rgb(var(--gray-950, 15 20 27));
-        border: 1px solid #2b3642;
-        border-radius: .375rem;
         padding: .45rem 1.75rem .45rem .625rem;
         font-size: .8125rem;
-        color: #f1f5f9;
         outline: none;
         font-family: inherit;
         appearance: none;
       }
-      .misc-select:focus { border-color: var(--primary-500, #3b82f6); }
       .misc-content-cols { display: grid; gap: .75rem; grid-template-columns: repeat(2, 1fr); }
       @media (max-width: 900px) { .misc-content-cols { grid-template-columns: 1fr; } }
     </style>
@@ -170,7 +165,7 @@
                               Allow Cracked Clients
                             </label>
                             <div class="misc-select-wrap">
-                              <select id="misc-cracked" name="allowCrackedClients" class="misc-select">
+                              <select id="misc-cracked" name="allowCrackedClients" class="misc-select fi-input">
                                 <option value="false">Disabled</option>
                                 <option value="true">Enabled</option>
                               </select>
@@ -184,7 +179,7 @@
                               Whitelist
                             </label>
                             <div class="misc-select-wrap">
-                              <select id="misc-whitelist" name="whitelist" class="misc-select">
+                              <select id="misc-whitelist" name="whitelist" class="misc-select fi-input">
                                 <option value="false">Disabled</option>
                                 <option value="true">Enabled</option>
                               </select>
@@ -206,7 +201,7 @@
                               Command Blocks
                             </label>
                             <div class="misc-select-wrap">
-                              <select id="misc-command-blocks" name="commandBlocks" class="misc-select">
+                              <select id="misc-command-blocks" name="commandBlocks" class="misc-select fi-input">
                                 <option value="false">Disabled</option>
                                 <option value="true">Enabled</option>
                               </select>
@@ -234,7 +229,7 @@
                           PvP
                         </label>
                         <div class="misc-select-wrap">
-                          <select id="misc-pvp" name="pvp" class="misc-select">
+                          <select id="misc-pvp" name="pvp" class="misc-select fi-input">
                             <option value="false">Disabled</option>
                             <option value="true">Enabled</option>
                           </select>
@@ -248,7 +243,7 @@
                           Allow Flight
                         </label>
                         <div class="misc-select-wrap">
-                          <select id="misc-flight" name="allowFlight" class="misc-select">
+                          <select id="misc-flight" name="allowFlight" class="misc-select fi-input">
                             <option value="false">Disabled</option>
                             <option value="true">Enabled</option>
                           </select>
@@ -262,7 +257,7 @@
                           Keep Inventory
                         </label>
                         <div class="misc-select-wrap">
-                          <select id="misc-keepinv" name="keepInventory" class="misc-select">
+                          <select id="misc-keepinv" name="keepInventory" class="misc-select fi-input">
                             <option value="false">Disabled</option>
                             <option value="true">Enabled</option>
                           </select>
@@ -276,7 +271,7 @@
                           Shared Health
                         </label>
                         <div class="misc-select-wrap">
-                          <select id="misc-shared-health" name="sharedHealth" class="misc-select">
+                          <select id="misc-shared-health" name="sharedHealth" class="misc-select fi-input">
                             <option value="false">Disabled</option>
                             <option value="true">Enabled</option>
                           </select>

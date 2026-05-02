@@ -45,9 +45,6 @@ export function getPublicCloudBackupConfig(config = null) {
     publishableKey: cloud.publishableKey,
     restoreKey: cloud.restoreKey,
     deviceLabel: cloud.deviceLabel,
-    tailscaleHost: cloud.tailscaleHost,
-    tailscaleUser: cloud.tailscaleUser,
-    tailscaleRemoteDir: cloud.tailscaleRemoteDir,
     functionUrl: getSupabaseFunctionUrl(cloud),
   };
 }

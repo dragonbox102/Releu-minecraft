@@ -544,11 +544,18 @@ function hasPath(targetPath) {
 }
 
 function getTailscaleTargetLabel(cloud) {
-  const host = String(cloud?.tailscaleHost ?? "").trim();
-  const user = String(cloud?.tailscaleUser ?? "").trim();
-  const remoteDir = String(cloud?.tailscaleRemoteDir ?? "").trim();
-  const login = host && user ? `${user}@${host}` : host || user || "";
-  return login && remoteDir ? `${login}:${remoteDir}` : login || remoteDir || "";
+  if (
+    String(cloud?.tailscaleHost ?? "").trim() &&
+    String(cloud?.tailscaleUser ?? "").trim() &&
+    String(cloud?.tailscaleRemoteDir ?? "").trim()
+  ) {
+    return "Linked via Tailscale SSH";
+  }
+  return "";
+}
+
+function generateLocalCloudBackupKey() {
+  return `releu_${crypto.randomBytes(24).toString("base64url")}`;
 }
 
 function buildTailscaleLogicalBackupEntry(metadata) {
@@ -1829,8 +1836,8 @@ if (-not $sample) { exit 0 }
       configured: usingTailscale
         ? Boolean(cloud.tailscaleHost && cloud.tailscaleUser && cloud.tailscaleRemoteDir)
         : Boolean(cloud.projectUrl && cloud.publishableKey && cloud.functionName),
-      restoreKeyPresent: usingTailscale ? false : Boolean(cloud.restoreKey),
-      restoreKey: usingTailscale ? "" : cloud.restoreKey,
+      restoreKeyPresent: Boolean(cloud.restoreKey),
+      restoreKey: cloud.restoreKey,
       deviceLabel: cloud.deviceLabel || os.hostname(),
       uploadLimitBytes: usingTailscale
         ? 0
@@ -1853,7 +1860,6 @@ if (-not $sample) { exit 0 }
       try {
         const check = await checkTailscaleBackupTarget(cloud);
         status.functionReady = Boolean(check.ready);
-        status.targetLabel = check.target && check.remoteDir ? `${check.target}:${check.remoteDir}` : status.targetLabel;
       } catch (error) {
         status.functionError = error.message ?? "Linux backup target check failed.";
         return status;
@@ -1910,13 +1916,24 @@ if (-not $sample) { exit 0 }
   }
 
   async issueCloudBackupKey(payload = {}) {
-    if (getCloudBackupConfig(this.panelConfig).provider === "tailscale-ssh") {
-      throw new Error("Restore keys are only used for Supabase cloud backup.");
-    }
+    const current = getCloudBackupConfig(this.panelConfig);
     const deviceLabel =
-      String(payload.deviceLabel ?? getCloudBackupConfig(this.panelConfig).deviceLabel ?? "")
+      String(payload.deviceLabel ?? current.deviceLabel ?? "")
         .trim()
         .slice(0, 80) || os.hostname();
+
+    if (current.provider === "tailscale-ssh") {
+      this.panelConfig.cloudBackup = {
+        ...this.panelConfig.cloudBackup,
+        enabled: true,
+        deviceLabel,
+        restoreKey: generateLocalCloudBackupKey(),
+      };
+      this.panelConfig = await savePanelConfig(this.panelConfig);
+      this.appendLog(null, "panel", "Issued a new Tailscale cloud backup restore key.");
+      return this.getCloudBackupStatus();
+    }
+
     const result = await invokeSupabaseEdgeFunction(this.panelConfig, "issue_key", {
       deviceLabel,
     });
@@ -1934,11 +1951,18 @@ if (-not $sample) { exit 0 }
 
   async rotateCloudBackupKey() {
     const current = getCloudBackupConfig(this.panelConfig);
-    if (current.provider === "tailscale-ssh") {
-      throw new Error("Restore keys are only used for Supabase cloud backup.");
-    }
     if (!current.restoreKey) {
       throw new Error("Generate a cloud backup key first.");
+    }
+
+    if (current.provider === "tailscale-ssh") {
+      this.panelConfig.cloudBackup = {
+        ...this.panelConfig.cloudBackup,
+        restoreKey: generateLocalCloudBackupKey(),
+      };
+      this.panelConfig = await savePanelConfig(this.panelConfig);
+      this.appendLog(null, "panel", "Rotated the Tailscale cloud backup restore key.");
+      return this.getCloudBackupStatus();
     }
 
     const result = await invokeSupabaseEdgeFunction(this.panelConfig, "rotate_key", {
@@ -2299,7 +2323,7 @@ if (-not $sample) { exit 0 }
       throw new Error("Enable cloud backup first.");
     }
     const usingTailscale = cloud.provider === "tailscale-ssh";
-    if (!usingTailscale && !cloud.restoreKey) {
+    if (!cloud.restoreKey) {
       throw new Error("Generate a cloud backup restore key first.");
     }
 
@@ -2356,7 +2380,7 @@ if (-not $sample) { exit 0 }
       throw new Error("Enable cloud backup first.");
     }
     const usingTailscale = cloud.provider === "tailscale-ssh";
-    if (!usingTailscale && !cloud.restoreKey) {
+    if (!cloud.restoreKey) {
       throw new Error("Generate a cloud backup restore key first.");
     }
     if (!String(backupId ?? "").trim()) {
