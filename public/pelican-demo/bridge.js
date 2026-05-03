@@ -28,9 +28,12 @@ const APP_STATE = {
   catalogBootstrap: { plugin: false, mod: false, resourcepack: false },
   installHud: null,
   installHudTimer: null,
+  miscSaveTimer: null,
+  miscSaveState: { message: "", tone: "neutral" },
   profileSaveTimer: null,
   profileSaveState: { message: "", tone: "neutral" },
   cloudBackup: { status: null, loading: false, lastFetchedAt: 0 },
+  playerInventoryModal: null,
   consoleDraft: "",
   consoleHelpOpen: false,
   consoleStickToBottom: true,
@@ -564,8 +567,8 @@ function updateChrome(state) {
 
 function currentUiSettings() {
   return APP_STATE.state?.uiSettings ?? {
-    variant: "classic",
-    hasChosenVariant: false,
+    variant: "pelican-blueprint",
+    hasChosenVariant: true,
   };
 }
 
@@ -1200,6 +1203,26 @@ function patchServersPageExactShell() {
   document.querySelector("[data-releu-servers-mount]")?.remove();
   originalContent.style.display = "";
 
+  const header = document.querySelector(".fi-page-header-main-ctn .fi-header");
+  if (header) {
+    header.classList.add("justify-between", "gap-4");
+    let actions = header.querySelector(".fi-header-actions-ctn");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "fi-header-actions-ctn flex flex-wrap items-center gap-3";
+      header.append(actions);
+    }
+    if (!actions.querySelector("[data-releu-create-server]")) {
+      const createButton = document.createElement("button");
+      createButton.type = "button";
+      createButton.className =
+        "fi-color fi-color-primary fi-bg-color-600 hover:fi-bg-color-500 dark:fi-bg-color-600 dark:hover:fi-bg-color-500 fi-text-color-0 hover:fi-text-color-0 dark:fi-text-color-0 dark:hover:fi-text-color-0 fi-btn fi-size-md fi-ac-btn-action";
+      createButton.dataset.releuCreateServer = "true";
+      createButton.textContent = "Create New Server";
+      actions.append(createButton);
+    }
+  }
+
   const templateCard = originalContent.querySelector(".fi-ta-record");
   const recordsParent = templateCard?.parentElement;
   const servers = state?.servers ?? [];
@@ -1372,6 +1395,15 @@ function patchServersPageExactShell() {
         navigateTo(buildLocalPageHref("create-server.html"));
       });
     });
+
+  document.querySelectorAll("[data-releu-create-server]").forEach((button) => {
+    if (button.dataset.releuBound) return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      navigateTo(buildLocalPageHref("create-server.html"));
+    });
+  });
 
   originalContent.querySelectorAll("[data-control]").forEach((button) => {
     if (button.dataset.releuBound === "true") return;
@@ -1902,6 +1934,606 @@ function playerAvatar(player) {
   return `https://mc-heads.net/avatar/${encodeURIComponent(player.uuid || player.name)}/32`;
 }
 
+function inventoryModalState() {
+  return APP_STATE.playerInventoryModal;
+}
+
+function selectedInventoryCatalogItem() {
+  const modal = inventoryModalState();
+  if (!modal?.catalog?.results?.length || !modal.selectedItemId) {
+    return null;
+  }
+  return modal.catalog.results.find((entry) => entry.id === modal.selectedItemId) ?? null;
+}
+
+function closePlayerInventoryModal() {
+  APP_STATE.playerInventoryModal = null;
+  renderPlayerInventoryModal();
+}
+
+async function searchPlayerInventoryCatalog(query = "") {
+  const modal = inventoryModalState();
+  if (!modal) return;
+  modal.catalogLoading = true;
+  renderPlayerInventoryModal();
+  try {
+    const payload = await api(
+      `/api/servers/${encodeURIComponent(activeServerId())}/items/catalog?query=${encodeURIComponent(query)}`,
+    );
+    modal.catalog = payload.catalog;
+    modal.catalogQuery = query;
+    if (!modal.selectedItemId || !modal.catalog.results.some((entry) => entry.id === modal.selectedItemId)) {
+      modal.selectedItemId = modal.catalog.results[0]?.id ?? "";
+    }
+  } catch (error) {
+    modal.message = error.message ?? String(error);
+    modal.messageTone = "error";
+  } finally {
+    modal.catalogLoading = false;
+    renderPlayerInventoryModal();
+  }
+}
+
+async function loadPlayerInventoryModal(playerName, { preserveMessage = false } = {}) {
+  const modal = inventoryModalState();
+  if (!modal) return;
+  modal.loading = true;
+  if (!preserveMessage) {
+    modal.message = "";
+    modal.messageTone = "neutral";
+  }
+  renderPlayerInventoryModal();
+  try {
+    const payload = await api(
+      `/api/servers/${encodeURIComponent(activeServerId())}/players/${encodeURIComponent(playerName)}/inventory`,
+    );
+    modal.playerName = playerName;
+    modal.inventory = payload.inventory;
+  } catch (error) {
+    modal.message = error.message ?? String(error);
+    modal.messageTone = "error";
+  } finally {
+    modal.loading = false;
+    renderPlayerInventoryModal();
+  }
+}
+
+async function openPlayerInventoryModal(playerName) {
+  APP_STATE.playerInventoryModal = {
+    playerName,
+    inventory: null,
+    loading: true,
+    busy: false,
+    message: "",
+    messageTone: "neutral",
+    catalog: null,
+    catalogQuery: "",
+    catalogLoading: false,
+    selectedItemId: "",
+    addCount: 1,
+  };
+  renderPlayerInventoryModal();
+  await Promise.all([
+    loadPlayerInventoryModal(playerName),
+    searchPlayerInventoryCatalog(""),
+  ]);
+}
+
+function inventorySlotMarkupLegacy(slot, kind = "main") {
+  const item = slot.item;
+  const baseClass = [
+    "relative rounded-xl border p-2 text-left transition",
+    slot.selected
+      ? "border-cyan-400 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.24)]"
+      : "border-white/10 bg-slate-950/80",
+    item ? "hover:border-white/30" : "",
+  ].join(" ");
+  const sizeClass = kind === "main" || kind === "hotbar" ? "min-h-[74px]" : "min-h-[82px]";
+  const itemName = item?.displayName ?? "Empty";
+  return `<div class="${baseClass} ${sizeClass}" title="${escapeHtml(slot.label)}${item ? ` • ${escapeHtml(item.displayName)} x${item.count}` : ""}">
+    <div class="mb-1 flex items-start justify-between gap-2">
+      <span class="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">${escapeHtml(slot.label)}</span>
+      ${item ? `<button type="button" class="rounded border border-rose-400/40 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] text-rose-200 hover:border-rose-300 hover:text-white" data-inventory-clear-slot="${slot.slotId}">Clear</button>` : ""}
+    </div>
+    <div class="space-y-1">
+      <div class="line-clamp-2 text-xs font-semibold text-white">${escapeHtml(itemName)}</div>
+      <div class="flex items-center justify-between text-[11px] text-slate-300">
+        <span>${item ? escapeHtml(item.id.replace(/^minecraft:/, "")) : "empty"}</span>
+        <span>${item ? `x${escapeHtml(item.count)}` : ""}</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderInventoryModalContentLegacy(modal) {
+  const inventory = modal.inventory;
+  const catalogResults = modal.catalog?.results ?? [];
+  const selectedItem = selectedInventoryCatalogItem();
+  const statusToneClass =
+    modal.messageTone === "error"
+      ? "border-rose-400/30 bg-rose-500/10 text-rose-100"
+      : modal.messageTone === "success"
+        ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-100"
+        : "border-white/10 bg-black/30 text-slate-300";
+  return `<div class="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4">
+    <div class="w-full max-w-7xl overflow-hidden rounded-2xl border border-white/10 bg-slate-900 text-slate-100 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-white/10 px-6 py-4">
+        <div>
+          <div class="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">Player Inventory</div>
+          <div class="mt-1 text-2xl font-semibold text-white">${escapeHtml(modal.playerName)}</div>
+          <div class="mt-1 text-sm text-slate-400">${inventory ? `${escapeHtml(inventory.player.uuid)} • ${inventory.player.online ? "Online" : "Offline"} • ${inventory.occupiedSlots}/${inventory.totalSlots} occupied` : "Loading inventory snapshot..."}</div>
+        </div>
+        <button type="button" class="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-slate-300 hover:border-white/30 hover:text-white" data-inventory-close>Close</button>
+      </div>
+      <div class="grid gap-0 xl:grid-cols-[minmax(0,1.35fr)_380px]">
+        <div class="border-r border-white/10 p-6">
+          <div class="rounded-2xl border border-white/10 bg-slate-950/80 p-5" style="background-image:linear-gradient(rgba(2,6,23,0.90),rgba(2,6,23,0.90)),url('${escapeHtml(inventory?.textureUrl ?? "")}');background-position:center;background-repeat:no-repeat;background-size:cover;image-rendering:pixelated;">
+            <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div class="text-sm text-slate-300">${inventory?.source === "live-playerdata" ? "Live player snapshot flushed from the running server." : "Saved playerdata snapshot from disk."}</div>
+              <div class="text-xs uppercase tracking-[0.16em] text-slate-500">Selected Hotbar Slot: ${(inventory?.selectedHotbarSlot ?? 0) + 1}</div>
+            </div>
+            ${modal.loading || !inventory ? `<div class="flex min-h-[460px] items-center justify-center rounded-xl border border-dashed border-white/10 text-sm text-slate-400">Loading inventory...</div>` : `
+              <div class="grid gap-4 lg:grid-cols-[88px_minmax(0,1fr)_88px]">
+                <div class="space-y-3">${inventory.armor.map((slot) => inventorySlotMarkup(slot, "armor")).join("")}</div>
+                <div class="space-y-4">
+                  <div class="grid grid-cols-9 gap-2">${inventory.main.map((slot) => inventorySlotMarkup(slot, "main")).join("")}</div>
+                  <div class="grid grid-cols-9 gap-2">${inventory.hotbar.map((slot) => inventorySlotMarkup(slot, "hotbar")).join("")}</div>
+                </div>
+                <div class="space-y-3">${inventorySlotMarkup(inventory.offhand, "offhand")}</div>
+              </div>
+            `}
+          </div>
+        </div>
+        <aside class="space-y-4 p-6">
+          <div class="rounded-xl border border-white/10 bg-slate-950/80 p-4">
+            <div class="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">Inventory Actions</div>
+            <div class="mt-3 rounded-xl border ${statusToneClass} px-3 py-2 text-sm">${escapeHtml(modal.message || "Use the item catalog to add items, or clear slots directly from the inventory view.")}</div>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button type="button" class="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-slate-200 hover:border-white/30 hover:text-white" data-inventory-refresh ${modal.busy ? "disabled" : ""}>Refresh</button>
+              <button type="button" class="rounded-lg border border-rose-400/30 px-3 py-2 text-sm font-semibold text-rose-100 hover:border-rose-300 hover:text-white" data-inventory-clear-all ${modal.busy ? "disabled" : ""}>Clear Entire Inventory</button>
+            </div>
+          </div>
+          <div class="rounded-xl border border-white/10 bg-slate-950/80 p-4">
+            <div class="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">Item Catalog</div>
+            <form class="mt-3 flex gap-2" data-inventory-search-form>
+              <input type="text" name="query" value="${escapeHtml(modal.catalogQuery ?? "")}" placeholder="diamond sword" class="min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none placeholder:text-slate-500 focus:border-cyan-400" />
+              <button type="submit" class="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-slate-200 hover:border-white/30 hover:text-white">${modal.catalogLoading ? "Searching..." : "Search"}</button>
+            </form>
+            <div class="mt-3 flex items-end gap-2">
+              <label class="flex-1">
+                <div class="mb-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">Count</div>
+                <input type="number" min="1" max="9999" value="${escapeHtml(modal.addCount ?? 1)}" data-inventory-count class="w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none focus:border-cyan-400" />
+              </label>
+              <button type="button" class="rounded-lg border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-100 hover:border-cyan-300 hover:text-white" data-inventory-add ${selectedItem ? "" : "disabled"}>${modal.busy ? "Working..." : "Add Item"}</button>
+            </div>
+            <div class="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-slate-300">
+              ${selectedItem ? `Selected: ${escapeHtml(selectedItem.displayName)} (${escapeHtml(selectedItem.id)})` : "Select an item from the catalog results below."}
+            </div>
+            <div class="mt-3 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+              ${catalogResults.length
+                ? catalogResults.map((entry) => {
+                  const selected = modal.selectedItemId === entry.id;
+                  return `<button type="button" class="w-full rounded-xl border px-3 py-3 text-left transition ${selected ? "border-cyan-400 bg-cyan-500/10 text-white" : "border-white/10 bg-slate-900/70 text-slate-200 hover:border-white/25"}" data-inventory-select-item="${escapeHtml(entry.id)}">
+                    <div class="flex items-center justify-between gap-3">
+                      <div>
+                        <div class="text-sm font-semibold">${escapeHtml(entry.displayName)}</div>
+                        <div class="mt-1 text-xs text-slate-400">${escapeHtml(entry.id)} • Stack ${escapeHtml(entry.stackSize)}</div>
+                      </div>
+                      ${entry.maxDurability ? `<span class="rounded-full border border-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-400">Durability ${escapeHtml(entry.maxDurability)}</span>` : ""}
+                    </div>
+                  </button>`;
+                }).join("")
+                : `<div class="rounded-xl border border-dashed border-white/10 px-4 py-6 text-sm text-slate-500">No catalog items matched that search.</div>`}
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderPlayerInventoryModal() {
+  let host = document.getElementById("releu-player-inventory-modal");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "releu-player-inventory-modal";
+    document.body.append(host);
+  }
+  const modal = inventoryModalState();
+  if (!modal) {
+    host.innerHTML = "";
+    return;
+  }
+  host.innerHTML = renderInventoryModalContent(modal);
+  host.querySelector("[data-inventory-close]")?.addEventListener("click", closePlayerInventoryModal);
+  host.querySelector(".fixed.inset-0")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      closePlayerInventoryModal();
+    }
+  });
+  host.querySelector("[data-inventory-refresh]")?.addEventListener("click", async () => {
+    await loadPlayerInventoryModal(modal.playerName, { preserveMessage: true });
+  });
+  host.querySelector("[data-inventory-clear-all]")?.addEventListener("click", async () => {
+    if (!window.confirm(`Clear every inventory slot for ${modal.playerName}?`)) return;
+    modal.busy = true;
+    modal.message = "Clearing inventory...";
+    modal.messageTone = "neutral";
+    renderPlayerInventoryModal();
+    try {
+      const payload = await api(
+        `/api/servers/${encodeURIComponent(activeServerId())}/players/${encodeURIComponent(modal.playerName)}/inventory/clear`,
+        { method: "POST", body: { clearAll: true } },
+      );
+      modal.inventory = payload.inventory;
+      modal.message = "Inventory cleared.";
+      modal.messageTone = "success";
+      await refreshLogs();
+    } catch (error) {
+      modal.message = error.message ?? String(error);
+      modal.messageTone = "error";
+    } finally {
+      modal.busy = false;
+      renderPlayerInventoryModal();
+    }
+  });
+  host.querySelectorAll("[data-inventory-clear-slot]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const slotId = Number(button.dataset.inventoryClearSlot);
+      const slot = [...(modal.inventory?.armor ?? []), ...(modal.inventory?.main ?? []), ...(modal.inventory?.hotbar ?? []), modal.inventory?.offhand]
+        .flat()
+        .find((entry) => Number(entry?.slotId) === slotId);
+      if (!slot?.item) return;
+      if (!window.confirm(`Remove ${slot.item.displayName} from ${modal.playerName}'s ${slot.label}?`)) {
+        return;
+      }
+      modal.busy = true;
+      modal.message = `Clearing ${slot.label}...`;
+      modal.messageTone = "neutral";
+      renderPlayerInventoryModal();
+      try {
+        const payload = await api(
+          `/api/servers/${encodeURIComponent(activeServerId())}/players/${encodeURIComponent(modal.playerName)}/inventory/clear`,
+          { method: "POST", body: { slotId } },
+        );
+        modal.inventory = payload.inventory;
+        modal.message = `${slot.label} cleared.`;
+        modal.messageTone = "success";
+        await refreshLogs();
+      } catch (error) {
+        modal.message = error.message ?? String(error);
+        modal.messageTone = "error";
+      } finally {
+        modal.busy = false;
+        renderPlayerInventoryModal();
+      }
+    });
+  });
+  host.querySelector("[data-inventory-search-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const query = event.currentTarget.querySelector('[name="query"]')?.value ?? "";
+    await searchPlayerInventoryCatalog(query);
+  });
+  host.querySelector("[data-inventory-count]")?.addEventListener("input", (event) => {
+    const numeric = Math.max(1, Math.min(9999, Number(event.currentTarget.value ?? 1) || 1));
+    modal.addCount = numeric;
+  });
+  host.querySelectorAll("[data-inventory-select-item]").forEach((button) => {
+    button.addEventListener("click", () => {
+      modal.selectedItemId = button.dataset.inventorySelectItem;
+      renderPlayerInventoryModal();
+    });
+  });
+  host.querySelector("[data-inventory-add]")?.addEventListener("click", async () => {
+    const item = selectedInventoryCatalogItem();
+    if (!item) return;
+    modal.busy = true;
+    modal.message = `Adding ${item.displayName}...`;
+    modal.messageTone = "neutral";
+    renderPlayerInventoryModal();
+    try {
+      const payload = await api(
+        `/api/servers/${encodeURIComponent(activeServerId())}/players/${encodeURIComponent(modal.playerName)}/inventory/give`,
+        {
+          method: "POST",
+          body: {
+            itemId: item.id,
+            count: modal.addCount ?? 1,
+          },
+        },
+      );
+      modal.inventory = payload.inventory;
+      modal.message = `Added ${modal.addCount ?? 1}x ${item.displayName}.`;
+      modal.messageTone = "success";
+      await refreshLogs();
+    } catch (error) {
+      modal.message = error.message ?? String(error);
+      modal.messageTone = "error";
+    } finally {
+      modal.busy = false;
+      renderPlayerInventoryModal();
+    }
+  });
+}
+
+function inventoryItemAssetName(itemId = "") {
+  return String(itemId ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^minecraft:/, "");
+}
+
+function inventoryItemFallbackText(value, fallback = "?") {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return fallback;
+  }
+  return normalized
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0] ?? "")
+    .join("")
+    .toUpperCase();
+}
+
+function inventoryItemIconMarkup(item, fallbackLabel = "Item") {
+  if (!item?.id) {
+    return `<span class="rvm-slot-icon rvm-slot-icon-empty"><span class="rvm-slot-icon-fallback">${escapeHtml(inventoryItemFallbackText(fallbackLabel, "?"))}</span></span>`;
+  }
+  const assetName = inventoryItemAssetName(item.id);
+  const primary = `https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.21.8/assets/minecraft/textures/item/${assetName}.png`;
+  const secondary = `https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.21.8/assets/minecraft/textures/block/${assetName}.png`;
+  return `<span class="rvm-slot-icon">
+    <span class="rvm-slot-icon-fallback">${escapeHtml(inventoryItemFallbackText(item.displayName ?? item.id, fallbackLabel))}</span>
+    <img class="rvm-slot-icon-img" src="${escapeHtml(primary)}" alt="${escapeHtml(item.displayName ?? item.id)}" onerror="if(!this.dataset.blockFallback){this.dataset.blockFallback='1';this.src='${escapeHtml(secondary)}';return;}this.style.display='none';" />
+  </span>`;
+}
+
+function inventorySlotBadge(slot, kind = "main") {
+  if (kind === "hotbar") {
+    return `H${Math.max(1, Number(slot.slotId ?? 0) + 1)}`;
+  }
+  if (kind === "main") {
+    return String(Math.max(1, Number(slot.slotId ?? 9) - 8));
+  }
+  return slot.label;
+}
+
+function inventorySlotMarkup(slot, kind = "main") {
+  const item = slot.item;
+  const itemName = item?.displayName ?? "Empty";
+  const slotClasses = [
+    "rvm-slot",
+    `rvm-slot-${kind}`,
+    slot.selected ? "is-selected" : "",
+    item ? "has-item" : "is-empty",
+  ].filter(Boolean).join(" ");
+  const tooltip = item
+    ? `${slot.label} - ${item.displayName} x${item.count} - ${item.id}`
+    : `${slot.label} - Empty`;
+  return `<div class="${slotClasses}" title="${escapeHtml(tooltip)}">
+    <div class="rvm-slot-top">
+      <span class="rvm-slot-tag">${escapeHtml(inventorySlotBadge(slot, kind))}</span>
+      ${item ? `<button type="button" class="rvm-slot-clear" data-inventory-clear-slot="${slot.slotId}">Clear</button>` : ""}
+    </div>
+    <div class="rvm-slot-center">
+      ${inventoryItemIconMarkup(item, slot.label)}
+      ${item?.count > 1 ? `<span class="rvm-slot-count">x${escapeHtml(item.count)}</span>` : ""}
+    </div>
+    <div class="rvm-slot-name ${item ? "" : "is-empty"}">${escapeHtml(itemName)}</div>
+    <div class="rvm-slot-meta">${item ? escapeHtml(item.id.replace(/^minecraft:/, "")) : "empty"}</div>
+  </div>`;
+}
+
+function renderInventoryModalContent(modal) {
+  const inventory = modal.inventory;
+  const catalogResults = modal.catalog?.results ?? [];
+  const selectedItem = selectedInventoryCatalogItem();
+  const statusToneClass =
+    modal.messageTone === "error"
+      ? "rvm-status-error"
+      : modal.messageTone === "success"
+        ? "rvm-status-success"
+        : "rvm-status-neutral";
+  const playerInfo = inventory?.player ?? null;
+  return `<style id="releu-player-inventory-modal-style">
+    #releu-player-inventory-modal .rvm-overlay{background:rgba(2,6,23,.97)}
+    #releu-player-inventory-modal .rvm-shell{position:relative;isolation:isolate;width:min(1400px,100%);max-height:calc(100vh - 2rem);overflow:auto;border-radius:18px;border:1px solid rgba(255,255,255,.08);background:#111318;color:#e2e4e9;box-shadow:0 28px 90px rgba(0,0,0,.55)}
+    #releu-player-inventory-modal .rvm-shell::-webkit-scrollbar{width:8px}
+    #releu-player-inventory-modal .rvm-shell::-webkit-scrollbar-thumb{background:rgba(148,163,184,.28);border-radius:999px}
+    #releu-player-inventory-modal .rvm-header{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;padding:1.25rem 1.5rem;border-bottom:1px solid rgba(255,255,255,.08)}
+    #releu-player-inventory-modal .rvm-header-main{min-width:0;flex:1}
+    #releu-player-inventory-modal .rvm-kicker{font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#7a7f8e}
+    #releu-player-inventory-modal .rvm-title{margin-top:.25rem;font-size:clamp(1.05rem,3.4vw,1.45rem);font-weight:700;line-height:1.08;color:#fff;overflow-wrap:anywhere}
+    #releu-player-inventory-modal .rvm-header-copy{margin-top:.35rem;max-width:100%;font-size:.84rem;line-height:1.45;color:#8f96a3;overflow-wrap:anywhere}
+    #releu-player-inventory-modal .rvm-header-actions{display:flex;gap:.5rem;flex-wrap:wrap}
+    #releu-player-inventory-modal .rvm-btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:#20242d;padding:.5rem .8rem;font-size:.8rem;font-weight:600;color:#e2e4e9;transition:border-color .12s ease,background .12s ease,color .12s ease}
+    #releu-player-inventory-modal .rvm-btn:hover:not([disabled]){border-color:rgba(255,255,255,.22);background:#252931;color:#fff}
+    #releu-player-inventory-modal .rvm-btn[disabled]{cursor:default;opacity:.55}
+    #releu-player-inventory-modal .rvm-btn-danger{background:rgba(240,106,106,.12);border-color:rgba(240,106,106,.24);color:#f4b1b1}
+    #releu-player-inventory-modal .rvm-btn-danger:hover:not([disabled]){background:rgba(240,106,106,.2);border-color:rgba(240,106,106,.4);color:#fff}
+    #releu-player-inventory-modal .rvm-btn-accent{background:rgba(148,163,184,.12);border-color:rgba(148,163,184,.28);color:#e5e7eb}
+    #releu-player-inventory-modal .rvm-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:1rem;padding:1.25rem 1.5rem}
+    #releu-player-inventory-modal .rvm-main{display:flex;flex-direction:column;gap:.875rem}
+    #releu-player-inventory-modal .rvm-playerbar{display:flex;align-items:center;gap:.9rem;min-width:0;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:#1a1d24;padding:.9rem 1rem}
+    #releu-player-inventory-modal .rvm-avatar{width:42px;height:42px;border-radius:8px;background:#20242d;border:1px solid rgba(255,255,255,.08);overflow:hidden;flex-shrink:0}
+    #releu-player-inventory-modal .rvm-avatar img{width:100%;height:100%;display:block;image-rendering:pixelated}
+    #releu-player-inventory-modal .rvm-player-meta{min-width:0;flex:1}
+    #releu-player-inventory-modal .rvm-player-name{font-size:.98rem;font-weight:700;line-height:1.15;color:#fff;overflow-wrap:anywhere}
+    #releu-player-inventory-modal .rvm-player-uuid{margin-top:.15rem;max-width:100%;font-size:.7rem;color:#7a7f8e;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.4;overflow-wrap:anywhere;word-break:break-word}
+    #releu-player-inventory-modal .rvm-tags{display:flex;gap:.4rem;min-width:0;flex-wrap:wrap}
+    #releu-player-inventory-modal .rvm-tag{display:inline-flex;align-items:center;gap:.35rem;padding:.24rem .5rem;border-radius:999px;border:1px solid rgba(255,255,255,.08);background:#20242d;font-size:.62rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#d4d8de}
+    #releu-player-inventory-modal .rvm-tag-dot{width:6px;height:6px;border-radius:999px;background:currentColor}
+    #releu-player-inventory-modal .rvm-tag-online{color:#4ade80;border-color:rgba(74,222,128,.22);background:rgba(74,222,128,.1)}
+    #releu-player-inventory-modal .rvm-tag-neutral{color:#cbd5e1}
+    #releu-player-inventory-modal .rvm-stat{min-width:88px;text-align:right;flex-shrink:0}
+    #releu-player-inventory-modal .rvm-stat-label{font-size:.63rem;letter-spacing:.08em;text-transform:uppercase;color:#7a7f8e}
+    #releu-player-inventory-modal .rvm-stat-value{margin-top:.15rem;font-size:.9rem;font-weight:700;color:#fff}
+    #releu-player-inventory-modal .rvm-board{border:1px solid rgba(255,255,255,.08);border-radius:14px;background:#1a1d24;padding:1rem}
+    #releu-player-inventory-modal .rvm-board-meta{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.9rem;font-size:.76rem;color:#8f96a3}
+    #releu-player-inventory-modal .rvm-board-meta strong{color:#fff}
+    #releu-player-inventory-modal .rvm-shell-grid{display:grid;grid-template-columns:84px minmax(0,1fr) 84px;gap:.8rem;align-items:start}
+    #releu-player-inventory-modal .rvm-shell-col{display:flex;flex-direction:column;gap:.35rem}
+    #releu-player-inventory-modal .rvm-section-label{margin-bottom:.15rem;font-size:.62rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#5f6573}
+    #releu-player-inventory-modal .rvm-slot-stack{display:flex;flex-direction:column;gap:.55rem}
+    #releu-player-inventory-modal .rvm-slot-grid{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:.35rem}
+    #releu-player-inventory-modal .rvm-divider{height:1px;background:rgba(255,255,255,.08);margin:.15rem 0}
+    #releu-player-inventory-modal .rvm-slot{display:flex;flex-direction:column;gap:.28rem;min-height:72px;padding:.38rem;border-radius:10px;border:1px solid #2b3642;background:#0f141b;transition:border-color .12s ease,background .12s ease}
+    #releu-player-inventory-modal .rvm-slot-armor,#releu-player-inventory-modal .rvm-slot-offhand{min-height:78px}
+    #releu-player-inventory-modal .rvm-slot.has-item:hover{border-color:rgba(255,255,255,.2)}
+    #releu-player-inventory-modal .rvm-slot.is-selected{border-color:#64748b;background:#1f2937;box-shadow:0 0 0 1px rgba(148,163,184,.14)}
+    #releu-player-inventory-modal .rvm-slot-top{display:flex;align-items:flex-start;justify-content:space-between;gap:.3rem}
+    #releu-player-inventory-modal .rvm-slot-tag{font-size:.56rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#667085}
+    #releu-player-inventory-modal .rvm-slot-clear{border:1px solid rgba(240,106,106,.28);background:rgba(240,106,106,.1);border-radius:4px;padding:.08rem .3rem;font-size:.52rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#f4b1b1}
+    #releu-player-inventory-modal .rvm-slot-clear:hover{border-color:rgba(240,106,106,.45);background:rgba(240,106,106,.18);color:#fff}
+    #releu-player-inventory-modal .rvm-slot-center{position:relative;display:flex;align-items:center;justify-content:center;min-height:32px}
+    #releu-player-inventory-modal .rvm-slot-icon{position:relative;display:grid;place-items:center;width:30px;height:30px}
+    #releu-player-inventory-modal .rvm-slot-icon-empty{opacity:.4}
+    #releu-player-inventory-modal .rvm-slot-icon-fallback{display:grid;place-items:center;width:100%;height:100%;border-radius:6px;background:#20242d;color:#9aa3b2;font-size:.62rem;font-weight:700;letter-spacing:.06em}
+    #releu-player-inventory-modal .rvm-slot-icon-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;image-rendering:pixelated}
+    #releu-player-inventory-modal .rvm-slot-count{position:absolute;right:-2px;bottom:-2px;color:#facc15;font-size:.62rem;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,.85)}
+    #releu-player-inventory-modal .rvm-slot-name{font-size:.63rem;font-weight:700;color:#fff;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
+    #releu-player-inventory-modal .rvm-slot-name.is-empty{color:#667085;font-weight:500;font-style:italic}
+    #releu-player-inventory-modal .rvm-slot-meta{font-size:.55rem;color:#7a7f8e;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
+    #releu-player-inventory-modal .rvm-side{display:flex;flex-direction:column;gap:.875rem}
+    #releu-player-inventory-modal .rvm-card{border:1px solid rgba(255,255,255,.08);border-radius:14px;background:#1a1d24;padding:.95rem 1rem}
+    #releu-player-inventory-modal .rvm-card-title{font-size:.62rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#7a7f8e}
+    #releu-player-inventory-modal .rvm-status{margin-top:.75rem;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:.7rem .8rem;font-size:.8rem;line-height:1.5}
+    #releu-player-inventory-modal .rvm-status-neutral{background:#151a21;color:#cbd5e1}
+    #releu-player-inventory-modal .rvm-status-success{background:#16261f;border-color:rgba(62,207,142,.22);color:#d1fae5}
+    #releu-player-inventory-modal .rvm-status-error{background:#2a1719;border-color:rgba(240,106,106,.22);color:#ffe4e6}
+    #releu-player-inventory-modal .rvm-action-row{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.75rem}
+    #releu-player-inventory-modal .rvm-field-label{display:block;margin-bottom:.32rem;font-size:.6rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#7a7f8e}
+    #releu-player-inventory-modal .rvm-input{width:100%;border:1px solid #2b3642;border-radius:8px;background:#20242d;padding:.55rem .75rem;font-size:.82rem;color:#f8fafc;outline:none}
+    #releu-player-inventory-modal .rvm-input::placeholder{color:#667085}
+    #releu-player-inventory-modal .rvm-input:focus{border-color:#64748b}
+    #releu-player-inventory-modal .rvm-search-row{display:flex;gap:.5rem;margin-top:.75rem}
+    #releu-player-inventory-modal .rvm-search-row .rvm-input{flex:1}
+    #releu-player-inventory-modal .rvm-add-row{display:grid;grid-template-columns:1fr auto;gap:.5rem;align-items:end;margin-top:.75rem}
+    #releu-player-inventory-modal .rvm-selected{display:flex;align-items:center;gap:.55rem;margin-top:.75rem;padding:.65rem .75rem;border:1px solid rgba(148,163,184,.2);border-radius:10px;background:#1d2430;color:#e5e7eb;font-size:.76rem}
+    #releu-player-inventory-modal .rvm-selected-dot{width:6px;height:6px;border-radius:999px;background:#94a3b8;flex-shrink:0}
+    #releu-player-inventory-modal .rvm-catalog{display:flex;flex-direction:column;gap:.35rem;max-height:420px;overflow:auto;margin-top:.75rem;padding-right:.1rem}
+    #releu-player-inventory-modal .rvm-catalog::-webkit-scrollbar{width:6px}
+    #releu-player-inventory-modal .rvm-catalog::-webkit-scrollbar-thumb{background:rgba(148,163,184,.24);border-radius:999px}
+    #releu-player-inventory-modal .rvm-catalog-item{display:flex;align-items:center;gap:.75rem;width:100%;padding:.65rem .75rem;border-radius:10px;border:1px solid rgba(255,255,255,.08);background:#20242d;text-align:left;transition:border-color .12s ease,background .12s ease}
+    #releu-player-inventory-modal .rvm-catalog-item:hover{border-color:rgba(255,255,255,.18);background:#252931}
+    #releu-player-inventory-modal .rvm-catalog-item.is-selected{border-color:#64748b;background:rgba(148,163,184,.12)}
+    #releu-player-inventory-modal .rvm-catalog-copy{min-width:0;flex:1}
+    #releu-player-inventory-modal .rvm-catalog-name{font-size:.8rem;font-weight:700;color:#fff;line-height:1.25}
+    #releu-player-inventory-modal .rvm-catalog-meta{margin-top:.15rem;font-size:.67rem;color:#7a7f8e;line-height:1.35}
+    #releu-player-inventory-modal .rvm-catalog-chip{border:1px solid rgba(255,255,255,.08);border-radius:999px;padding:.22rem .45rem;font-size:.58rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#cbd5e1}
+    #releu-player-inventory-modal .rvm-empty{border:1px dashed rgba(255,255,255,.12);border-radius:10px;padding:1rem;color:#8f96a3;font-size:.8rem;text-align:center}
+    @media (max-width:1180px){#releu-player-inventory-modal .rvm-grid{grid-template-columns:1fr}#releu-player-inventory-modal .rvm-shell-grid{grid-template-columns:74px minmax(0,1fr) 74px}}
+    @media (max-width:880px){#releu-player-inventory-modal .rvm-shell{max-height:calc(100vh - 1rem)}#releu-player-inventory-modal .rvm-header{padding:1rem}#releu-player-inventory-modal .rvm-grid{padding:1rem}#releu-player-inventory-modal .rvm-shell-grid{grid-template-columns:1fr}#releu-player-inventory-modal .rvm-search-row,#releu-player-inventory-modal .rvm-add-row{grid-template-columns:1fr;display:grid}#releu-player-inventory-modal .rvm-slot-grid{grid-template-columns:repeat(3,minmax(0,1fr))}#releu-player-inventory-modal .rvm-slot-col,#releu-player-inventory-modal .rvm-slot-stack{gap:.75rem}}
+    @media (max-width:640px){#releu-player-inventory-modal .rvm-header{flex-direction:column;align-items:stretch}#releu-player-inventory-modal .rvm-header-actions{justify-content:flex-end}#releu-player-inventory-modal .rvm-playerbar{display:grid;grid-template-columns:42px minmax(0,1fr);align-items:start}#releu-player-inventory-modal .rvm-tags,#releu-player-inventory-modal .rvm-stat{grid-column:1 / -1}#releu-player-inventory-modal .rvm-stat{margin-top:.15rem;text-align:left}}
+  </style>
+  <div class="fixed inset-0 z-[120] flex items-center justify-center p-4 rvm-overlay">
+    <div class="rvm-shell">
+      <div class="rvm-header">
+        <div class="rvm-header-main">
+          <div class="rvm-kicker">Player Inventory</div>
+          <div class="rvm-title">${escapeHtml(modal.playerName)}</div>
+          <div class="rvm-header-copy">${inventory ? `${escapeHtml(playerInfo?.uuid ?? "UUID unknown")} - ${playerInfo?.online ? "Online" : "Offline"} - ${inventory.occupiedSlots}/${inventory.totalSlots} occupied` : "Loading inventory snapshot..."}</div>
+        </div>
+        <div class="rvm-header-actions">
+          <button type="button" class="rvm-btn" data-inventory-close>Close</button>
+        </div>
+      </div>
+      <div class="rvm-grid">
+        <div class="rvm-main">
+          <div class="rvm-playerbar">
+            <div class="rvm-avatar"><img src="${escapeHtml(playerAvatar({ uuid: playerInfo?.uuid, name: modal.playerName }))}" alt="${escapeHtml(modal.playerName)}" /></div>
+            <div class="rvm-player-meta">
+              <div class="rvm-player-name">${escapeHtml(modal.playerName)}</div>
+              <div class="rvm-player-uuid">${escapeHtml(playerInfo?.uuid ?? "UUID unknown")}</div>
+            </div>
+            <div class="rvm-tags">
+              <span class="rvm-tag ${playerInfo?.online ? "rvm-tag-online" : "rvm-tag-neutral"}">${playerInfo?.online ? `<span class="rvm-tag-dot"></span>Online` : "Offline"}</span>
+              ${playerInfo?.gamemode ? `<span class="rvm-tag rvm-tag-neutral">${escapeHtml(playerInfo.gamemode)}</span>` : ""}
+            </div>
+            <div class="rvm-stat">
+              <div class="rvm-stat-label">Occupied</div>
+              <div class="rvm-stat-value">${inventory ? `${escapeHtml(inventory.occupiedSlots)} / ${escapeHtml(inventory.totalSlots)}` : "..."}</div>
+            </div>
+          </div>
+          <div class="rvm-board">
+            <div class="rvm-board-meta">
+              <span>${inventory?.source === "live-playerdata" ? "Live snapshot flushed from the running server." : "Saved snapshot from disk. If the player is online, this can lag until the next save."}</span>
+              <span>Selected Hotbar Slot: <strong>${(inventory?.selectedHotbarSlot ?? 0) + 1}</strong></span>
+            </div>
+            ${modal.loading || !inventory ? `<div class="rvm-empty">Loading inventory...</div>` : `
+              <div class="rvm-shell-grid">
+                <div class="rvm-shell-col">
+                  <div class="rvm-section-label">Armor</div>
+                  <div class="rvm-slot-stack">${inventory.armor.map((slot) => inventorySlotMarkup(slot, "armor")).join("")}</div>
+                </div>
+                <div class="rvm-slot-stack">
+                  <div>
+                    <div class="rvm-section-label">Inventory</div>
+                    <div class="rvm-slot-grid">${inventory.main.map((slot) => inventorySlotMarkup(slot, "main")).join("")}</div>
+                  </div>
+                  <div class="rvm-divider"></div>
+                  <div>
+                    <div class="rvm-section-label">Hotbar</div>
+                    <div class="rvm-slot-grid">${inventory.hotbar.map((slot) => inventorySlotMarkup(slot, "hotbar")).join("")}</div>
+                  </div>
+                </div>
+                <div class="rvm-shell-col">
+                  <div class="rvm-section-label">Offhand</div>
+                  <div class="rvm-slot-stack">${inventorySlotMarkup(inventory.offhand, "offhand")}</div>
+                </div>
+              </div>
+            `}
+          </div>
+        </div>
+        <aside class="rvm-side">
+          <div class="rvm-card">
+            <div class="rvm-card-title">Inventory Actions</div>
+            <div class="rvm-status ${statusToneClass}">${escapeHtml(modal.message || "Use the item catalog to add items, or clear individual slots from the inventory view.")}</div>
+            <div class="rvm-action-row">
+              <button type="button" class="rvm-btn" data-inventory-refresh ${modal.busy ? "disabled" : ""}>Refresh</button>
+              <button type="button" class="rvm-btn rvm-btn-danger" data-inventory-clear-all ${modal.busy ? "disabled" : ""}>Clear Inventory</button>
+            </div>
+          </div>
+          <div class="rvm-card">
+            <div class="rvm-card-title">Item Catalog</div>
+            <form class="rvm-search-row" data-inventory-search-form>
+              <input type="text" name="query" value="${escapeHtml(modal.catalogQuery ?? "")}" placeholder="Search items..." class="rvm-input" />
+              <button type="submit" class="rvm-btn">${modal.catalogLoading ? "Searching..." : "Search"}</button>
+            </form>
+            <div class="rvm-add-row">
+              <label>
+                <span class="rvm-field-label">Count</span>
+                <input type="number" min="1" max="9999" value="${escapeHtml(modal.addCount ?? 1)}" data-inventory-count class="rvm-input" />
+              </label>
+              <button type="button" class="rvm-btn rvm-btn-accent" data-inventory-add ${selectedItem ? "" : "disabled"}>${modal.busy ? "Working..." : "Add Item"}</button>
+            </div>
+            <div class="rvm-selected">
+              <span class="rvm-selected-dot"></span>
+              <span>${selectedItem ? `${escapeHtml(selectedItem.displayName)} - ${escapeHtml(selectedItem.id)}` : "Select an item from the catalog results below."}</span>
+            </div>
+            <div class="rvm-catalog">
+              ${catalogResults.length
+                ? catalogResults.map((entry) => {
+                  const selected = modal.selectedItemId === entry.id;
+                  return `<button type="button" class="rvm-catalog-item ${selected ? "is-selected" : ""}" data-inventory-select-item="${escapeHtml(entry.id)}">
+                    ${inventoryItemIconMarkup(entry, entry.displayName)}
+                    <div class="rvm-catalog-copy">
+                      <div class="rvm-catalog-name">${escapeHtml(entry.displayName)}</div>
+                      <div class="rvm-catalog-meta">${escapeHtml(entry.id)} - Stack ${escapeHtml(entry.stackSize)}</div>
+                    </div>
+                    ${entry.maxDurability ? `<span class="rvm-catalog-chip">Dur ${escapeHtml(entry.maxDurability)}</span>` : ""}
+                  </button>`;
+                }).join("")
+                : `<div class="rvm-empty">No catalog items matched that search.</div>`}
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderPlayerRow(player) {
   const flags = [
     player.online ? `<span class="ppl-flag ppl-flag-online">Online</span>` : "",
@@ -1910,7 +2542,7 @@ function renderPlayerRow(player) {
     player.banned ? `<span class="ppl-flag ppl-flag-banned">Banned</span>` : "",
   ].filter(Boolean).join("");
   const toggleBan = player.banned ? ["pardon", "Pardon"] : ["ban", "Ban"];
-  return `<tr data-player-name="${escapeHtml(player.name)}"><td><span class="ppl-dot"><svg viewBox="0 0 8 8" fill="${player.online ? "rgb(34,197,94)" : "rgb(100,116,139)"}" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg></span></td><td><div class="ppl-player-cell"><div class="ppl-avatar"><img src="${playerAvatar(player)}" alt="${escapeHtml(player.name)}" width="32" height="32" style="border-radius:6px"></div><div><div class="ppl-player-name">${escapeHtml(player.name)}</div><div class="ppl-player-uuid">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td><div class="ppl-flags">${flags || `<span class="ppl-flag">Seen</span>`}</div></td><td><span class="ppl-lastseen">${escapeHtml(formatDate(player.lastSeenAt))}</span></td><td><div class="ppl-actions"><input type="text" class="ppl-action-input" placeholder="Reason"><select class="ppl-select">${["survival", "creative", "adventure", "spectator"].map((mode) => `<option value="${mode}" ${player.gamemode === mode ? "selected" : ""}>${mode}</option>`).join("")}</select><button class="ppl-action-btn" type="button" data-player-action="gamemode">Gamemode</button><button class="ppl-action-btn" type="button" data-player-action="kick">Kick</button><button class="ppl-action-btn danger" type="button" data-player-action="${toggleBan[0]}">${toggleBan[1]}</button><button class="ppl-action-btn" type="button" data-player-action="${player.whitelisted ? "whitelist-remove" : "whitelist-add"}">${player.whitelisted ? "Unwhitelist" : "Whitelist"}</button><button class="ppl-action-btn" type="button" data-player-action="${player.op ? "deop" : "op"}">${player.op ? "Deop" : "OP"}</button></div></td></tr>`;
+  return `<tr data-player-name="${escapeHtml(player.name)}"><td><span class="ppl-dot"><svg viewBox="0 0 8 8" fill="${player.online ? "rgb(34,197,94)" : "rgb(100,116,139)"}" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg></span></td><td><div class="ppl-player-cell"><div class="ppl-avatar"><img src="${playerAvatar(player)}" alt="${escapeHtml(player.name)}" width="32" height="32" style="border-radius:6px"></div><div><div class="ppl-player-name">${escapeHtml(player.name)}</div><div class="ppl-player-uuid">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td><div class="ppl-flags">${flags || `<span class="ppl-flag">Seen</span>`}</div></td><td><span class="ppl-lastseen">${escapeHtml(formatDate(player.lastSeenAt))}</span></td><td><div class="ppl-actions"><input type="text" class="ppl-action-input" placeholder="Reason"><select class="ppl-select">${["survival", "creative", "adventure", "spectator"].map((mode) => `<option value="${mode}" ${player.gamemode === mode ? "selected" : ""}>${mode}</option>`).join("")}</select><button class="ppl-action-btn" type="button" data-player-inventory>Inventory</button><button class="ppl-action-btn" type="button" data-player-action="gamemode">Gamemode</button><button class="ppl-action-btn" type="button" data-player-action="kick">Kick</button><button class="ppl-action-btn danger" type="button" data-player-action="${toggleBan[0]}">${toggleBan[1]}</button><button class="ppl-action-btn" type="button" data-player-action="${player.whitelisted ? "whitelist-remove" : "whitelist-add"}">${player.whitelisted ? "Unwhitelist" : "Whitelist"}</button><button class="ppl-action-btn" type="button" data-player-action="${player.op ? "deop" : "op"}">${player.op ? "Deop" : "OP"}</button></div></td></tr>`;
 }
 
 function patchPlayersPage() {
@@ -1949,6 +2581,21 @@ function patchPlayersPage() {
       }
     });
   });
+  tbody?.querySelectorAll("[data-player-inventory]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = button.closest("tr");
+      if (!row?.dataset.playerName) return;
+      try {
+        setButtonBusy(button, true, "Opening...");
+        await openPlayerInventoryModal(row.dataset.playerName);
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+  renderPlayerInventoryModal();
 }
 
 function patchWorldsPage() {
@@ -3166,26 +3813,98 @@ function patchMiscPage() {
   const misc = server.misc ?? {};
   const form = document.querySelector("[data-releu-misc-form]");
   if (!form) return;
-
-  const setValue = (name, enabled) => {
+  const statusNode = form.querySelector("[data-misc-autosave-status]");
+  const boolProp = (key, fallback = false) =>
+    String(properties[key] ?? String(fallback)).toLowerCase() === "true";
+  const numberProp = (key, fallback = 0) => {
+    const value = Number.parseInt(String(properties[key] ?? fallback), 10);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const paintStatus = (message, tone = "neutral") => {
+    APP_STATE.miscSaveState = { message, tone };
+    if (!statusNode) return;
+    statusNode.textContent = message;
+    statusNode.style.color =
+      tone === "error"
+        ? "#fca5a5"
+        : tone === "success"
+          ? "#86efac"
+          : tone === "saving"
+            ? "#93c5fd"
+            : "#94a3b8";
+  };
+  const syncSelect = (name, enabled) => {
     const input = form.elements[name];
-    if (!input) return;
+    if (!input || input.dataset.releuDirty === "true" || document.activeElement === input) return;
     input.value = enabled ? "true" : "false";
   };
+  const syncNumber = (name, value) => {
+    const input = form.elements[name];
+    if (!input || input.dataset.releuDirty === "true" || document.activeElement === input) return;
+    input.value = String(value);
+  };
 
-  setValue("allowCrackedClients", String(properties["online-mode"] ?? "true").toLowerCase() !== "true");
-  setValue("whitelist", String(properties["white-list"] ?? "false").toLowerCase() === "true");
-  setValue("commandBlocks", String(properties["enable-command-block"] ?? "false").toLowerCase() === "true");
-  setValue("pvp", String(properties.pvp ?? "true").toLowerCase() === "true");
-  setValue("allowFlight", String(properties["allow-flight"] ?? "false").toLowerCase() === "true");
-  setValue("keepInventory", Boolean(misc.keepInventory));
-  setValue("sharedHealth", Boolean(misc.sharedHealth));
+  syncSelect("allowCrackedClients", !boolProp("online-mode", true));
+  syncSelect("whitelist", boolProp("white-list", false));
+  syncSelect("showPlayerCount", boolProp("enable-status", true));
+  syncSelect("hideOnlinePlayers", boolProp("hide-online-players", false));
+  syncSelect("allowProxyConnections", !boolProp("prevent-proxy-connections", false));
+  syncSelect("commandBlocks", boolProp("enable-command-block", false));
+  syncSelect("pauseWhenEmpty", numberProp("pause-when-empty-seconds", -1) > 0);
+  syncSelect("pvp", boolProp("pvp", true));
+  syncSelect("allowFlight", boolProp("allow-flight", false));
+  syncSelect("keepInventory", Boolean(misc.keepInventory));
+  syncSelect("sharedHealth", Boolean(misc.sharedHealth));
+  syncSelect("hardcore", boolProp("hardcore", false));
+  syncSelect("forceGamemode", boolProp("force-gamemode", false));
+  syncSelect("generateStructures", boolProp("generate-structures", true));
+  syncSelect("logPlayerIPs", boolProp("log-ips", true));
+  syncSelect("allowNether", boolProp("allow-nether", true));
+  syncSelect("allowEnd", boolProp("allow-end", true));
+  syncNumber("maxPlayers", numberProp("max-players", 100));
+  syncNumber("playerIdleTimeout", numberProp("player-idle-timeout", 0));
+  syncNumber("spawnProtection", numberProp("spawn-protection", 0));
+
+  paintStatus(
+    APP_STATE.miscSaveState.message ||
+      "Changes save automatically. Releu also checks server.properties for outside edits every second.",
+    APP_STATE.miscSaveState.tone || "neutral",
+  );
 
   if (form.dataset.releuBound === "true") return;
   form.dataset.releuBound = "true";
+
+  const scheduleSubmit = (delay = 180) => {
+    clearTimeout(APP_STATE.miscSaveTimer);
+    APP_STATE.miscSaveTimer = window.setTimeout(() => form.requestSubmit(), delay);
+  };
+  const markDirty = (input) => {
+    if (!input?.name) return;
+    input.dataset.releuDirty = "true";
+  };
+  const wireAutosave = (input) => {
+    if (!input || input.dataset.releuAutosaveBound === "true") return;
+    input.dataset.releuAutosaveBound = "true";
+    const handleDirtyInput = () => {
+      markDirty(input);
+      if (form.dataset.releuSaving === "true") {
+        form.dataset.miscResubmit = "true";
+        paintStatus("Saving the latest change...", "saving");
+        return;
+      }
+      paintStatus("Saving changes...", "saving");
+      scheduleSubmit(input.type === "number" ? 500 : 180);
+    };
+    input.addEventListener("input", handleDirtyInput);
+    input.addEventListener("change", handleDirtyInput);
+  };
+
+  Array.from(form.querySelectorAll("select, input")).forEach(wireAutosave);
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const submitButton = form.querySelector('button[type="submit"]');
+    if (form.dataset.releuSaving === "true") return;
+
     try {
       const currentKeepInventory = Boolean(activeServer()?.misc?.keepInventory);
       const nextKeepInventory = form.elements.keepInventory.value === "true";
@@ -3194,30 +3913,55 @@ function patchMiscPage() {
           "Warning: changing Keep Inventory can immediately affect what players are wearing or holding in their inventory. Do you want to continue?",
         );
         if (!proceed) {
+          form.elements.keepInventory.value = currentKeepInventory ? "true" : "false";
+          form.elements.keepInventory.dataset.releuDirty = "false";
+          paintStatus("Keep Inventory change cancelled.", "neutral");
           return;
         }
       }
-      setButtonBusy(submitButton, true, submitButton?.dataset.busyLabel ?? "Saving...");
+
+      form.dataset.releuSaving = "true";
+      paintStatus("Saving changes...", "saving");
       await api(`/api/servers/${encodeURIComponent(activeServerId())}/settings/misc`, {
         method: "POST",
         body: {
           allowCrackedClients: form.elements.allowCrackedClients.value === "true",
           whitelist: form.elements.whitelist.value === "true",
+          showPlayerCount: form.elements.showPlayerCount.value === "true",
+          hideOnlinePlayers: form.elements.hideOnlinePlayers.value === "true",
+          allowProxyConnections: form.elements.allowProxyConnections.value === "true",
+          maxPlayers: Number.parseInt(form.elements.maxPlayers.value || "100", 10) || 100,
           commandBlocks: form.elements.commandBlocks.value === "true",
+          playerIdleTimeout: Number.parseInt(form.elements.playerIdleTimeout.value || "0", 10) || 0,
+          spawnProtection: Number.parseInt(form.elements.spawnProtection.value || "0", 10) || 0,
+          pauseWhenEmpty: form.elements.pauseWhenEmpty.value === "true",
           pvp: form.elements.pvp.value === "true",
           allowFlight: form.elements.allowFlight.value === "true",
           keepInventory: form.elements.keepInventory.value === "true",
           sharedHealth: form.elements.sharedHealth.value === "true",
+          hardcore: form.elements.hardcore.value === "true",
+          forceGamemode: form.elements.forceGamemode.value === "true",
+          generateStructures: form.elements.generateStructures.value === "true",
+          logPlayerIPs: form.elements.logPlayerIPs.value === "true",
+          allowNether: form.elements.allowNether.value === "true",
+          allowEnd: form.elements.allowEnd.value === "true",
         },
       });
       await refreshState(activeServerId());
-      patchMiscPage();
-      showStatus("Misc settings saved.", "success");
-      window.setTimeout(() => clearStatus(), 1400);
+      Array.from(form.querySelectorAll("select, input")).forEach((input) => {
+        input.dataset.releuDirty = "false";
+      });
+      paintStatus(`Saved automatically at ${new Date().toLocaleTimeString()}.`, "success");
     } catch (error) {
+      paintStatus(error instanceof Error ? error.message : "Could not save misc settings.", "error");
       showError(error);
     } finally {
-      setButtonBusy(submitButton, false);
+      form.dataset.releuSaving = "false";
+      if (form.dataset.miscResubmit === "true") {
+        form.dataset.miscResubmit = "false";
+        paintStatus("Saving changes...", "saving");
+        scheduleSubmit(0);
+      }
     }
   });
 }
@@ -3252,6 +3996,7 @@ function patchSettingsPage() {
 
   const profileNameInput = document.querySelector("#form\\.name");
   const profileDescriptionInput = document.querySelector("#form\\.description");
+  const liveMotd = String(server.server?.properties?.motd ?? "").trim();
   if (profileNameInput && document.activeElement !== profileNameInput && profileNameInput.dataset.releuDirty !== "true") {
     profileNameInput.value = server.name ?? "";
   }
@@ -3260,7 +4005,7 @@ function patchSettingsPage() {
     document.activeElement !== profileDescriptionInput &&
     profileDescriptionInput.dataset.releuDirty !== "true"
   ) {
-    profileDescriptionInput.value = server.description ?? "";
+    profileDescriptionInput.value = liveMotd || server.description || "";
   }
 
   const profileField =
@@ -3290,7 +4035,7 @@ function patchSettingsPage() {
   if (profileStatus) {
     paintProfileStatus(
       APP_STATE.profileSaveState.message ||
-        "Releu server name and description save automatically. Minecraft's multiplayer list name is chosen on the client. The server itself controls its MOTD and server icon.",
+        "Releu server name saves automatically. Server Description also syncs to the Minecraft MOTD. Minecraft's multiplayer list name is still chosen on the client.",
       APP_STATE.profileSaveState.tone || "neutral",
     );
   }
@@ -3354,116 +4099,7 @@ function patchSettingsPage() {
     if (label === "public address") value.textContent = getPublicAddress(state, server) ?? "Run Server To Get Address";
     if (label === "tunnel target") value.textContent = state.playit?.recommendedTunnelTarget ?? `127.0.0.1:${server.server?.properties?.["server-port"] ?? 25565}`;
   });
-  let propertiesSection = document.querySelector("[data-releu-server-properties]");
-  if (!propertiesSection) {
-    propertiesSection = document.createElement("section");
-    propertiesSection.className = "fi-section fi-section-has-header mt-8";
-    propertiesSection.dataset.releuServerProperties = "true";
-    const pageContent = document.querySelector(".fi-page-content");
-    const playitSection = [...(pageContent?.querySelectorAll(".fi-section") ?? [])].find((section) =>
-      /playit agent/i.test(section.textContent ?? ""),
-    );
-    if (playitSection?.parentNode) {
-      playitSection.parentNode.insertBefore(propertiesSection, playitSection);
-    } else {
-      pageContent?.append(propertiesSection);
-    }
-  }
-  propertiesSection.innerHTML = `
-    <header class="fi-section-header">
-      <div class="fi-section-header-text-ctn">
-        <h2 class="fi-section-header-heading">Server Properties</h2>
-        <p class="fi-section-header-description">Core Minecraft server properties.</p>
-      </div>
-    </header>
-    <div class="fi-section-content-ctn">
-      <div class="fi-section-content">
-        <form data-releu-server-properties-form class="grid gap-6 md:grid-cols-2">
-          <label class="block">
-            <span class="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">MOTD</span>
-            <input class="fi-input" name="motd" type="text" value="${escapeHtml(properties.motd ?? "")}">
-          </label>
-          <label class="block">
-            <span class="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">Max Players</span>
-            <input class="fi-input" name="max-players" type="number" min="1" value="${escapeHtml(properties["max-players"] ?? "20")}">
-          </label>
-          <label class="block">
-            <span class="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">Default Gamemode</span>
-            <select class="fi-input" name="gamemode">
-              ${["survival", "creative", "adventure", "spectator"].map((value) => `<option value="${escapeHtml(value)}" ${String(properties.gamemode ?? "survival").toLowerCase() === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
-            </select>
-          </label>
-          <label class="block">
-            <span class="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">Difficulty</span>
-            <select class="fi-input" name="difficulty">
-              ${["peaceful", "easy", "normal", "hard"].map((value) => `<option value="${escapeHtml(value)}" ${String(properties.difficulty ?? "normal").toLowerCase() === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}
-            </select>
-          </label>
-          <label class="block">
-            <span class="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">View Distance</span>
-            <input class="fi-input" name="view-distance" type="number" min="2" value="${escapeHtml(properties["view-distance"] ?? "10")}">
-          </label>
-          <label class="block">
-            <span class="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">Simulation Distance</span>
-            <input class="fi-input" name="simulation-distance" type="number" min="2" value="${escapeHtml(properties["simulation-distance"] ?? "10")}">
-          </label>
-          <label class="block">
-            <span class="mb-2 block text-xs uppercase tracking-[0.16em] text-slate-500">Spawn Protection</span>
-            <input class="fi-input" name="spawn-protection" type="number" min="0" value="${escapeHtml(properties["spawn-protection"] ?? "0")}">
-          </label>
-          <div class="md:col-span-2 grid gap-4 md:grid-cols-3 xl:grid-cols-4">
-            ${[
-              ["force-gamemode", "Force Gamemode", boolProp("force-gamemode", false)],
-              ["hardcore", "Hardcore", boolProp("hardcore", false)],
-            ].map(([key, label, checked]) => `
-              <label class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-4 py-4 text-sm text-slate-300">
-                <span class="flex items-center justify-between gap-3">
-                  <span>${escapeHtml(label)}</span>
-                  <input type="checkbox" name="${escapeHtml(key)}" ${checked ? "checked" : ""}>
-                </span>
-              </label>`).join("")}
-          </div>
-          <div class="md:col-span-2 flex items-center justify-between gap-4 rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4">
-            <div>
-              <div class="font-semibold text-slate-100">Apply changes to this server</div>
-              <p class="mt-1 text-xs text-slate-400">These values write directly to <span class="font-mono">server.properties</span>.</p>
-            </div>
-            <button type="submit" class="fi-btn fi-size-md fi-ac-btn-action" data-busy-label="Saving...">Save Properties</button>
-          </div>
-        </form>
-      </div>
-    </div>`;
-  const propertiesForm = propertiesSection.querySelector("[data-releu-server-properties-form]");
-  if (propertiesForm && !propertiesForm.dataset.releuBound) propertiesForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const submitButton = form.querySelector('button[type="submit"]');
-    try {
-      setButtonBusy(submitButton, true, submitButton?.dataset.busyLabel ?? "Saving...");
-      await api(`/api/servers/${encodeURIComponent(serverId)}/settings/server-properties`, {
-        method: "POST",
-        body: {
-          motd: form.elements.motd.value,
-          "max-players": form.elements["max-players"].value,
-          gamemode: form.elements.gamemode.value,
-          difficulty: form.elements.difficulty.value,
-          "view-distance": form.elements["view-distance"].value,
-          "simulation-distance": form.elements["simulation-distance"].value,
-          "spawn-protection": form.elements["spawn-protection"].value,
-          "force-gamemode": form.elements["force-gamemode"].checked,
-          hardcore: form.elements.hardcore.checked,
-        },
-      });
-      await refreshState(serverId);
-      patchSettingsPage();
-      showStatus("Server properties saved.", "success");
-      window.setTimeout(() => clearStatus(), 1400);
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(submitButton, false);
-    }
-  }), propertiesForm && (propertiesForm.dataset.releuBound = "true");
+  document.querySelector("[data-releu-server-properties]")?.remove();
   const iconPreview = document.querySelector('img[alt="icon"]');
   if (iconPreview) {
     iconPreview.src = server.iconUrl ?? serverPlaceholderDataUrl(server.name);
@@ -3542,7 +4178,7 @@ function patchSettingsPage() {
     document.querySelector(".fi-page-content")?.append(cloudSection);
   }
   const cloud = APP_STATE.cloudBackup.status ?? {};
-  const cloudProvider = cloud.provider ?? state.cloudBackupSettings?.provider ?? "supabase";
+  const cloudProvider = cloud.provider ?? state.cloudBackupSettings?.provider ?? "tailscale-ssh";
   const usingTailscaleCloud = cloudProvider === "tailscale-ssh";
   const uploadLimitBytes =
     Number(cloud.uploadLimitBytes ?? (state.cloudBackupSettings?.uploadLimitMb ?? 50) * 1024 * 1024) ||
@@ -3568,22 +4204,51 @@ function patchSettingsPage() {
             <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Device Label</span>
             <input class="fi-input" data-releu-cloud-device-label type="text" value="${escapeHtml(cloud.deviceLabel ?? state.cloudBackupSettings?.deviceLabel ?? "")}" placeholder="My desktop PC">
           </label>
-          <label style="display:grid;gap:.5rem;">
-            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Restore Key</span>
-            <input class="fi-input" type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first">
-          </label>
+          ${usingTailscaleCloud ? `
+            <label style="display:grid;gap:.5rem;">
+              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Cloud Username</span>
+              <input class="fi-input" data-releu-cloud-account-username type="text" value="${escapeHtml(cloud.accountUsername ?? state.cloudBackupSettings?.accountUsername ?? "")}" placeholder="alex">
+            </label>
+            <label style="display:grid;gap:.5rem;">
+              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Cloud Password</span>
+              <input class="fi-input" data-releu-cloud-account-password type="password" value="" placeholder="Log in to backup">
+            </label>
+            <label style="display:grid;gap:.5rem;">
+              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">My Backup Key</span>
+              <input class="fi-input" type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Register or log in first">
+            </label>
+            <label style="display:grid;gap:.5rem;">
+              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Shared Backup Key (Optional)</span>
+              <input class="fi-input" data-releu-cloud-target-restore-key type="text" value="${escapeHtml(cloud.targetRestoreKey ?? state.cloudBackupSettings?.targetRestoreKey ?? "")}" placeholder="Enter another user's key to upload or restore their backup space">
+            </label>`
+            : `
+            <label style="display:grid;gap:.5rem;">
+              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Restore Key</span>
+              <input class="fi-input" type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first">
+            </label>`}
           <div style="display:grid;gap:.65rem;" class="text-xs text-slate-400">
             <div>${usingTailscaleCloud ? "Connection" : "Function"}: <span class="text-slate-200">${cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready"}</span></div>
+            ${usingTailscaleCloud ? `<div>Login: <span class="text-slate-200">${escapeHtml(cloud.loggedIn ? `Logged in as ${cloud.accountUsername || "account"}` : "Not logged in")}</span></div>` : ""}
             <div>Upload limit: <span class="text-slate-200">${escapeHtml(uploadLimitLabel)}</span></div>
             <div>Cloud used: <span class="text-slate-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
             <div>Saved backups: <span class="text-slate-200">${escapeHtml(String(cloud.backupsCount ?? 0))}</span></div>
+            ${usingTailscaleCloud && cloud.usingSharedRestoreKey ? `<div>Target key: <span class="text-slate-200">Shared backup space</span></div>` : ""}
+            ${cloud.authError ? `<div style="color:#fca5a5;">${escapeHtml(cloud.authError)}</div>` : ""}
             ${cloud.functionError ? `<div style="color:#fca5a5;">${escapeHtml(cloud.functionError)}</div>` : `<div>Latest backup: <span class="text-slate-200">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>`}
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:.65rem;">
             <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-save>Save Settings</button>
-            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-issue>${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
-            ${!cloud.restoreKeyPresent ? "" : `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>`}
-            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled || !cloud.restoreKeyPresent ? "disabled" : ""}>Backup To Cloud Now</button>
+            ${usingTailscaleCloud
+              ? `
+                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-register>Register</button>
+                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-login>Log In</button>
+                ${cloud.loggedIn ? `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-logout>Log Out</button>` : ""}
+                ${cloud.loggedIn ? `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>` : ""}
+                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled || !cloud.loggedIn ? "disabled" : ""}>Backup To Cloud Now</button>`
+              : `
+                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-issue>${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
+                ${!cloud.restoreKeyPresent ? "" : `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>`}
+                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled || !cloud.restoreKeyPresent ? "disabled" : ""}>Backup To Cloud Now</button>`}
             <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-refresh>Refresh Status</button>
           </div>
         </div>
@@ -3614,7 +4279,13 @@ function patchSettingsPage() {
     </div>`; 
   const cloudEnabled = cloudSection.querySelector("[data-releu-cloud-enabled]");
   const cloudDeviceLabel = cloudSection.querySelector("[data-releu-cloud-device-label]");
+  const cloudAccountUsername = cloudSection.querySelector("[data-releu-cloud-account-username]");
+  const cloudAccountPassword = cloudSection.querySelector("[data-releu-cloud-account-password]");
+  const cloudTargetRestoreKey = cloudSection.querySelector("[data-releu-cloud-target-restore-key]");
   const saveCloudButton = cloudSection.querySelector("[data-releu-cloud-save]");
+  const registerCloudButton = cloudSection.querySelector("[data-releu-cloud-register]");
+  const loginCloudButton = cloudSection.querySelector("[data-releu-cloud-login]");
+  const logoutCloudButton = cloudSection.querySelector("[data-releu-cloud-logout]");
   const issueCloudButton = cloudSection.querySelector("[data-releu-cloud-issue]");
   const rotateCloudButton = cloudSection.querySelector("[data-releu-cloud-rotate]");
   const uploadCloudButton = cloudSection.querySelector("[data-releu-cloud-upload]");
@@ -3628,6 +4299,7 @@ function patchSettingsPage() {
           enabled: Boolean(cloudEnabled?.checked),
           provider: cloudProvider,
           deviceLabel: cloudDeviceLabel?.value ?? "",
+          targetRestoreKey: cloudTargetRestoreKey?.value ?? "",
         },
       });
       APP_STATE.state = payload.state ?? APP_STATE.state;
@@ -3641,6 +4313,68 @@ function patchSettingsPage() {
       setButtonBusy(saveCloudButton, false);
     }
   }), saveCloudButton.dataset.releuBound = "true";
+  if (registerCloudButton && !registerCloudButton.dataset.releuBound) registerCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(registerCloudButton, true, "Registering...");
+      const payload = await api("/api/cloud-backup/register", {
+        method: "POST",
+        body: {
+          username: cloudAccountUsername?.value ?? "",
+          password: cloudAccountPassword?.value ?? "",
+          deviceLabel: cloudDeviceLabel?.value ?? "",
+        },
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      if (cloudAccountPassword) cloudAccountPassword.value = "";
+      patchSettingsPage();
+      showStatus("Cloud backup account created.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(registerCloudButton, false);
+    }
+  }), registerCloudButton.dataset.releuBound = "true";
+  if (loginCloudButton && !loginCloudButton.dataset.releuBound) loginCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(loginCloudButton, true, "Logging In...");
+      const payload = await api("/api/cloud-backup/login", {
+        method: "POST",
+        body: {
+          username: cloudAccountUsername?.value ?? "",
+          password: cloudAccountPassword?.value ?? "",
+          deviceLabel: cloudDeviceLabel?.value ?? "",
+        },
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      if (cloudAccountPassword) cloudAccountPassword.value = "";
+      patchSettingsPage();
+      showStatus("Cloud backup login saved.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(loginCloudButton, false);
+    }
+  }), loginCloudButton.dataset.releuBound = "true";
+  if (logoutCloudButton && !logoutCloudButton.dataset.releuBound) logoutCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(logoutCloudButton, true, "Logging Out...");
+      const payload = await api("/api/cloud-backup/logout", { method: "POST" });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      if (cloudAccountPassword) cloudAccountPassword.value = "";
+      patchSettingsPage();
+      showStatus("Cloud backup login removed.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(logoutCloudButton, false);
+    }
+  }), logoutCloudButton.dataset.releuBound = "true";
   if (issueCloudButton && !issueCloudButton.dataset.releuBound) issueCloudButton.addEventListener("click", async () => {
     try {
       setButtonBusy(issueCloudButton, true, "Generating...");
@@ -3752,110 +4486,7 @@ function patchSettingsPage() {
       }
     });
   });
-  let uiSection = document.querySelector("[data-releu-ui-section]");
-  if (!uiSection) {
-    uiSection = document.createElement("section");
-    uiSection.className = "fi-section mt-6";
-    uiSection.dataset.releuUiSection = "true";
-    document.querySelector(".fi-page-content")?.append(uiSection);
-  }
-  const uiSettings = currentUiSettings();
-  const currentVariant =
-    String(uiSettings.variant ?? "").trim().toLowerCase() === "pelican-blueprint"
-      ? "pelican-blueprint"
-      : "classic";
-  uiSection.innerHTML = `
-    <header class="fi-section-header">
-      <div>
-        <h2 class="fi-section-header-heading">Interface Mode</h2>
-        <p class="fi-section-header-description">Switch the default Releu shell for this PC. The new shell is based on Pelican and still uses the same backend.</p>
-      </div>
-    </header>
-    <div class="fi-section-content-ctn">
-      <div class="fi-section-content" style="display:grid;gap:1rem;">
-        ${[
-          {
-            id: "classic",
-            title: "Legacy UI",
-            detail:
-              "The original Releu layout. Most battle-tested, denser, and still the default when you have not chosen a UI yet.",
-            pros: [
-              "Most complete and battle-tested control surface",
-              "Quicker access to dense controls",
-            ],
-            cons: [
-              "Heavier look",
-              "Less like a hosted game-panel shell",
-            ],
-          },
-          {
-            id: "pelican-blueprint",
-            title: "New UI",
-            detail:
-              "A Pelican-based shell wired to Releu. Cleaner hosted-panel structure, but newer bridge logic underneath.",
-            pros: [
-              "Cleaner layout and navigation",
-              "Better hosted-panel style browsing",
-            ],
-            cons: [
-              "Newer shell",
-              "Advanced flows can need more verification",
-            ],
-          },
-        ]
-          .map(
-            (entry) => `
-          <div class="rounded-lg border ${currentVariant === entry.id ? "border-white" : "border-[#2b3642]"} bg-[#0f141b] px-5 py-4 text-sm text-slate-300" style="display:grid;gap:1rem;">
-            <div style="display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;flex-wrap:wrap;">
-              <div>
-                <div class="font-semibold text-slate-100">${escapeHtml(entry.title)}</div>
-                <p class="mt-1 text-xs text-slate-400">${escapeHtml(entry.detail)}</p>
-              </div>
-              <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-ui-variant="${escapeHtml(entry.id)}">${currentVariant === entry.id ? "Keep This UI" : `Use ${escapeHtml(entry.title)}`}</button>
-            </div>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;">
-              <div class="rounded-lg border border-[#2b3642] bg-black/30 px-4 py-4">
-                <div class="text-xs uppercase tracking-[0.16em] text-slate-500">Pros</div>
-                <div class="mt-3" style="display:grid;gap:.45rem;">${entry.pros.map((point) => `<div>${escapeHtml(point)}</div>`).join("")}</div>
-              </div>
-              <div class="rounded-lg border border-[#2b3642] bg-black/30 px-4 py-4">
-                <div class="text-xs uppercase tracking-[0.16em] text-slate-500">Cons</div>
-                <div class="mt-3" style="display:grid;gap:.45rem;">${entry.cons.map((point) => `<div>${escapeHtml(point)}</div>`).join("")}</div>
-              </div>
-            </div>
-          </div>`,
-          )
-          .join("")}
-      </div>
-    </div>`;
-  uiSection.querySelectorAll("[data-releu-ui-variant]").forEach((button) => {
-    if (button.dataset.releuBound === "true") return;
-    button.dataset.releuBound = "true";
-    button.addEventListener("click", async () => {
-      try {
-        setButtonBusy(button, true, "Saving...");
-        const variant = button.dataset.releuUiVariant === "pelican-blueprint" ? "pelican-blueprint" : "classic";
-        const payload = await api("/api/settings/ui", {
-          method: "POST",
-          body: {
-            variant,
-            hasChosenVariant: true,
-          },
-        });
-        APP_STATE.state = payload.state ?? APP_STATE.state;
-        if (variant === "classic") {
-          window.location.replace(buildLegacyUiUrl(serverId));
-          return;
-        }
-        patchSettingsPage();
-        showStatus("Saved preferred Releu UI.", "success");
-      } catch (error) {
-        showError(error);
-      } finally {
-        setButtonBusy(button, false);
-      }
-    });
-  });
+  document.querySelector("[data-releu-ui-section]")?.remove();
   let devSection = document.querySelector("[data-releu-dev-section]");
   if (!devSection) {
     devSection = document.createElement("section");
@@ -3927,6 +4558,7 @@ async function boot() {
   finishShellEnter();
   clearStatus();
   if (PAGE !== "servers.html" && PAGE !== "create-server.html") {
+    const refreshIntervalMs = PAGE === "misc.html" ? 1000 : 4000;
     setInterval(async () => {
       try {
         await refreshState(activeServerId());
@@ -3935,7 +4567,7 @@ async function boot() {
       } catch (error) {
         console.error(error);
       }
-    }, 4000);
+    }, refreshIntervalMs);
   }
 }
 
