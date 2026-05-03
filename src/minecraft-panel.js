@@ -4,9 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import zlib from "node:zlib";
+import { promisify } from "node:util";
 
 import archiver from "archiver";
 import extractZip from "extract-zip";
+import minecraftData from "minecraft-data";
+import nbt from "prismarine-nbt";
 
 import {
   currentTimestamp,
@@ -65,11 +69,74 @@ import {
   invokeSupabaseEdgeFunction,
 } from "./supabase.js";
 import {
+  authenticateTailscaleCloudAccount,
   checkTailscaleBackupTarget,
   downloadRollingRemoteBackup,
+  loginTailscaleCloudAccount,
+  logoutTailscaleCloudAccount,
   readRemoteBackupMetadata,
+  registerTailscaleCloudAccount,
+  rotateTailscaleCloudRestoreKey,
   uploadRollingRemoteBackup,
 } from "./tailscale-cloud.js";
+
+const gzip = promisify(zlib.gzip);
+const defaultInventoryTextureUrl =
+  "https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.21.8/assets/minecraft/textures/gui/container/inventory.png";
+const defaultItemCatalogVersion = "1.21.8";
+const defaultInventoryCatalogSuggestions = [
+  "stone",
+  "dirt",
+  "oak_planks",
+  "cobblestone",
+  "diamond",
+  "diamond_sword",
+  "diamond_pickaxe",
+  "netherite_sword",
+  "bread",
+  "golden_apple",
+  "torch",
+  "ender_pearl",
+  "elytra",
+  "firework_rocket",
+  "totem_of_undying",
+  "obsidian",
+  "iron_ingot",
+  "redstone",
+  "hopper",
+  "shulker_box",
+];
+const armorInventorySlots = [
+  { slotId: 103, key: "armor.head", label: "Head", commandSlot: "armor.head" },
+  { slotId: 102, key: "armor.chest", label: "Chest", commandSlot: "armor.chest" },
+  { slotId: 101, key: "armor.legs", label: "Legs", commandSlot: "armor.legs" },
+  { slotId: 100, key: "armor.feet", label: "Feet", commandSlot: "armor.feet" },
+];
+const offhandInventorySlot = {
+  slotId: 150,
+  key: "weapon.offhand",
+  label: "Offhand",
+  commandSlot: "weapon.offhand",
+};
+const hotbarInventorySlots = Array.from({ length: 9 }, (_, index) => ({
+  slotId: index,
+  key: `hotbar.${index}`,
+  label: `Hotbar ${index + 1}`,
+  commandSlot: `hotbar.${index}`,
+}));
+const mainInventorySlots = Array.from({ length: 27 }, (_, index) => ({
+  slotId: index + 9,
+  key: `inventory.${index}`,
+  label: `Inventory ${index + 1}`,
+  commandSlot: `inventory.${index}`,
+}));
+const playerInventorySlots = [
+  ...armorInventorySlots,
+  offhandInventorySlot,
+  ...mainInventorySlots,
+  ...hotbarInventorySlots,
+];
+const inventorySlotById = new Map(playerInventorySlots.map((slot) => [slot.slotId, slot]));
 
 async function ensureJsonFile(targetPath, defaultValue) {
   if (await fileExists(targetPath)) {
@@ -120,6 +187,167 @@ function hasCompatibleSharedHealthMod(context) {
     const displayName = String(entry.displayName ?? entry.name ?? "").trim().toLowerCase();
     return slug === "sharedhealth" || slug === "shared-health" || displayName === "shared health";
   });
+}
+
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeInventorySlotValue(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return numeric === -106 ? 150 : numeric;
+}
+
+function serializeInventorySlotValue(slotId) {
+  return slotId === 150 ? -106 : slotId;
+}
+
+function getInventorySlotDefinition(slotId) {
+  return inventorySlotById.get(normalizeInventorySlotValue(slotId));
+}
+
+function inventoryItemCount(item) {
+  const candidate =
+    item?.count?.value ??
+    item?.Count?.value ??
+    item?.count ??
+    item?.Count ??
+    0;
+  const numeric = Number(candidate);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function inventoryItemId(item) {
+  const candidate = item?.id?.value ?? item?.Id?.value ?? item?.id ?? item?.Id ?? "";
+  return String(candidate).trim();
+}
+
+function inventoryItemComponents(item) {
+  return item?.components?.value ?? item?.tag?.value ?? item?.components ?? item?.tag ?? null;
+}
+
+function inventoryItemSignature(item) {
+  return JSON.stringify({
+    id: inventoryItemId(item),
+    components: inventoryItemComponents(item),
+  });
+}
+
+function formatItemFallbackName(itemId) {
+  return String(itemId ?? "")
+    .replace(/^minecraft:/i, "")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function createEmptyInventorySlot(definition, extra = {}) {
+  return {
+    slotId: definition.slotId,
+    key: definition.key,
+    label: definition.label,
+    commandSlot: definition.commandSlot,
+    item: null,
+    ...extra,
+  };
+}
+
+function itemCatalogEntry(item) {
+  if (!item?.name) {
+    return null;
+  }
+  return {
+    id: `minecraft:${item.name}`,
+    name: item.name,
+    displayName: item.displayName ?? formatItemFallbackName(item.name),
+    stackSize: Number(item.stackSize ?? 64) || 64,
+    maxDurability: Number(item.maxDurability ?? 0) || null,
+  };
+}
+
+function scoreItemCatalogEntry(entry, query) {
+  const normalizedQuery = String(query ?? "").trim().toLowerCase().replace(/^minecraft:/, "");
+  if (!normalizedQuery) {
+    return 0;
+  }
+  const id = entry.id.toLowerCase();
+  const name = entry.name.toLowerCase();
+  const displayName = entry.displayName.toLowerCase();
+  if (id === `minecraft:${normalizedQuery}` || name === normalizedQuery) {
+    return 1000;
+  }
+  if (name.startsWith(normalizedQuery)) {
+    return 850;
+  }
+  if (displayName.startsWith(normalizedQuery)) {
+    return 800;
+  }
+  if (name.includes(normalizedQuery)) {
+    return 700;
+  }
+  if (displayName.includes(normalizedQuery)) {
+    return 650;
+  }
+  return 0;
+}
+
+function buildInventoryItemView(rawItem, catalogEntry = null) {
+  if (!rawItem) {
+    return null;
+  }
+  const slotId = normalizeInventorySlotValue(rawItem.Slot);
+  return {
+    slotId,
+    id: inventoryItemId(rawItem),
+    displayName:
+      catalogEntry?.displayName ??
+      formatItemFallbackName(inventoryItemId(rawItem)),
+    count: inventoryItemCount(rawItem),
+    stackSize: catalogEntry?.stackSize ?? 64,
+    maxDurability: catalogEntry?.maxDurability ?? null,
+    components: inventoryItemComponents(rawItem),
+  };
+}
+
+function buildInventoryView(rawItems, selectedHotbarSlot, itemCatalogById) {
+  const slotItems = new Map();
+  for (const item of rawItems ?? []) {
+    const slotId = normalizeInventorySlotValue(item?.Slot);
+    const definition = getInventorySlotDefinition(slotId);
+    if (!definition) {
+      continue;
+    }
+    slotItems.set(
+      definition.slotId,
+      buildInventoryItemView(item, itemCatalogById.get(inventoryItemId(item))),
+    );
+  }
+
+  const withItems = (definitions) =>
+    definitions.map((definition) =>
+      createEmptyInventorySlot(definition, {
+        item: slotItems.get(definition.slotId) ?? null,
+        selected:
+          definition.slotId >= 0 &&
+          definition.slotId <= 8 &&
+          definition.slotId === selectedHotbarSlot,
+      })
+    );
+
+  return {
+    armor: withItems(armorInventorySlots),
+    offhand: createEmptyInventorySlot(offhandInventorySlot, {
+      item: slotItems.get(offhandInventorySlot.slotId) ?? null,
+    }),
+    main: withItems(mainInventorySlots),
+    hotbar: withItems(hotbarInventorySlots),
+    occupiedSlots: Array.from(slotItems.values()).filter(Boolean).length,
+    totalSlots: mainInventorySlots.length + hotbarInventorySlots.length + armorInventorySlots.length + 1,
+  };
 }
 
 function wait(ms) {
@@ -549,6 +777,39 @@ function ensureChildPath(parentDir, targetDir) {
   return target;
 }
 
+function normalizeManagedRelativePath(value) {
+  const normalized = String(value ?? "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((segment) => segment && segment !== ".")
+    .join("/");
+  if (normalized.split("/").includes("..")) {
+    throw new Error("Path cannot leave the server directory.");
+  }
+  return normalized;
+}
+
+function toPortableRelativePath(value) {
+  return String(value ?? "").split(path.sep).join("/");
+}
+
+function normalizeManagedFileName(value, fallback = "new-file.txt") {
+  const baseName = path.basename(String(value ?? "").trim());
+  if (!baseName || baseName === "." || baseName === "..") {
+    if (!fallback) {
+      throw new Error("A valid file name is required.");
+    }
+    return fallback;
+  }
+  return baseName;
+}
+
+function isTextEditablePath(targetPath) {
+  return /\.(txt|json|properties|ya?ml|xml|ini|cfg|conf|toml|md|log|csv|js|mjs|cjs|ts|mts|cts|java|gradle|mcmeta)$/i.test(
+    String(targetPath ?? ""),
+  );
+}
+
 function pathEqualsOrInside(targetPath, basePath) {
   const resolvedTarget = path.resolve(targetPath);
   const resolvedBase = path.resolve(basePath);
@@ -587,13 +848,85 @@ function hasPath(targetPath) {
   }
 }
 
+function parseBooleanInput(value, fallback = false) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  return String(value).trim().toLowerCase() === "true";
+}
+
+function parseIntegerInput(value, fallback = 0, minimum = 0) {
+  const numeric = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.max(minimum, numeric);
+}
+
+function normalizePauseWhenEmptySeconds(enabled, currentValue) {
+  if (!enabled) {
+    return "-1";
+  }
+  const currentSeconds = Number.parseInt(String(currentValue ?? "").trim(), 10);
+  if (Number.isFinite(currentSeconds) && currentSeconds > 0) {
+    return String(currentSeconds);
+  }
+  return "60";
+}
+
+async function readBukkitAllowEndSetting(context) {
+  const bukkitConfigFile = path.join(context.paths.serverDir, "bukkit.yml");
+  if (!hasPath(bukkitConfigFile)) {
+    return null;
+  }
+  const content = await fs.readFile(bukkitConfigFile, "utf8").catch(() => null);
+  if (content === null) {
+    return null;
+  }
+  const match = content.match(/^[ \t]*allow-end:\s*(true|false)\s*$/im);
+  if (!match?.[1]) {
+    return true;
+  }
+  return match[1].toLowerCase() === "true";
+}
+
+async function writeBukkitAllowEndSetting(context, enabled) {
+  const bukkitConfigFile = path.join(context.paths.serverDir, "bukkit.yml");
+  const desiredValue = enabled ? "true" : "false";
+  const existingContent = await fs.readFile(bukkitConfigFile, "utf8").catch(() => "");
+  let nextContent = existingContent;
+
+  if (/^[ \t]*allow-end:\s*(true|false)\s*$/im.test(existingContent)) {
+    nextContent = existingContent.replace(
+      /^[ \t]*allow-end:\s*(true|false)\s*$/im,
+      `  allow-end: ${desiredValue}`,
+    );
+  } else if (/^settings:\s*$/im.test(existingContent)) {
+    nextContent = existingContent.replace(
+      /^settings:\s*$/im,
+      `settings:\n  allow-end: ${desiredValue}`,
+    );
+  } else if (!existingContent.trim()) {
+    nextContent = `settings:\n  allow-end: ${desiredValue}\n`;
+  } else {
+    nextContent = `${existingContent.trimEnd()}\n\nsettings:\n  allow-end: ${desiredValue}\n`;
+  }
+
+  await fs.writeFile(bukkitConfigFile, nextContent, "utf8");
+}
+
 function getTailscaleTargetLabel(cloud) {
   if (
     String(cloud?.tailscaleHost ?? "").trim() &&
     String(cloud?.tailscaleUser ?? "").trim() &&
     String(cloud?.tailscaleRemoteDir ?? "").trim()
   ) {
-    return "Linked via Tailscale SSH";
+    return String(cloud?.targetRestoreKey ?? "").trim()
+      ? "Linked via Tailscale SSH (shared backup key)"
+      : "Linked via Tailscale SSH";
   }
   return "";
 }
@@ -649,6 +982,7 @@ export class MinecraftPanelService {
     this.logs = [];
     this.nextLogId = 1;
     this.versionsCache = new Map();
+    this.itemCatalogCache = new Map();
     this.backupTimer = null;
     this.playitInitialized = false;
     this.playitInitPromise = null;
@@ -1438,10 +1772,13 @@ if (-not $sample) { exit 0 }
     const metrics = await this.refreshServerMetrics(context);
     const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
     const iconInfo = await this.getServerIconInfo(context.record.id);
+    const liveDescription = String(
+      context.cachedProperties?.motd ?? context.record.description ?? "",
+    ).trim();
     return {
       id: context.record.id,
       name: context.record.name,
-      description: context.record.description ?? "",
+      description: liveDescription,
       iconUrl: iconInfo
         ? `/api/servers/${encodeURIComponent(context.record.id)}/icon?v=${encodeURIComponent(String(iconInfo.updatedAtMs))}`
         : null,
@@ -1475,14 +1812,21 @@ if (-not $sample) { exit 0 }
 
   async serializeActiveServer(context) {
     context.cachedProperties = await readServerProperties(context.paths);
+    const bukkitAllowEnd = await readBukkitAllowEndSetting(context);
+    if (bukkitAllowEnd !== null) {
+      context.cachedProperties["allow-end"] = String(bukkitAllowEnd);
+    }
     const jarInstalled = await this.hasInstalledJar(context);
     const metrics = await this.refreshServerMetrics(context);
     const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
     const iconInfo = await this.getServerIconInfo(context.record.id);
+    const liveDescription = String(
+      context.cachedProperties?.motd ?? context.record.description ?? "",
+    ).trim();
     return {
       id: context.record.id,
       name: context.record.name,
-      description: context.record.description ?? "",
+      description: liveDescription,
       iconUrl: iconInfo
         ? `/api/servers/${encodeURIComponent(context.record.id)}/icon?v=${encodeURIComponent(String(iconInfo.updatedAtMs))}`
         : null,
@@ -1556,6 +1900,7 @@ if (-not $sample) { exit 0 }
       uiSettings: this.panelConfig.ui,
       playitSettings: this.panelConfig.playit,
       updaterSettings: this.panelConfig.updater,
+      desktopSettings: this.panelConfig.desktop,
       cloudBackupSettings: getPublicCloudBackupConfig(this.panelConfig),
       host: this.getHostResources(),
       dependencies: this.dependencies.snapshot(),
@@ -1659,9 +2004,11 @@ if (-not $sample) { exit 0 }
       updatedAt: now,
     };
 
-    const sourceConfig = this.activeServerId
-      ? this.getServerContext(this.activeServerId).config
-      : defaultServerConfig;
+    const sourceConfig = structuredClone(
+      this.activeServerId
+        ? this.getServerContext(this.activeServerId).config
+        : defaultServerConfig,
+    );
 
     const config = {
       ...sourceConfig,
@@ -1700,6 +2047,11 @@ if (-not $sample) { exit 0 }
         installedSoftware: null,
         installedVersion: null,
         installedBuild: null,
+      },
+      profile: {
+        ...sourceConfig.profile,
+        name,
+        description: String(payload.description ?? "").trim(),
       },
       backups: {
         enabled: Boolean(payload.autoBackups ?? true),
@@ -1865,11 +2217,29 @@ if (-not $sample) { exit 0 }
     return this.panelConfig;
   }
 
+  async updateDesktopSettings(payload = {}) {
+    const current = this.panelConfig.desktop ?? {};
+    this.panelConfig.desktop = {
+      ...current,
+      keepServerRunningOnClose: Boolean(
+        payload.keepServerRunningOnClose ?? current.keepServerRunningOnClose,
+      ),
+      quickConsoleShortcut:
+        String(
+          payload.quickConsoleShortcut ?? current.quickConsoleShortcut ?? "",
+        ).trim() || current.quickConsoleShortcut || "Ctrl+Shift+Space",
+    };
+
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    this.appendLog(null, "panel", "Updated desktop app behavior settings.");
+    return this.panelConfig.desktop;
+  }
+
   async updateCloudBackupSettings(payload = {}) {
     const current = getCloudBackupConfig(this.panelConfig);
     const provider =
-      String(payload.provider ?? current.provider ?? "supabase").trim().toLowerCase() ||
-      "supabase";
+      String(payload.provider ?? current.provider ?? "tailscale-ssh").trim().toLowerCase() ||
+      "tailscale-ssh";
     this.panelConfig.cloudBackup = {
       ...this.panelConfig.cloudBackup,
       enabled: Boolean(payload.enabled ?? current.enabled),
@@ -1877,6 +2247,8 @@ if (-not $sample) { exit 0 }
       deviceLabel:
         String(payload.deviceLabel ?? current.deviceLabel ?? "").trim().slice(0, 80) ||
         os.hostname(),
+      targetRestoreKey:
+        String(payload.targetRestoreKey ?? current.targetRestoreKey ?? "").trim().slice(0, 160),
       tailscaleHost: String(payload.tailscaleHost ?? current.tailscaleHost ?? "").trim(),
       tailscaleUser: String(payload.tailscaleUser ?? current.tailscaleUser ?? "").trim(),
       tailscaleRemoteDir:
@@ -1890,6 +2262,29 @@ if (-not $sample) { exit 0 }
     return getPublicCloudBackupConfig(this.panelConfig);
   }
 
+  async syncAuthenticatedTailscaleCloud(config = this.panelConfig.cloudBackup) {
+    const authenticated = await authenticateTailscaleCloudAccount(config);
+    let changed = false;
+    if (this.panelConfig.cloudBackup.accountUsername !== authenticated.username) {
+      this.panelConfig.cloudBackup.accountUsername = authenticated.username;
+      changed = true;
+    }
+    if (this.panelConfig.cloudBackup.restoreKey !== authenticated.restoreKey) {
+      this.panelConfig.cloudBackup.restoreKey = authenticated.restoreKey;
+      changed = true;
+    }
+    if (changed) {
+      this.panelConfig = await savePanelConfig(this.panelConfig);
+    }
+    return {
+      ...getCloudBackupConfig(this.panelConfig),
+      accountUsername: authenticated.username,
+      restoreKey: authenticated.restoreKey,
+      targetRestoreKey: String(this.panelConfig.cloudBackup.targetRestoreKey ?? "").trim(),
+      sessionToken: String(this.panelConfig.cloudBackup.sessionToken ?? "").trim(),
+    };
+  }
+
   async getCloudBackupStatus(serverId = this.activeServerId) {
     const cloud = getCloudBackupConfig(this.panelConfig);
     const usingTailscale = cloud.provider === "tailscale-ssh";
@@ -1901,6 +2296,11 @@ if (-not $sample) { exit 0 }
       restoreKeyPresent: Boolean(cloud.restoreKey),
       restoreKey: cloud.restoreKey,
       deviceLabel: cloud.deviceLabel || os.hostname(),
+      loggedIn: false,
+      accountUsername: cloud.accountUsername,
+      targetRestoreKey: cloud.targetRestoreKey,
+      usingSharedRestoreKey: Boolean(cloud.targetRestoreKey),
+      authError: null,
       uploadLimitBytes: usingTailscale
         ? 0
         : Math.max(1, Number(cloud.uploadLimitMb ?? 50) || 50) * 1024 * 1024,
@@ -1919,6 +2319,7 @@ if (-not $sample) { exit 0 }
     }
 
     if (usingTailscale) {
+      let activeCloud = cloud;
       try {
         const check = await checkTailscaleBackupTarget(cloud);
         status.functionReady = Boolean(check.ready);
@@ -1927,8 +2328,26 @@ if (-not $sample) { exit 0 }
         return status;
       }
 
+      if (!cloud.accountUsername || !cloud.sessionToken) {
+        status.authError = "Log in to cloud backup first.";
+        return status;
+      }
+
       try {
-        const metadata = await readRemoteBackupMetadata(cloud, serverId);
+        activeCloud = await this.syncAuthenticatedTailscaleCloud(cloud);
+        status.loggedIn = true;
+        status.accountUsername = activeCloud.accountUsername;
+        status.restoreKey = activeCloud.restoreKey;
+        status.restoreKeyPresent = Boolean(activeCloud.restoreKey);
+        status.targetRestoreKey = activeCloud.targetRestoreKey;
+        status.usingSharedRestoreKey = Boolean(activeCloud.targetRestoreKey);
+      } catch (error) {
+        status.authError = error.message ?? "Cloud backup login failed.";
+        return status;
+      }
+
+      try {
+        const metadata = await readRemoteBackupMetadata(activeCloud, serverId);
         const latestBackup = buildTailscaleLogicalBackupEntry(metadata);
         if (latestBackup) {
           status.backups = [latestBackup];
@@ -1985,14 +2404,19 @@ if (-not $sample) { exit 0 }
         .slice(0, 80) || os.hostname();
 
     if (current.provider === "tailscale-ssh") {
+      const synced = await this.syncAuthenticatedTailscaleCloud({
+        ...current,
+        deviceLabel,
+      });
       this.panelConfig.cloudBackup = {
         ...this.panelConfig.cloudBackup,
         enabled: true,
         deviceLabel,
-        restoreKey: generateLocalCloudBackupKey(),
+        restoreKey: synced.restoreKey,
+        accountUsername: synced.accountUsername,
       };
       this.panelConfig = await savePanelConfig(this.panelConfig);
-      this.appendLog(null, "panel", "Issued a new Tailscale cloud backup restore key.");
+      this.appendLog(null, "panel", "Synced the Tailscale cloud backup restore key.");
       return this.getCloudBackupStatus();
     }
 
@@ -2018,9 +2442,14 @@ if (-not $sample) { exit 0 }
     }
 
     if (current.provider === "tailscale-ssh") {
+      const result = await rotateTailscaleCloudRestoreKey(current);
       this.panelConfig.cloudBackup = {
         ...this.panelConfig.cloudBackup,
-        restoreKey: generateLocalCloudBackupKey(),
+        restoreKey: String(result.restoreKey ?? "").trim(),
+        targetRestoreKey:
+          this.panelConfig.cloudBackup.targetRestoreKey === current.restoreKey
+            ? ""
+            : this.panelConfig.cloudBackup.targetRestoreKey,
       };
       this.panelConfig = await savePanelConfig(this.panelConfig);
       this.appendLog(null, "panel", "Rotated the Tailscale cloud backup restore key.");
@@ -2037,6 +2466,81 @@ if (-not $sample) { exit 0 }
     };
     this.panelConfig = await savePanelConfig(this.panelConfig);
     this.appendLog(null, "panel", "Rotated the cloud backup restore key.");
+    return this.getCloudBackupStatus();
+  }
+
+  async registerCloudBackupAccount(payload = {}) {
+    const current = getCloudBackupConfig(this.panelConfig);
+    if (current.provider !== "tailscale-ssh") {
+      throw new Error("Cloud account registration is only used for Tailscale cloud backup.");
+    }
+    const deviceLabel =
+      String(payload.deviceLabel ?? current.deviceLabel ?? "")
+        .trim()
+        .slice(0, 80) || os.hostname();
+    const result = await registerTailscaleCloudAccount(current, {
+      username: payload.username,
+      password: payload.password,
+      deviceLabel,
+    });
+
+    this.panelConfig.cloudBackup = {
+      ...this.panelConfig.cloudBackup,
+      enabled: true,
+      deviceLabel,
+      accountUsername: String(result.username ?? "").trim().toLowerCase(),
+      sessionToken: String(result.sessionToken ?? "").trim(),
+      restoreKey: String(result.restoreKey ?? "").trim(),
+    };
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    this.appendLog(null, "panel", `Created cloud backup account ${result.username}.`);
+    return this.getCloudBackupStatus();
+  }
+
+  async loginCloudBackupAccount(payload = {}) {
+    const current = getCloudBackupConfig(this.panelConfig);
+    if (current.provider !== "tailscale-ssh") {
+      throw new Error("Cloud login is only used for Tailscale cloud backup.");
+    }
+    const deviceLabel =
+      String(payload.deviceLabel ?? current.deviceLabel ?? "")
+        .trim()
+        .slice(0, 80) || os.hostname();
+    const result = await loginTailscaleCloudAccount(current, {
+      username: payload.username,
+      password: payload.password,
+      deviceLabel,
+    });
+
+    this.panelConfig.cloudBackup = {
+      ...this.panelConfig.cloudBackup,
+      enabled: true,
+      deviceLabel,
+      accountUsername: String(result.username ?? "").trim().toLowerCase(),
+      sessionToken: String(result.sessionToken ?? "").trim(),
+      restoreKey: String(result.restoreKey ?? "").trim(),
+    };
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    this.appendLog(null, "panel", `Logged into cloud backup account ${result.username}.`);
+    return this.getCloudBackupStatus();
+  }
+
+  async logoutCloudBackupAccount() {
+    const current = getCloudBackupConfig(this.panelConfig);
+    if (current.provider !== "tailscale-ssh") {
+      throw new Error("Cloud logout is only used for Tailscale cloud backup.");
+    }
+    if (current.accountUsername) {
+      await logoutTailscaleCloudAccount(current, {
+        username: current.accountUsername,
+      }).catch(() => false);
+    }
+    this.panelConfig.cloudBackup = {
+      ...this.panelConfig.cloudBackup,
+      sessionToken: "",
+    };
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    this.appendLog(null, "panel", "Logged out of the cloud backup account.");
     return this.getCloudBackupStatus();
   }
 
@@ -2380,13 +2884,16 @@ if (-not $sample) { exit 0 }
 
   async uploadCloudBackup(serverId) {
     const context = this.getServerContext(serverId);
-    const cloud = getCloudBackupConfig(this.panelConfig);
+    let cloud = getCloudBackupConfig(this.panelConfig);
     if (!cloud.enabled) {
       throw new Error("Enable cloud backup first.");
     }
     const usingTailscale = cloud.provider === "tailscale-ssh";
-    if (!cloud.restoreKey) {
+    if (!cloud.restoreKey && !usingTailscale) {
       throw new Error("Generate a cloud backup restore key first.");
+    }
+    if (usingTailscale) {
+      cloud = await this.syncAuthenticatedTailscaleCloud(cloud);
     }
 
     const cloudStatus = await this.getCloudBackupStatus(serverId);
@@ -2437,12 +2944,12 @@ if (-not $sample) { exit 0 }
 
   async downloadCloudBackup(serverId, backupId) {
     const context = this.getServerContext(serverId);
-    const cloud = getCloudBackupConfig(this.panelConfig);
+    let cloud = getCloudBackupConfig(this.panelConfig);
     if (!cloud.enabled) {
       throw new Error("Enable cloud backup first.");
     }
     const usingTailscale = cloud.provider === "tailscale-ssh";
-    if (!cloud.restoreKey) {
+    if (!cloud.restoreKey && !usingTailscale) {
       throw new Error("Generate a cloud backup restore key first.");
     }
     if (!String(backupId ?? "").trim()) {
@@ -2450,6 +2957,7 @@ if (-not $sample) { exit 0 }
     }
 
     if (usingTailscale) {
+      cloud = await this.syncAuthenticatedTailscaleCloud(cloud);
       return this.downloadTailscaleRollingBackup(context, backupId, cloud);
     }
 
@@ -2798,12 +3306,20 @@ if (-not $sample) { exit 0 }
       ),
     };
 
+    const nextProperties = await readServerProperties(context.paths);
+    nextProperties.motd = nextDescription;
+    context.cachedProperties = await writeServerProperties(context.paths, nextProperties);
+
     await this.saveContextConfig(context);
     this.registry.servers = this.registry.servers.map((entry) =>
       entry.id === serverId ? context.record : entry,
     );
     this.registry = await saveServerRegistry(this.registry);
-    this.appendLog(serverId, "panel", "Saved server profile and backup schedule.");
+    this.appendLog(
+      serverId,
+      "panel",
+      "Saved server profile, backup schedule, and synced the Minecraft MOTD.",
+    );
     return this.getState(serverId);
   }
 
@@ -2939,6 +3455,20 @@ if (-not $sample) { exit 0 }
     }
 
     context.cachedProperties = await writeServerProperties(context.paths, next);
+    if (Object.prototype.hasOwnProperty.call(changes ?? {}, "motd")) {
+      const nextDescription = String(next.motd ?? "").trim();
+      context.record.description = nextDescription;
+      context.record.updatedAt = currentTimestamp();
+      context.config.profile = {
+        ...context.config.profile,
+        description: nextDescription,
+      };
+      await this.saveContextConfig(context);
+      this.registry.servers = this.registry.servers.map((entry) =>
+        entry.id === serverId ? context.record : entry,
+      );
+      this.registry = await saveServerRegistry(this.registry);
+    }
     this.appendLog(serverId, "panel", "Saved server.properties changes.");
     return context.cachedProperties;
   }
@@ -2984,24 +3514,130 @@ if (-not $sample) { exit 0 }
 
   async updateMiscSettings(serverId, payload) {
     const context = this.getServerContext(serverId);
+    const currentProperties = await readServerProperties(context.paths);
+    const allowCrackedClients = parseBooleanInput(
+      payload.allowCrackedClients,
+      String(currentProperties["online-mode"] ?? "true").toLowerCase() !== "true",
+    );
+    const previousKeepInventory = Boolean(context.config.misc?.keepInventory);
+    const previousSharedHealth = Boolean(context.config.misc?.sharedHealth);
+
+    const whitelist = parseBooleanInput(
+      payload.whitelist,
+      String(currentProperties["white-list"] ?? "false").toLowerCase() === "true",
+    );
+    const commandBlocks = parseBooleanInput(
+      payload.commandBlocks,
+      String(currentProperties["enable-command-block"] ?? "false").toLowerCase() === "true",
+    );
+    const pvp = parseBooleanInput(
+      payload.pvp,
+      String(currentProperties.pvp ?? "true").toLowerCase() === "true",
+    );
+    const allowFlight = parseBooleanInput(
+      payload.allowFlight,
+      String(currentProperties["allow-flight"] ?? "false").toLowerCase() === "true",
+    );
+    const hardcore = parseBooleanInput(
+      payload.hardcore,
+      String(currentProperties.hardcore ?? "false").toLowerCase() === "true",
+    );
+    const forceGamemode = parseBooleanInput(
+      payload.forceGamemode,
+      String(currentProperties["force-gamemode"] ?? "false").toLowerCase() === "true",
+    );
+    const generateStructures = parseBooleanInput(
+      payload.generateStructures,
+      String(currentProperties["generate-structures"] ?? "true").toLowerCase() === "true",
+    );
+    const logPlayerIPs = parseBooleanInput(
+      payload.logPlayerIPs,
+      String(currentProperties["log-ips"] ?? "true").toLowerCase() === "true",
+    );
+    const allowNether = parseBooleanInput(
+      payload.allowNether,
+      String(currentProperties["allow-nether"] ?? "true").toLowerCase() === "true",
+    );
+    const allowEnd = parseBooleanInput(
+      payload.allowEnd,
+      String(currentProperties["allow-end"] ?? "true").toLowerCase() === "true",
+    );
+    const showPlayerCount = parseBooleanInput(
+      payload.showPlayerCount,
+      String(currentProperties["enable-status"] ?? "true").toLowerCase() === "true",
+    );
+    const hideOnlinePlayers = parseBooleanInput(
+      payload.hideOnlinePlayers,
+      String(currentProperties["hide-online-players"] ?? "false").toLowerCase() === "true",
+    );
+    const allowProxyConnections = parseBooleanInput(
+      payload.allowProxyConnections,
+      String(currentProperties["prevent-proxy-connections"] ?? "false").toLowerCase() !== "true",
+    );
+    const pauseWhenEmpty = parseBooleanInput(
+      payload.pauseWhenEmpty,
+      Number.parseInt(String(currentProperties["pause-when-empty-seconds"] ?? "-1"), 10) > 0,
+    );
+    const playerIdleTimeout = parseIntegerInput(
+      payload.playerIdleTimeout,
+      parseIntegerInput(currentProperties["player-idle-timeout"], 0, 0),
+      0,
+    );
+    const spawnProtection = parseIntegerInput(
+      payload.spawnProtection,
+      parseIntegerInput(currentProperties["spawn-protection"], 0, 0),
+      0,
+    );
+    const maxPlayers = parseIntegerInput(
+      payload.maxPlayers,
+      parseIntegerInput(currentProperties["max-players"], 100, 1),
+      1,
+    );
+    const nextKeepInventory = parseBooleanInput(payload.keepInventory, previousKeepInventory);
+    const nextSharedHealth = parseBooleanInput(payload.sharedHealth, previousSharedHealth);
     await this.updateServerProperties(serverId, {
-      "online-mode": !Boolean(payload.allowCrackedClients),
-      "white-list": Boolean(payload.whitelist),
-      pvp: Boolean(payload.pvp),
-      "allow-flight": Boolean(payload.allowFlight),
-      "enable-command-block": Boolean(payload.commandBlocks),
+      "online-mode": !allowCrackedClients,
+      "white-list": whitelist,
+      pvp,
+      "allow-flight": allowFlight,
+      "enable-command-block": commandBlocks,
+      "player-idle-timeout": playerIdleTimeout,
+      "spawn-protection": spawnProtection,
+      "enable-status": showPlayerCount,
+      "hide-online-players": hideOnlinePlayers,
+      "allow-nether": allowNether,
+      "allow-end": allowEnd,
+      "force-gamemode": forceGamemode,
+      "generate-structures": generateStructures,
+      "log-ips": logPlayerIPs,
+      "pause-when-empty-seconds": normalizePauseWhenEmptySeconds(
+        pauseWhenEmpty,
+        currentProperties["pause-when-empty-seconds"],
+      ),
+      "prevent-proxy-connections": !allowProxyConnections,
+      "max-players": maxPlayers,
+      hardcore,
     });
+
+    if (hasPath(path.join(context.paths.serverDir, "bukkit.yml"))) {
+      await writeBukkitAllowEndSetting(context, allowEnd);
+      context.cachedProperties["allow-end"] = String(allowEnd);
+    }
 
     context.config.misc = {
       ...context.config.misc,
-      keepInventory: Boolean(payload.keepInventory),
-      sharedHealth: Boolean(payload.sharedHealth),
+      keepInventory: nextKeepInventory,
+      sharedHealth: nextSharedHealth,
     };
     await this.saveContextConfig(context);
 
-    if (context.state.serverReady && context.state.serverStatus === "running") {
+    if (
+      (previousKeepInventory !== nextKeepInventory || previousSharedHealth !== nextSharedHealth) &&
+      context.state.serverReady &&
+      context.state.serverStatus === "running"
+    ) {
       await this.applyConfiguredMiscSettings(serverId);
-    } else {
+    } else if (previousKeepInventory !== nextKeepInventory) {
       this.appendLog(
         serverId,
         "panel",
@@ -3009,15 +3645,17 @@ if (-not $sample) { exit 0 }
       );
     }
 
-    this.appendLog(
-      serverId,
-      "panel",
-      context.config.misc.sharedHealth
-        ? hasCompatibleSharedHealthMod(context)
-          ? "Saved shared health preference. A compatible shared-health mod was detected, but Releu does not yet auto-configure that mod's own gamerules."
-          : "Saved shared health preference, but no compatible shared-health mod is installed on this server."
-        : "Saved shared health preference: disabled.",
-    );
+    if (previousSharedHealth !== nextSharedHealth) {
+      this.appendLog(
+        serverId,
+        "panel",
+        nextSharedHealth
+          ? hasCompatibleSharedHealthMod(context)
+            ? "Saved shared health preference. A compatible shared-health mod was detected, but Releu does not yet auto-configure that mod's own gamerules."
+            : "Saved shared health preference, but no compatible shared-health mod is installed on this server."
+          : "Saved shared health preference: disabled.",
+      );
+    }
 
     return this.getState(serverId);
   }
@@ -3557,11 +4195,60 @@ if (-not $sample) { exit 0 }
     }
 
     const worldName = normalizeWorldName(payload.name);
-    await this.updateServerProperties(serverId, {
+    const nextProperties = {
       "level-name": worldName,
-    });
+    };
+    if (Object.hasOwn(payload, "seed") || Object.hasOwn(payload, "levelSeed")) {
+      nextProperties["level-seed"] = String(payload.seed ?? payload.levelSeed ?? "").trim();
+    }
+    await this.updateServerProperties(serverId, nextProperties);
     this.appendLog(serverId, "panel", `Selected world "${worldName}" as the active server world.`);
     return this.getState(serverId);
+  }
+
+  async buildArchivedWorldName(context, worldName, suffix = "pre-regen") {
+    const baseName = normalizeWorldName(`${worldName}-${suffix}-${slugTimestamp()}`);
+    let candidate = baseName;
+    let attempt = 2;
+
+    while (
+      await fileExists(path.join(context.paths.serverDir, candidate)) ||
+      await fileExists(path.join(context.paths.serverDir, `${candidate}_nether`)) ||
+      await fileExists(path.join(context.paths.serverDir, `${candidate}_the_end`))
+    ) {
+      candidate = normalizeWorldName(`${baseName}-${attempt}`);
+      attempt += 1;
+    }
+
+    return candidate;
+  }
+
+  async archiveWorldFamily(context, worldName, suffix = "pre-regen") {
+    const archiveName = await this.buildArchivedWorldName(context, worldName, suffix);
+    const folderPairs = [
+      [worldName, archiveName],
+      [`${worldName}_nether`, `${archiveName}_nether`],
+      [`${worldName}_the_end`, `${archiveName}_the_end`],
+    ];
+
+    let movedAny = false;
+    for (const [fromName, toName] of folderPairs) {
+      const sourceDir = ensureChildPath(
+        context.paths.serverDir,
+        path.join(context.paths.serverDir, fromName),
+      );
+      if (!(await fileExists(sourceDir))) {
+        continue;
+      }
+      const targetDir = ensureChildPath(
+        context.paths.serverDir,
+        path.join(context.paths.serverDir, toName),
+      );
+      await fs.rename(sourceDir, targetDir);
+      movedAny = true;
+    }
+
+    return movedAny ? archiveName : null;
   }
 
   async regenerateWorld(serverId, payload = {}) {
@@ -3575,18 +4262,21 @@ if (-not $sample) { exit 0 }
       payload.name ?? context.cachedProperties["level-name"] ?? "world",
     );
 
-    await this.updateServerProperties(serverId, {
+    const nextProperties = {
       "level-name": worldName,
-    });
+    };
+    if (Object.hasOwn(payload, "seed") || Object.hasOwn(payload, "levelSeed")) {
+      nextProperties["level-seed"] = String(payload.seed ?? payload.levelSeed ?? "").trim();
+    }
+    await this.updateServerProperties(serverId, nextProperties);
 
-    for (const folderName of [worldName, `${worldName}_nether`, `${worldName}_the_end`]) {
-      const targetDir = ensureChildPath(
-        context.paths.serverDir,
-        path.join(context.paths.serverDir, folderName),
+    const archivedWorldName = await this.archiveWorldFamily(context, worldName);
+    if (archivedWorldName) {
+      this.appendLog(
+        serverId,
+        "panel",
+        `Archived the previous "${worldName}" world as "${archivedWorldName}" before regeneration.`,
       );
-      if (await fileExists(targetDir)) {
-        await fs.rm(targetDir, { recursive: true, force: true });
-      }
     }
 
     this.appendLog(
@@ -4107,6 +4797,154 @@ if (-not $sample) { exit 0 }
     }
   }
 
+  resolveManagedServerPath(serverId, relativePath = "") {
+    const context = this.getServerContext(serverId);
+    const normalized = normalizeManagedRelativePath(relativePath);
+    return {
+      context,
+      relativePath: normalized,
+      absolutePath: ensureChildPath(
+        context.paths.serverDir,
+        path.join(context.paths.serverDir, normalized),
+      ),
+    };
+  }
+
+  async listManagedFiles(serverId, options = {}) {
+    const { context, relativePath, absolutePath } = this.resolveManagedServerPath(
+      serverId,
+      options.path ?? "",
+    );
+    const search = String(options.search ?? "").trim().toLowerCase();
+    const stats = await fs.stat(absolutePath).catch(() => null);
+    if (!stats || !stats.isDirectory()) {
+      throw new Error("That folder does not exist.");
+    }
+
+    const entries = await fs.readdir(absolutePath, { withFileTypes: true });
+    const listed = await Promise.all(
+      entries.map(async (entry) => {
+        const entryAbsolutePath = ensureChildPath(
+          context.paths.serverDir,
+          path.join(absolutePath, entry.name),
+        );
+        const entryRelativePath = toPortableRelativePath(
+          path.relative(context.paths.serverDir, entryAbsolutePath),
+        );
+        const entryStats = await fs.stat(entryAbsolutePath);
+        return {
+          name: entry.name,
+          path: entryRelativePath,
+          type: entry.isDirectory() ? "directory" : "file",
+          sizeBytes: entry.isDirectory() ? null : entryStats.size,
+          modifiedAt: entryStats.mtime.toISOString(),
+          isTextEditable: entry.isFile() && isTextEditablePath(entry.name),
+        };
+      }),
+    );
+
+    const filtered = listed
+      .filter((entry) => (!search ? true : entry.name.toLowerCase().includes(search)))
+      .sort((left, right) => {
+        if (left.type !== right.type) {
+          return left.type === "directory" ? -1 : 1;
+        }
+        return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+      });
+
+    const parentPath = relativePath.includes("/")
+      ? relativePath.split("/").slice(0, -1).join("/")
+      : relativePath
+        ? ""
+        : null;
+
+    return {
+      path: relativePath,
+      absolutePath,
+      parentPath,
+      entries: filtered,
+    };
+  }
+
+  async createManagedFolder(serverId, payload = {}) {
+    const parent = this.resolveManagedServerPath(serverId, payload.path ?? "");
+    const folderName = normalizeManagedFileName(payload.name, "");
+    const targetPath = ensureChildPath(
+      parent.context.paths.serverDir,
+      path.join(parent.absolutePath, folderName),
+    );
+    await fs.mkdir(targetPath, { recursive: false });
+    this.appendLog(serverId, "panel", `Created folder ${path.relative(parent.context.paths.serverDir, targetPath)}.`);
+    return this.listManagedFiles(serverId, { path: parent.relativePath });
+  }
+
+  async uploadManagedFile(serverId, relativeDir, fileName, bytes) {
+    const targetDir = this.resolveManagedServerPath(serverId, relativeDir ?? "");
+    const safeFileName = normalizeManagedFileName(fileName);
+    await fs.mkdir(targetDir.absolutePath, { recursive: true });
+    const targetPath = ensureChildPath(
+      targetDir.context.paths.serverDir,
+      path.join(targetDir.absolutePath, safeFileName),
+    );
+    await fs.writeFile(targetPath, Buffer.from(bytes));
+    this.appendLog(serverId, "panel", `Uploaded file ${path.relative(targetDir.context.paths.serverDir, targetPath)}.`);
+    return {
+      file: {
+        name: safeFileName,
+        path: toPortableRelativePath(path.relative(targetDir.context.paths.serverDir, targetPath)),
+      },
+      listing: await this.listManagedFiles(serverId, { path: targetDir.relativePath }),
+    };
+  }
+
+  async deleteManagedPath(serverId, relativePath) {
+    const target = this.resolveManagedServerPath(serverId, relativePath);
+    if (!target.relativePath) {
+      throw new Error("The server root cannot be deleted.");
+    }
+    const stats = await fs.stat(target.absolutePath).catch(() => null);
+    if (!stats) {
+      throw new Error("That file no longer exists.");
+    }
+    await fs.rm(target.absolutePath, { recursive: true, force: true });
+    this.appendLog(serverId, "panel", `Deleted ${target.relativePath}.`);
+    return this.listManagedFiles(serverId, { path: target.relativePath.includes("/") ? target.relativePath.split("/").slice(0, -1).join("/") : "" });
+  }
+
+  async readManagedTextFile(serverId, relativePath) {
+    const target = this.resolveManagedServerPath(serverId, relativePath);
+    const stats = await fs.stat(target.absolutePath).catch(() => null);
+    if (!stats || !stats.isFile()) {
+      throw new Error("That file does not exist.");
+    }
+    if (!isTextEditablePath(target.relativePath)) {
+      throw new Error("This file type is not editable in Releu.");
+    }
+    if (stats.size > 2 * 1024 * 1024) {
+      throw new Error("This file is too large to edit in the panel.");
+    }
+    return {
+      path: target.relativePath,
+      sizeBytes: stats.size,
+      modifiedAt: stats.mtime.toISOString(),
+      content: await fs.readFile(target.absolutePath, "utf8"),
+    };
+  }
+
+  async writeManagedTextFile(serverId, payload = {}) {
+    const target = this.resolveManagedServerPath(serverId, payload.path ?? "");
+    const stats = await fs.stat(target.absolutePath).catch(() => null);
+    if (!stats || !stats.isFile()) {
+      throw new Error("That file does not exist.");
+    }
+    if (!isTextEditablePath(target.relativePath)) {
+      throw new Error("This file type is not editable in Releu.");
+    }
+    await fs.writeFile(target.absolutePath, String(payload.content ?? ""), "utf8");
+    this.appendLog(serverId, "panel", `Saved ${target.relativePath}.`);
+    return this.readManagedTextFile(serverId, target.relativePath);
+  }
+
   async ensureKnownModDependencies(serverId, context) {
     const effectiveSoftware = this.getEffectiveServerSoftwareId(context);
     if (effectiveSoftware !== "fabric") {
@@ -4294,6 +5132,419 @@ if (-not $sample) { exit 0 }
       }
       return left.name.localeCompare(right.name);
     });
+  }
+
+  resolveInventoryCatalogVersion(serverId) {
+    const requested = String(this.getServerGameVersion(serverId) ?? "").trim();
+    const latestKnown = minecraftData.versions.pc.find((entry) =>
+      /^1\.21\.\d+$/.test(String(entry.minecraftVersion ?? ""))
+    )?.minecraftVersion;
+    const candidates = [
+      requested,
+      requested.startsWith("26.1") ? defaultItemCatalogVersion : null,
+      defaultItemCatalogVersion,
+      latestKnown ?? null,
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      try {
+        const dataset = minecraftData(candidate);
+        if (dataset?.itemsArray?.length) {
+          return candidate;
+        }
+      } catch {
+        // Try the next candidate.
+      }
+    }
+
+    return defaultItemCatalogVersion;
+  }
+
+  getInventoryCatalog(serverId) {
+    const version = this.resolveInventoryCatalogVersion(serverId);
+    const cached = this.itemCatalogCache.get(version);
+    if (cached) {
+      return cached;
+    }
+
+    const dataset = minecraftData(version);
+    const entries = (dataset.itemsArray ?? [])
+      .map(itemCatalogEntry)
+      .filter(Boolean)
+      .sort((left, right) => left.displayName.localeCompare(right.displayName));
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const byName = new Map(entries.map((entry) => [entry.name, entry]));
+    const catalog = { version, entries, byId, byName };
+    this.itemCatalogCache.set(version, catalog);
+    return catalog;
+  }
+
+  async searchInventoryCatalog(serverId, payload = {}) {
+    const query = String(payload.query ?? "").trim();
+    const pageSize = Math.max(1, Math.min(40, Number(payload.limit ?? 24) || 24));
+    const page = Math.max(1, Number(payload.page ?? 1) || 1);
+    const catalog = this.getInventoryCatalog(serverId);
+
+    let filtered = [];
+    if (!query) {
+      filtered = defaultInventoryCatalogSuggestions
+        .map((name) => catalog.byName.get(name))
+        .filter(Boolean);
+    } else {
+      filtered = catalog.entries
+        .map((entry) => ({
+          entry,
+          score: scoreItemCatalogEntry(entry, query),
+        }))
+        .filter((candidate) => candidate.score > 0)
+        .sort((left, right) =>
+          right.score - left.score ||
+          left.entry.displayName.localeCompare(right.entry.displayName)
+        )
+        .map((candidate) => candidate.entry);
+    }
+
+    const totalHits = filtered.length;
+    const totalPages = Math.max(1, Math.ceil(totalHits / pageSize));
+    const sliceStart = (Math.min(page, totalPages) - 1) * pageSize;
+    return {
+      query,
+      page: Math.min(page, totalPages),
+      pageSize,
+      totalHits,
+      totalPages,
+      version: catalog.version,
+      results: filtered.slice(sliceStart, sliceStart + pageSize),
+    };
+  }
+
+  async flushPlayerDataToDisk(serverId) {
+    const context = this.getServerContext(serverId);
+    if (!context.serverProcess) {
+      return;
+    }
+    await this.sendCommand(serverId, "save-all flush");
+    await wait(500);
+  }
+
+  async waitForPlayerDataRefresh(targetPath, previousMtimeMs, timeoutMs = 3000) {
+    if (!targetPath) {
+      return null;
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const stats = await fs.stat(targetPath).catch(() => null);
+      if (stats && (previousMtimeMs === null || stats.mtimeMs > previousMtimeMs)) {
+        return stats;
+      }
+      await wait(150);
+    }
+    return await fs.stat(targetPath).catch(() => null);
+  }
+
+  getActiveWorldDirectory(context) {
+    const levelName = String(context.cachedProperties["level-name"] ?? "world").trim() || "world";
+    return path.join(context.paths.serverDir, levelName);
+  }
+
+  async resolvePlayerDataFile(serverId, uuid) {
+    const context = this.getServerContext(serverId);
+    context.cachedProperties = await readServerProperties(context.paths);
+    const worldDir = this.getActiveWorldDirectory(context);
+    const candidates = [
+      path.join(worldDir, "players", "data", `${uuid}.dat`),
+      path.join(worldDir, "playerdata", `${uuid}.dat`),
+    ];
+    for (const candidate of candidates) {
+      if (await fileExists(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  async readPlayerDataRoot(targetPath) {
+    const parsed = await nbt.parse(await fs.readFile(targetPath));
+    return parsed.parsed ?? parsed;
+  }
+
+  async writePlayerDataRoot(targetPath, root) {
+    const encoded = nbt.writeUncompressed(root);
+    const compressed = await gzip(encoded);
+    await fs.writeFile(targetPath, compressed);
+  }
+
+  findFirstAvailableInventorySlot(rawItems) {
+    const occupied = new Set(
+      (rawItems ?? [])
+        .map((item) => normalizeInventorySlotValue(item?.Slot?.value ?? item?.Slot))
+        .filter((value) => Number.isFinite(value) && value >= 0 && value <= 35),
+    );
+    for (let slotId = 0; slotId <= 35; slotId += 1) {
+      if (!occupied.has(slotId)) {
+        return slotId;
+      }
+    }
+    return null;
+  }
+
+  async getPlayerInventory(serverId, name, { refreshLiveData = true } = {}) {
+    const context = this.getServerContext(serverId);
+    const players = await this.getPlayers(serverId);
+    const normalized = normalizePlayerName(name);
+    const player =
+      players.find((entry) => playerKey(entry.name) === playerKey(normalized)) ?? null;
+    if (!player) {
+      throw new Error("Player was not found.");
+    }
+    if (!player.uuid) {
+      throw new Error("This player has no known UUID yet, so Releu cannot open their saved inventory.");
+    }
+
+    let playerDataPath = await this.resolvePlayerDataFile(serverId, player.uuid);
+    const previousStats = playerDataPath
+      ? await fs.stat(playerDataPath).catch(() => null)
+      : null;
+    const usedLiveRefresh = Boolean(refreshLiveData && context.serverProcess && player.online);
+
+    if (usedLiveRefresh) {
+      await this.flushPlayerDataToDisk(serverId);
+      if (!playerDataPath) {
+        playerDataPath = await this.resolvePlayerDataFile(serverId, player.uuid);
+      }
+      await this.waitForPlayerDataRefresh(
+        playerDataPath,
+        previousStats?.mtimeMs ?? null,
+      );
+    }
+
+    if (!playerDataPath) {
+      playerDataPath = await this.resolvePlayerDataFile(serverId, player.uuid);
+    }
+    if (!playerDataPath) {
+      throw new Error("No saved inventory file was found for this player yet.");
+    }
+
+    const finalStats = await fs.stat(playerDataPath).catch(() => null);
+    const root = await this.readPlayerDataRoot(playerDataPath);
+    const simplified = nbt.simplify(root);
+    const inventoryItems = Array.isArray(simplified.Inventory) ? simplified.Inventory : [];
+    const selectedHotbarSlot = Number(simplified.SelectedItemSlot ?? 0) || 0;
+    const catalog = this.getInventoryCatalog(serverId);
+    const layout = buildInventoryView(inventoryItems, selectedHotbarSlot, catalog.byId);
+
+    return {
+      player: {
+        name: player.name,
+        uuid: player.uuid,
+        online: Boolean(player.online),
+        gamemode: player.gamemode ?? null,
+      },
+      selectedHotbarSlot,
+      occupiedSlots: layout.occupiedSlots,
+      totalSlots: layout.totalSlots,
+      armor: layout.armor,
+      offhand: layout.offhand,
+      main: layout.main,
+      hotbar: layout.hotbar,
+      storagePath: playerDataPath,
+      snapshotAt: finalStats?.mtime?.toISOString?.() ?? currentTimestamp(),
+      source: usedLiveRefresh ? "live-playerdata" : "saved-playerdata",
+      textureUrl: defaultInventoryTextureUrl,
+      canEditOffline: !player.online,
+      canEditOnline: Boolean(context.serverProcess && player.online),
+    };
+  }
+
+  async givePlayerInventoryItem(serverId, name, payload = {}) {
+    const context = this.getServerContext(serverId);
+    const players = await this.getPlayers(serverId);
+    const normalized = normalizePlayerName(name);
+    const player =
+      players.find((entry) => playerKey(entry.name) === playerKey(normalized)) ?? null;
+    if (!player) {
+      throw new Error("Player was not found.");
+    }
+
+    const requestedItemId = String(payload.itemId ?? "").trim();
+    if (!requestedItemId) {
+      throw new Error("Item ID is required.");
+    }
+
+    const normalizedItemId = requestedItemId.startsWith("minecraft:")
+      ? requestedItemId
+      : `minecraft:${requestedItemId.replace(/^minecraft:/i, "")}`;
+    const count = Math.max(1, Math.min(9999, Number(payload.count ?? 1) || 1));
+    const catalog = this.getInventoryCatalog(serverId);
+    const catalogEntry =
+      catalog.byId.get(normalizedItemId) ??
+      catalog.byName.get(normalizedItemId.replace(/^minecraft:/i, ""));
+    if (!catalogEntry) {
+      throw new Error("That item is not in the vanilla Minecraft item catalog.");
+    }
+
+    if (context.serverProcess && player.online) {
+      await this.sendCommand(serverId, `give ${player.name} ${catalogEntry.id} ${count}`);
+      await this.flushPlayerDataToDisk(serverId);
+      this.appendLog(
+        serverId,
+        "panel",
+        `Gave ${count}x ${catalogEntry.displayName} to ${player.name}.`,
+      );
+      return this.getPlayerInventory(serverId, player.name, { refreshLiveData: true });
+    }
+
+    if (!player.uuid) {
+      throw new Error("This player has no known UUID yet, so Releu cannot edit their saved inventory.");
+    }
+
+    const playerDataPath = await this.resolvePlayerDataFile(serverId, player.uuid);
+    if (!playerDataPath) {
+      throw new Error("No saved inventory file was found for this player yet.");
+    }
+
+    const root = await this.readPlayerDataRoot(playerDataPath);
+    if (!root.value.Inventory) {
+      root.value.Inventory = {
+        type: "list",
+        value: {
+          type: "compound",
+          value: [],
+        },
+      };
+    }
+    const inventoryTag = root.value.Inventory;
+    const rawItems = Array.isArray(inventoryTag?.value?.value) ? inventoryTag.value.value : [];
+    const draftItems = rawItems.map((item) => structuredClone(item));
+    const stackSize = Math.max(1, catalogEntry.stackSize || 64);
+    let remaining = count;
+
+    for (const item of draftItems) {
+      const slotId = normalizeInventorySlotValue(item?.Slot?.value);
+      if (!(slotId >= 0 && slotId <= 35)) {
+        continue;
+      }
+      if (inventoryItemId(item) !== catalogEntry.id) {
+        continue;
+      }
+      if (inventoryItemComponents(item)) {
+        continue;
+      }
+      const currentCount = inventoryItemCount(item);
+      const roomLeft = stackSize - currentCount;
+      if (roomLeft <= 0) {
+        continue;
+      }
+      const adding = Math.min(roomLeft, remaining);
+      item.count.value = currentCount + adding;
+      remaining -= adding;
+      if (remaining <= 0) {
+        break;
+      }
+    }
+
+    while (remaining > 0) {
+      const slotId = this.findFirstAvailableInventorySlot(draftItems);
+      if (slotId === null) {
+        throw new Error("This player has no free inventory slots left.");
+      }
+      const adding = Math.min(stackSize, remaining);
+      draftItems.push({
+        Slot: { type: "byte", value: serializeInventorySlotValue(slotId) },
+        id: { type: "string", value: catalogEntry.id },
+        count: { type: "int", value: adding },
+      });
+      remaining -= adding;
+    }
+
+    inventoryTag.value.value = draftItems;
+    await this.writePlayerDataRoot(playerDataPath, root);
+    this.appendLog(
+      serverId,
+      "panel",
+      `Added ${count}x ${catalogEntry.displayName} to ${player.name}'s saved inventory.`,
+    );
+    return this.getPlayerInventory(serverId, player.name, { refreshLiveData: false });
+  }
+
+  async clearPlayerInventory(serverId, name, payload = {}) {
+    const context = this.getServerContext(serverId);
+    const players = await this.getPlayers(serverId);
+    const normalized = normalizePlayerName(name);
+    const player =
+      players.find((entry) => playerKey(entry.name) === playerKey(normalized)) ?? null;
+    if (!player) {
+      throw new Error("Player was not found.");
+    }
+
+    const clearAll = Boolean(payload.clearAll);
+    const slotId = payload.slotId === undefined || payload.slotId === null
+      ? null
+      : normalizeInventorySlotValue(payload.slotId);
+
+    if (!clearAll && slotId === null) {
+      throw new Error("A slot ID is required unless you are clearing the whole inventory.");
+    }
+
+    if (context.serverProcess && player.online) {
+      if (clearAll) {
+        await this.sendCommand(serverId, `clear ${player.name}`);
+      } else {
+        const definition = getInventorySlotDefinition(slotId);
+        if (!definition?.commandSlot) {
+          throw new Error("That inventory slot cannot be cleared from a live player.");
+        }
+        await this.sendCommand(
+          serverId,
+          `item replace entity ${player.name} ${definition.commandSlot} with minecraft:air`,
+        );
+      }
+      await this.flushPlayerDataToDisk(serverId);
+      this.appendLog(
+        serverId,
+        "panel",
+        clearAll
+          ? `Cleared ${player.name}'s live inventory.`
+          : `Cleared ${player.name}'s ${getInventorySlotDefinition(slotId)?.label ?? "inventory slot"}.`,
+      );
+      return this.getPlayerInventory(serverId, player.name, { refreshLiveData: true });
+    }
+
+    if (!player.uuid) {
+      throw new Error("This player has no known UUID yet, so Releu cannot edit their saved inventory.");
+    }
+
+    const playerDataPath = await this.resolvePlayerDataFile(serverId, player.uuid);
+    if (!playerDataPath) {
+      throw new Error("No saved inventory file was found for this player yet.");
+    }
+
+    const root = await this.readPlayerDataRoot(playerDataPath);
+    if (!root.value.Inventory) {
+      root.value.Inventory = {
+        type: "list",
+        value: {
+          type: "compound",
+          value: [],
+        },
+      };
+    }
+    const inventoryTag = root.value.Inventory;
+    const rawItems = Array.isArray(inventoryTag?.value?.value) ? inventoryTag.value.value : [];
+
+    inventoryTag.value.value = clearAll
+      ? []
+      : rawItems.filter((item) => normalizeInventorySlotValue(item?.Slot?.value) !== slotId);
+
+    await this.writePlayerDataRoot(playerDataPath, root);
+    this.appendLog(
+      serverId,
+      "panel",
+      clearAll
+        ? `Cleared ${player.name}'s saved inventory.`
+        : `Removed the item in ${getInventorySlotDefinition(slotId)?.label ?? "that slot"} from ${player.name}'s saved inventory.`,
+    );
+    return this.getPlayerInventory(serverId, player.name, { refreshLiveData: false });
   }
 
   async resolvePlayerIdentity(serverId, name) {

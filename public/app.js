@@ -13,7 +13,7 @@ const PELICAN_ASSET_HREFS = [
 ];
 
 function detectInitialUiVariant() {
-  return UI_VARIANT_CLASSIC;
+  return UI_VARIANT_PELICAN_BLUEPRINT;
 }
 
 const runtime = { latestLogId: 0, consoleText: "", data: null, versionCache: new Map() };
@@ -21,6 +21,7 @@ let playitGatePollTimer = null;
 let playitGateConnectPromise = null;
 let logsPollTimer = null;
 let statePollTimer = null;
+let miscAutosaveTimer = null;
 const ui = {
   bootstrap: {
     active: true,
@@ -116,8 +117,8 @@ function syncVariantAssets() {
 
 function currentUiSettings() {
   return runtime.data?.uiSettings ?? {
-    variant: UI_VARIANT_CLASSIC,
-    hasChosenVariant: false,
+    variant: UI_VARIANT_PELICAN_BLUEPRINT,
+    hasChosenVariant: true,
   };
 }
 
@@ -143,15 +144,8 @@ function maybeRedirectToPreferredUi() {
 }
 
 function syncUiPickerPrompt() {
-  const uiSettings = currentUiSettings();
-  if (uiSettings.hasChosenVariant) {
-    if (ui.modal?.type === "ui-picker") {
-      ui.modal = null;
-    }
-    return;
-  }
-  if (!ui.modal) {
-    ui.modal = { type: "ui-picker" };
+  if (ui.modal?.type === "ui-picker") {
+    ui.modal = null;
   }
 }
 
@@ -541,6 +535,13 @@ function currentStatePollMs() {
   if (ui.bootstrap.active) return 1200;
   if (isUiLocked()) return 900;
   if (isCreateServerModalOpen()) return 30000;
+  if (ui.section === "misc") {
+    const focused = document.activeElement;
+    if (focused?.closest?.('form[data-form="misc-settings"]')) {
+      return 4000;
+    }
+    return 1000;
+  }
 
   const server = activeServer();
   const status = activeServerStatus();
@@ -2290,7 +2291,8 @@ function renderPlayersSection(server) {
 
 function renderWorldsSection(server) {
   const world = currentWorld(server)?.name ?? server.server.properties["level-name"] ?? "world";
-  return `<div class="space-y-8"><div class="grid grid-cols-1 gap-4 md:grid-cols-3"><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Worlds</h3><h2 class="text-2xl font-semibold uppercase text-white">Active World</h2></div><form data-form="world-select" class="flex flex-col gap-4"><label class="flex flex-col gap-2"><span class="${C.label}">World Name</span><select name="name" class="${C.input}">${server.worlds.map((entry) => `<option value="${escapeHtml(entry.name)}" ${entry.name === world ? "selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}</select></label><div class="flex flex-col gap-2"><button type="submit" class="${C.btnPrimary} py-3">Use This World</button><button type="button" class="${C.btnGhost} py-3" data-action="regenerate-active-world">Regenerate Active World</button></div></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Upload World</h3><h2 class="text-2xl font-semibold uppercase text-white">Import A Zip</h2></div><form data-form="world-archive-upload" class="flex flex-col gap-4"><input name="file" type="file" accept=".zip,.mcworld" required class="w-full border border-outline bg-black px-4 py-3 text-sm text-zinc-300 file:mr-4 file:border-0 file:bg-white file:px-3 file:py-2 file:text-[11px] file:font-bold file:uppercase file:tracking-[0.18em] file:text-black" /><input name="worldName" type="text" placeholder="survival-archive" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Upload World Archive</button></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Import Folder</h3><h2 class="text-2xl font-semibold uppercase text-white">Use A Local World Folder</h2></div><form data-form="world-folder-import" class="flex flex-col gap-4"><div class="flex gap-2"><input name="sourcePath" type="text" placeholder="C:\\Worlds\\MyWorld" class="${C.input} flex-1" />${isDesktopApp() ? `<button type="button" class="${C.btnGhost}" data-action="pick-world-folder">Browse</button>` : ""}</div><input name="worldName" type="text" placeholder="local-import-01" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Import World Folder</button></form></section></div><div class="grid grid-cols-1 gap-4 xl:grid-cols-2">${server.worlds.map((entry) => renderWorldCard(entry)).join("")}</div></div>`;
+  const levelSeed = String(server.server?.properties?.["level-seed"] ?? "").trim();
+  return `<div class="space-y-8"><div class="grid grid-cols-1 gap-4 md:grid-cols-3"><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Worlds</h3><h2 class="text-2xl font-semibold uppercase text-white">Active World</h2></div><form data-form="world-select" class="flex flex-col gap-4"><label class="flex flex-col gap-2"><span class="${C.label}">World Name</span><select name="name" class="${C.input}">${server.worlds.map((entry) => `<option value="${escapeHtml(entry.name)}" ${entry.name === world ? "selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}</select></label><label class="flex flex-col gap-2"><span class="${C.label}">Level Seed (Optional)</span><input name="seed" type="text" value="${escapeHtml(levelSeed)}" placeholder="Leave blank for random generation" class="${C.input}" /></label><div class="flex flex-col gap-2"><button type="submit" class="${C.btnPrimary} py-3">Use This World</button><button type="button" class="${C.btnGhost} py-3" data-action="regenerate-active-world">Regenerate Active World</button></div></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Upload World</h3><h2 class="text-2xl font-semibold uppercase text-white">Import A Zip</h2></div><form data-form="world-archive-upload" class="flex flex-col gap-4"><input name="file" type="file" accept=".zip,.mcworld" required class="w-full border border-outline bg-black px-4 py-3 text-sm text-zinc-300 file:mr-4 file:border-0 file:bg-white file:px-3 file:py-2 file:text-[11px] file:font-bold file:uppercase file:tracking-[0.18em] file:text-black" /><input name="worldName" type="text" placeholder="survival-archive" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Upload World Archive</button></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Import Folder</h3><h2 class="text-2xl font-semibold uppercase text-white">Use A Local World Folder</h2></div><form data-form="world-folder-import" class="flex flex-col gap-4"><div class="flex gap-2"><input name="sourcePath" type="text" placeholder="C:\\Worlds\\MyWorld" class="${C.input} flex-1" />${isDesktopApp() ? `<button type="button" class="${C.btnGhost}" data-action="pick-world-folder">Browse</button>` : ""}</div><input name="worldName" type="text" placeholder="local-import-01" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Import World Folder</button></form></section></div><div class="grid grid-cols-1 gap-4 xl:grid-cols-2">${server.worlds.map((entry) => renderWorldCard(entry)).join("")}</div></div>`;
 }
 
 function renderAddonCompatibilityBanner(server, kind) {
@@ -2392,47 +2394,84 @@ function renderBackupsSection(server) {
 }
 
 function renderMiscSection(server) {
-  const crackedClientsEnabled =
-    String(server.server.properties["online-mode"] ?? "true").toLowerCase() !== "true";
+  const properties = server.server?.properties ?? {};
   const misc = server.misc ?? {};
-  const toggleSelect = (name, label, enabled, help = "") => `
+  const boolProp = (key, fallback = false) =>
+    String(properties[key] ?? String(fallback)).toLowerCase() === "true";
+  const crackedClientsEnabled = !boolProp("online-mode", true);
+  const allowProxyConnections = !boolProp("prevent-proxy-connections", false);
+  const pauseWhenEmptyEnabled =
+    (Number.parseInt(String(properties["pause-when-empty-seconds"] ?? "-1"), 10) || -1) > 0;
+  const selectField = (name, label, enabled, help = "") => `
     <label class="block space-y-2">
       <span class="${C.label} block">${escapeHtml(label)}</span>
       <select name="${escapeHtml(name)}" class="${C.input} w-full font-mono text-sm">
         <option value="false" ${enabled ? "" : "selected"}>Disabled</option>
         <option value="true" ${enabled ? "selected" : ""}>Enabled</option>
       </select>
-      ${help ? `<span class="block text-xs text-zinc-500">${escapeHtml(help)}</span>` : ""}
+      ${help ? `<span class="block text-xs leading-5 text-zinc-500">${escapeHtml(help)}</span>` : ""}
+    </label>`;
+  const numberField = (name, label, value, help = "", minimum = 0) => `
+    <label class="block space-y-2">
+      <span class="${C.label} block">${escapeHtml(label)}</span>
+      <input name="${escapeHtml(name)}" type="number" min="${minimum}" value="${escapeHtml(String(value ?? minimum))}" class="${C.input} w-full font-mono text-sm" />
+      ${help ? `<span class="block text-xs leading-5 text-zinc-500">${escapeHtml(help)}</span>` : ""}
     </label>`;
 
   return `<div class="grid grid-cols-12 gap-4">
-    <section class="${C.card} col-span-12">
-      <div class="mb-6">
-        <h2 class="mb-4 border-b border-zinc-900 pb-2 text-xl font-semibold uppercase tracking-[0.12em] text-white">Misc</h2>
-        <p class="text-sm text-zinc-400">Gameplay and access controls that don't belong in the core Settings page.</p>
+    <section class="${C.card} col-span-12 space-y-6">
+      <div class="space-y-3">
+        <h2 class="border-b border-zinc-900 pb-2 text-xl font-semibold uppercase tracking-[0.12em] text-white">Misc</h2>
+        <p class="text-sm text-zinc-400">Gameplay, visibility, and server access controls that sync back into the real server files. Changes save automatically while this page checks for external file updates every second.</p>
       </div>
-      <form data-form="misc-settings" class="space-y-8">
+      <form data-form="misc-settings" class="space-y-6">
         <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
-          <div class="border border-outline bg-black p-5">
-            <div class="${C.labelOn} mb-4">Player Access</div>
+          <div class="space-y-4 border border-outline bg-black p-5">
+            <div class="${C.labelOn}">Player Access</div>
             <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-              ${toggleSelect("allowCrackedClients", "Allow Cracked Clients", crackedClientsEnabled)}
-              ${toggleSelect("whitelist", "Whitelist", String(server.server.properties["white-list"] ?? "false") === "true")}
-              ${toggleSelect("commandBlocks", "Command Blocks", String(server.server.properties["enable-command-block"] ?? "false") === "true")}
+              ${selectField("allowCrackedClients", "Allow Cracked Clients", crackedClientsEnabled, "Let players join without a premium account by turning online-mode off.")}
+              ${selectField("whitelist", "Whitelist", boolProp("white-list", false), "Only players on the allowlist can join the server.")}
+              ${selectField("showPlayerCount", "Show Player Count", boolProp("enable-status", true), "Expose the server in the multiplayer list with status and player counts.")}
+              ${selectField("hideOnlinePlayers", "Hide Online Players", boolProp("hide-online-players", false), "Hide the online player sample from server-list pings while keeping the server visible.")}
+              ${selectField("allowProxyConnections", "Allow Proxy Connections", allowProxyConnections, "Allow players to join through proxy or tunnel setups instead of blocking mismatched ISP checks.")}
+              ${numberField("maxPlayers", "Max Players", properties["max-players"] ?? 100, "Set how many players can join at the same time. Defaults to 100 if no value is set yet.", 1)}
+              ${numberField("playerIdleTimeout", "Idle Kick Time", properties["player-idle-timeout"] ?? 0, "Kick idle players after this many minutes. Set 0 to disable the idle kick.", 0)}
             </div>
           </div>
-          <div class="border border-outline bg-black p-5">
-            <div class="${C.labelOn} mb-4">World Rules</div>
+          <div class="space-y-4 border border-outline bg-black p-5">
+            <div class="${C.labelOn}">Server Admin</div>
             <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-              ${toggleSelect("pvp", "PvP", String(server.server.properties.pvp ?? "true") === "true")}
-              ${toggleSelect("allowFlight", "Allow Flight", String(server.server.properties["allow-flight"] ?? "false") === "true")}
-              ${toggleSelect("keepInventory", "Keep Inventory", Boolean(misc.keepInventory), "Applied immediately if the server is already running.")}
-              ${toggleSelect("sharedHealth", "Shared Health", Boolean(misc.sharedHealth), "Saved as a Releu misc preference for shared-health-compatible setups.")}
+              ${selectField("commandBlocks", "Command Blocks", boolProp("enable-command-block", false), "Allow command block logic inside the world.")}
+              ${numberField("spawnProtection", "Spawn Protection", properties["spawn-protection"] ?? 0, "Protection radius around world spawn in blocks. Use 0 to disable it.", 0)}
+              ${selectField("pauseWhenEmpty", "Pause When Empty", pauseWhenEmptyEnabled, "Pause the server after it has been empty for a while. Releu uses 60 seconds when enabled.")}
+              ${selectField("logPlayerIPs", "Log Player IPs", boolProp("log-ips", true), "Write connecting player IP addresses into the server log.")}
             </div>
           </div>
         </div>
-        <div class="flex flex-wrap items-center gap-3 border-t border-zinc-900 pt-4">
-          <button type="submit" class="${C.btnPrimary}">Save Misc Settings</button>
+
+        <div class="space-y-4 border border-outline bg-black p-5">
+          <div class="${C.labelOn}">World Rules</div>
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            ${selectField("pvp", "PvP", boolProp("pvp", true), "Allow players to damage each other.")}
+            ${selectField("allowFlight", "Allow Flight", boolProp("allow-flight", false), "Prevent players with flying mods or plugin powers from being kicked.")}
+            ${selectField("keepInventory", "Keep Inventory", Boolean(misc.keepInventory), "Applied through a gamerule when the server is running.")}
+            ${selectField("sharedHealth", "Shared Health", Boolean(misc.sharedHealth), "Saved as a Releu preference for shared-health-compatible setups.")}
+            ${selectField("hardcore", "Hardcore Mode", boolProp("hardcore", false), "Players become spectators on death and the world behaves like a hardcore server.")}
+            ${selectField("forceGamemode", "Force Gamemode", boolProp("force-gamemode", false), "Reset joining players back to the default gamemode every time they reconnect.")}
+            ${selectField("generateStructures", "Generate Structures", boolProp("generate-structures", true), "Create villages, temples, strongholds, and other generated structures.")}
+          </div>
+        </div>
+
+        <div class="space-y-4 border border-outline bg-black p-5">
+          <div class="${C.labelOn}">Dimensions</div>
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            ${selectField("allowNether", "Allow Nether", boolProp("allow-nether", true), "Let portals send players into the Nether dimension.")}
+            ${selectField("allowEnd", "Allow The End", boolProp("allow-end", true), "Let players enter The End. Paper and Purpur also mirror this into bukkit.yml when available.")}
+          </div>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-900 pt-4">
+          <div class="text-xs text-zinc-500" data-misc-autosave-status>Changes save automatically.</div>
           <button type="button" class="${C.btnGhost}" data-action="switch-section" data-section="settings">Back To Settings</button>
         </div>
       </form>
@@ -2441,6 +2480,7 @@ function renderMiscSection(server) {
 }
 
 function renderUiPreferencePanel() {
+  return "";
   const uiSettings = currentUiSettings();
   const currentVariant = uiSettings.variant === UI_VARIANT_PELICAN_BLUEPRINT
     ? UI_VARIANT_PELICAN_BLUEPRINT
@@ -2525,7 +2565,7 @@ function renderSettingsSection(server) {
   const appUpdate = runtime.data.appUpdate;
   const cloud = ui.cloudBackupStatus ?? {};
   const cloudConfig = runtime.data.cloudBackupSettings ?? {};
-  const cloudProvider = cloud.provider ?? cloudConfig.provider ?? "supabase";
+  const cloudProvider = cloud.provider ?? cloudConfig.provider ?? "tailscale-ssh";
   const usingTailscaleCloud = cloudProvider === "tailscale-ssh";
   const cloudUploadLimitBytes =
     Number(cloud.uploadLimitBytes ?? (cloudConfig.uploadLimitMb ?? 50) * 1024 * 1024) || 0;
@@ -2587,7 +2627,9 @@ function renderSettingsSection(server) {
         </div>
         <p class="text-sm text-zinc-400">${escapeHtml(playit.secretConfigured ? "Reset the saved playit.gg link if this PC was connected to the wrong account or if you want to relink from scratch." : "No playit.gg account is linked right now. If the agent file is ever missing, Releu will reinstall it automatically the next time you link it.")}</p>
         <div class="mt-4 flex flex-wrap gap-2">
-          <button type="button" class="${C.btnGhost}" data-action="playit-reset-prompt">Reset Agent</button>
+          ${playit.secretConfigured
+            ? `<button type="button" class="${C.btnGhost}" data-action="playit-reset-prompt">Reset Agent</button>`
+            : `<button type="button" class="${C.btnPrimary}" data-action="playit-connect">Connect Playit Agent</button>`}
         </div>
       </div>
       <div class="${C.card}">
@@ -2639,24 +2681,54 @@ function renderSettingsSection(server) {
             <input name="deviceLabel" type="text" value="${escapeHtml(cloud.deviceLabel ?? cloudConfig.deviceLabel ?? "")}" placeholder="My desktop PC" class="${C.input} w-full" />
           </label>
           <input name="provider" type="hidden" value="${escapeHtml(cloudProvider)}" />
-          <label class="block">
-            <span class="${C.label} mb-2 block">Restore Key</span>
-            <input type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first" class="${C.input} w-full font-mono text-xs" />
-          </label>
+          ${usingTailscaleCloud
+            ? `
+              <label class="block">
+                <span class="${C.label} mb-2 block">Cloud Username</span>
+                <input name="accountUsername" type="text" value="${escapeHtml(cloud.accountUsername ?? cloudConfig.accountUsername ?? "")}" placeholder="alex" class="${C.input} w-full" />
+              </label>
+              <label class="block">
+                <span class="${C.label} mb-2 block">Cloud Password</span>
+                <input name="accountPassword" type="password" value="" placeholder="Log in to backup" class="${C.input} w-full" />
+              </label>
+              <label class="block">
+                <span class="${C.label} mb-2 block">My Backup Key</span>
+                <input type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Register or log in first" class="${C.input} w-full font-mono text-xs" />
+              </label>
+              <label class="block">
+                <span class="${C.label} mb-2 block">Shared Backup Key (Optional)</span>
+                <input name="targetRestoreKey" type="text" value="${escapeHtml(cloud.targetRestoreKey ?? cloudConfig.targetRestoreKey ?? "")}" placeholder="Enter another user's key to upload or restore their backup space" class="${C.input} w-full font-mono text-xs" />
+              </label>`
+            : `
+              <label class="block">
+                <span class="${C.label} mb-2 block">Restore Key</span>
+                <input type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first" class="${C.input} w-full font-mono text-xs" />
+              </label>`}
           <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
             <div>${usingTailscaleCloud ? "Connection" : "Function"}: <span class="font-mono text-zinc-200">${escapeHtml(cloud.functionReady ? "ready" : ui.cloudBackupStatusLoading ? "checking" : "not ready")}</span></div>
+            ${usingTailscaleCloud ? `<div class="mt-1">Login: <span class="font-mono text-zinc-200">${escapeHtml(cloud.loggedIn ? `logged in as ${cloud.accountUsername || "account"}` : "not logged in")}</span></div>` : ""}
             <div class="mt-1">Upload limit: <span class="font-mono text-zinc-200">${escapeHtml(cloudUploadLimitLabel)}</span></div>
             <div class="mt-1">Cloud used: <span class="font-mono text-zinc-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
             <div class="mt-1">Saved backups: <span class="font-mono text-zinc-200">${escapeHtml(formatCount(cloud.backupsCount ?? 0))}</span></div>
             <div class="mt-1">Latest backup: <span class="font-mono text-zinc-200">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>
+            ${usingTailscaleCloud && cloud.usingSharedRestoreKey ? `<div class="mt-1">Target key: <span class="font-mono text-zinc-200">shared backup space</span></div>` : ""}
+            ${cloud.authError ? `<div class="mt-2 text-red-300">${escapeHtml(cloud.authError)}</div>` : ""}
             ${cloud.functionError ? `<div class="mt-2 text-red-300">${escapeHtml(cloud.functionError)}</div>` : ""}
           </div>
           <div class="flex flex-wrap gap-2">
             <button type="submit" class="${C.btnPrimary}">Save Cloud Settings</button>
             <button type="button" class="${C.btnGhost}" data-action="cloud-backup-refresh">Refresh Cloud Status</button>
-            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-issue-key">${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
-            ${!cloud.restoreKeyPresent ? "" : `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>`}
-            <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled || !cloud.restoreKeyPresent ? "disabled" : ""}>Backup To Cloud Now</button>
+            ${usingTailscaleCloud
+              ? `
+                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-register">Register</button>
+                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-login">Log In</button>
+                ${cloud.loggedIn ? `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-logout">Log Out</button>` : ""}
+                ${cloud.loggedIn ? `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>` : ""}
+                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled || !cloud.loggedIn ? "disabled" : ""}>Backup To Cloud Now</button>`
+              : `
+                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-issue-key">${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
+                ${!cloud.restoreKeyPresent ? "" : `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>`}
+                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled || !cloud.restoreKeyPresent ? "disabled" : ""}>Backup To Cloud Now</button>`}
           </div>
           <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
             <div class="mb-3 text-[11px] font-bold uppercase tracking-[0.18em] text-white">${usingTailscaleCloud ? "Rolling Cloud Backup" : "Cloud Backups"}</div>
@@ -3253,15 +3325,42 @@ async function handleAction(event) {
         break;
       }
       case "use-world":
-        await api(activeServerPath("/worlds/select"), { method: "POST", body: { name: button.dataset.worldName } });
+        await api(activeServerPath("/worlds/select"), {
+          method: "POST",
+          body: {
+            name: button.dataset.worldName,
+            seed: document.querySelector('[data-form="world-select"] [name="seed"]')?.value ?? "",
+          },
+        });
         await refreshState();
         break;
       case "regenerate-world":
-        await api(activeServerPath("/worlds/regenerate"), { method: "POST", body: { name: button.dataset.worldName } });
+        if (!window.confirm(`Regenerate "${button.dataset.worldName}"?\n\nReleu will keep the current world as a saved switchable world, then Minecraft will generate a fresh "${button.dataset.worldName}" on the next server start.`)) {
+          break;
+        }
+        await api(activeServerPath("/worlds/regenerate"), {
+          method: "POST",
+          body: {
+            name: button.dataset.worldName,
+            seed: document.querySelector('[data-form="world-select"] [name="seed"]')?.value ?? "",
+          },
+        });
         await refreshState();
         break;
       case "regenerate-active-world":
-        await api(activeServerPath("/worlds/regenerate"), { method: "POST", body: { name: activeServer()?.server?.properties?.["level-name"] ?? "world" } });
+        {
+          const activeWorldName = activeServer()?.server?.properties?.["level-name"] ?? "world";
+          if (!window.confirm(`Regenerate "${activeWorldName}"?\n\nReleu will keep the current world as a saved switchable world, then Minecraft will generate a fresh "${activeWorldName}" on the next server start.`)) {
+            break;
+          }
+        }
+        await api(activeServerPath("/worlds/regenerate"), {
+          method: "POST",
+          body: {
+            name: activeServer()?.server?.properties?.["level-name"] ?? "world",
+            seed: document.querySelector('[data-form="world-select"] [name="seed"]')?.value ?? "",
+          },
+        });
         await refreshState();
         break;
       case "playit-connect": {
@@ -3295,6 +3394,46 @@ async function handleAction(event) {
       }
       case "cloud-backup-rotate-key": {
         const payload = await api("/api/cloud-backup/rotate-key", { method: "POST" });
+        runtime.data = payload.state;
+        ui.cloudBackupStatus = payload.cloudBackup ?? null;
+        ui.cloudBackupStatusFetchedAt = Date.now();
+        render();
+        break;
+      }
+      case "cloud-backup-register": {
+        const form = document.querySelector('[data-form="cloud-backup-settings"]');
+        const payload = await api("/api/cloud-backup/register", {
+          method: "POST",
+          body: {
+            username: form?.elements?.accountUsername?.value ?? "",
+            password: form?.elements?.accountPassword?.value ?? "",
+            deviceLabel: form?.elements?.deviceLabel?.value ?? "",
+          },
+        });
+        runtime.data = payload.state;
+        ui.cloudBackupStatus = payload.cloudBackup ?? null;
+        ui.cloudBackupStatusFetchedAt = Date.now();
+        render();
+        break;
+      }
+      case "cloud-backup-login": {
+        const form = document.querySelector('[data-form="cloud-backup-settings"]');
+        const payload = await api("/api/cloud-backup/login", {
+          method: "POST",
+          body: {
+            username: form?.elements?.accountUsername?.value ?? "",
+            password: form?.elements?.accountPassword?.value ?? "",
+            deviceLabel: form?.elements?.deviceLabel?.value ?? "",
+          },
+        });
+        runtime.data = payload.state;
+        ui.cloudBackupStatus = payload.cloudBackup ?? null;
+        ui.cloudBackupStatusFetchedAt = Date.now();
+        render();
+        break;
+      }
+      case "cloud-backup-logout": {
+        const payload = await api("/api/cloud-backup/logout", { method: "POST" });
         runtime.data = payload.state;
         ui.cloudBackupStatus = payload.cloudBackup ?? null;
         ui.cloudBackupStatusFetchedAt = Date.now();
@@ -3470,7 +3609,13 @@ async function handleSubmit(event) {
         await performSoftwareUpdate();
         break;
       case "world-select":
-        await api(activeServerPath("/worlds/select"), { method: "POST", body: { name: form.elements.name.value } });
+        await api(activeServerPath("/worlds/select"), {
+          method: "POST",
+          body: {
+            name: form.elements.name.value,
+            seed: form.elements.seed?.value ?? "",
+          },
+        });
         await refreshState();
         break;
       case "world-archive-upload": {
@@ -3569,33 +3714,67 @@ async function handleSubmit(event) {
         await refreshState();
         break;
       case "misc-settings":
-        if (Boolean(activeServer().misc?.keepInventory) !== (form.elements.keepInventory.value === "true")) {
-          const proceed = window.confirm(
-            "Warning: changing Keep Inventory can immediately affect what players are wearing or holding in their inventory. Do you want to continue?",
-          );
-          if (!proceed) {
-            break;
+        form.dataset.miscSaving = "true";
+        form.dataset.miscResubmit = "false";
+        try {
+          if (Boolean(activeServer().misc?.keepInventory) !== (form.elements.keepInventory.value === "true")) {
+            const proceed = window.confirm(
+              "Warning: changing Keep Inventory can immediately affect what players are wearing or holding in their inventory. Do you want to continue?",
+            );
+            if (!proceed) {
+              break;
+            }
+          }
+          await api(activeServerPath("/settings/misc"), {
+            method: "POST",
+            body: {
+              allowCrackedClients: form.elements.allowCrackedClients.value === "true",
+              whitelist: form.elements.whitelist.value === "true",
+              commandBlocks: form.elements.commandBlocks.value === "true",
+              showPlayerCount: form.elements.showPlayerCount.value === "true",
+              hideOnlinePlayers: form.elements.hideOnlinePlayers.value === "true",
+              allowProxyConnections: form.elements.allowProxyConnections.value === "true",
+              maxPlayers: form.elements.maxPlayers.value,
+              playerIdleTimeout: form.elements.playerIdleTimeout.value,
+              spawnProtection: form.elements.spawnProtection.value,
+              pauseWhenEmpty: form.elements.pauseWhenEmpty.value === "true",
+              pvp: form.elements.pvp.value === "true",
+              allowFlight: form.elements.allowFlight.value === "true",
+              keepInventory: form.elements.keepInventory.value === "true",
+              sharedHealth: form.elements.sharedHealth.value === "true",
+              hardcore: form.elements.hardcore.value === "true",
+              forceGamemode: form.elements.forceGamemode.value === "true",
+              generateStructures: form.elements.generateStructures.value === "true",
+              logPlayerIPs: form.elements.logPlayerIPs.value === "true",
+              allowNether: form.elements.allowNether.value === "true",
+              allowEnd: form.elements.allowEnd.value === "true",
+            },
+          });
+          await refreshState();
+          {
+            const statusNode = document.querySelector("[data-misc-autosave-status]");
+            if (statusNode) {
+              statusNode.textContent = `Saved automatically at ${new Date().toLocaleTimeString()}.`;
+            }
+          }
+        } finally {
+          form.dataset.miscSaving = "false";
+          if (form.dataset.miscResubmit === "true") {
+            form.dataset.miscResubmit = "false";
+            window.setTimeout(() => {
+              if (document.body.contains(form)) {
+                form.requestSubmit();
+              }
+            }, 0);
           }
         }
-        await api(activeServerPath("/settings/misc"), {
-          method: "POST",
-          body: {
-            allowCrackedClients: form.elements.allowCrackedClients.value === "true",
-            whitelist: form.elements.whitelist.value === "true",
-            commandBlocks: form.elements.commandBlocks.value === "true",
-            pvp: form.elements.pvp.value === "true",
-            allowFlight: form.elements.allowFlight.value === "true",
-            keepInventory: form.elements.keepInventory.value === "true",
-            sharedHealth: form.elements.sharedHealth.value === "true",
-          },
-        });
-        await refreshState();
         break;
       case "cloud-backup-settings": {
         const body = {
           enabled: form.elements.enabled.checked,
-          provider: form.elements.provider?.value ?? "supabase",
+          provider: form.elements.provider?.value ?? "tailscale-ssh",
           deviceLabel: form.elements.deviceLabel.value,
+          targetRestoreKey: form.elements.targetRestoreKey?.value ?? "",
         };
         if (form.elements.tailscaleHost) {
           body.tailscaleHost = form.elements.tailscaleHost.value;
@@ -3679,6 +3858,21 @@ function handleInput(event) {
   const commandForm = event.target?.closest?.('form[data-form="console-command"]');
   if (commandForm && event.target?.name === "command") {
     setConsoleDraft(event.target.value);
+  }
+  const miscForm = event.target?.closest?.('form[data-form="misc-settings"]');
+  if (miscForm && event.target?.name) {
+    if (miscForm.dataset.miscSaving === "true") {
+      miscForm.dataset.miscResubmit = "true";
+    } else {
+      if (miscAutosaveTimer) {
+        window.clearTimeout(miscAutosaveTimer);
+      }
+      miscAutosaveTimer = window.setTimeout(() => {
+        if (document.body.contains(miscForm)) {
+          miscForm.requestSubmit();
+        }
+      }, event.target.type === "number" ? 500 : 150);
+    }
   }
   const playerCard = event.target?.closest?.("[data-player-card]");
   if (playerCard && ["reason", "mode", "destination"].includes(event.target?.name ?? "")) {

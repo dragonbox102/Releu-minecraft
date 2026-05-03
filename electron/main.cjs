@@ -8,6 +8,13 @@ let panelRuntime = null;
 let mainWindow = null;
 let panelRuntimeClosePromise = null;
 let updateRestartScheduled = false;
+let keepWindowOpenOnClose = false;
+let desktopSettings = {
+  keepServerRunningOnClose: false,
+  quickConsoleShortcut: "Ctrl+Shift+Space",
+};
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 function desktopStartupLog(message) {
   try {
@@ -21,6 +28,27 @@ function desktopStartupLog(message) {
       "utf8",
     );
   } catch {}
+}
+
+function normalizeDesktopSettings(payload = {}) {
+  return {
+    keepServerRunningOnClose: Boolean(payload.keepServerRunningOnClose),
+    quickConsoleShortcut:
+      String(payload.quickConsoleShortcut ?? desktopSettings.quickConsoleShortcut ?? "")
+        .trim() || "Ctrl+Shift+Space",
+  };
+}
+
+function applyDesktopSettings(payload = {}) {
+  desktopSettings = normalizeDesktopSettings({
+    ...desktopSettings,
+    ...payload,
+  });
+  keepWindowOpenOnClose = desktopSettings.keepServerRunningOnClose;
+  desktopStartupLog(
+    `Applied desktop settings. keepRunning=${keepWindowOpenOnClose} shortcut=${desktopSettings.quickConsoleShortcut}`,
+  );
+  return desktopSettings;
 }
 
 async function loadPanelServer() {
@@ -60,6 +88,18 @@ function createWindow(url) {
   });
   window.webContents.once("render-process-gone", (_event, details) => {
     desktopStartupLog(`Renderer exited: ${JSON.stringify(details)}`);
+  });
+  window.on("close", (event) => {
+    if (keepWindowOpenOnClose && !updateRestartScheduled) {
+      event.preventDefault();
+      desktopStartupLog("Main window close intercepted; hiding window and keeping server runtime alive.");
+      window.hide();
+    }
+  });
+  window.on("closed", () => {
+    if (mainWindow === window) {
+      mainWindow = null;
+    }
   });
   return window;
 }
@@ -367,6 +407,10 @@ ipcMain.handle("desktop:pick-directory", async () => {
   return result.filePaths?.[0] ?? null;
 });
 
+ipcMain.handle("desktop:update-settings", async (_event, payload) => {
+  return applyDesktopSettings(payload);
+});
+
 ipcMain.handle("desktop:install-app-update", async (_event, stagedPath) => {
   schedulePortableUpdate(stagedPath);
   updateRestartScheduled = true;
@@ -382,6 +426,22 @@ ipcMain.handle("desktop:install-app-update", async (_event, stagedPath) => {
     });
   });
   return { scheduled: true };
+});
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
+app.on("second-instance", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    if (!mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+    mainWindow.focus();
+  }
 });
 
 app.whenReady().then(async () => {
@@ -410,6 +470,10 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", async () => {
   desktopStartupLog("All windows closed.");
+  if (keepWindowOpenOnClose && !updateRestartScheduled) {
+    desktopStartupLog("Keeping panel runtime alive with no visible windows.");
+    return;
+  }
   if (process.platform !== "darwin" || updateRestartScheduled) {
     await closePanelRuntimeOnce();
     desktopStartupLog("Closed embedded panel runtime.");

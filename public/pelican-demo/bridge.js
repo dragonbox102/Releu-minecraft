@@ -34,6 +34,17 @@ const APP_STATE = {
   profileSaveState: { message: "", tone: "neutral" },
   cloudBackup: { status: null, loading: false, lastFetchedAt: 0 },
   playerInventoryModal: null,
+  filesBrowser: {
+    path: "",
+    search: "",
+    listing: null,
+    editor: null,
+  },
+  quickConsole: {
+    open: false,
+    draft: "",
+    bindingReady: false,
+  },
   consoleDraft: "",
   consoleHelpOpen: false,
   consoleStickToBottom: true,
@@ -119,6 +130,29 @@ function injectReleaseChromeStyles() {
     body[data-releu-shell="true"] .releu-sidebar-servers .fi-sidebar-item-btn {
       font-weight: 600;
     }
+  `;
+  document.head.append(style);
+}
+
+function injectWorldPageStyles() {
+  if (document.getElementById("releu-world-page-style")) return;
+  const style = document.createElement("style");
+  style.id = "releu-world-page-style";
+  style.textContent = `
+    .pw-grid3{display:grid;gap:.75rem;grid-template-columns:repeat(3,1fr)}
+    @media(max-width:1279px){.pw-grid3{grid-template-columns:1fr}}
+    .pw-grid2{display:grid;gap:.75rem;grid-template-columns:repeat(2,1fr);margin-top:.75rem}
+    @media(max-width:900px){.pw-grid2{grid-template-columns:1fr}}
+    .pw-card{background:rgb(var(--gray-900,17 24 32));border:1px solid #2b3642;border-radius:.5rem;overflow:hidden}
+    .pw-card-head{padding:.75rem 1rem;border-bottom:1px solid #2b3642}
+    .pw-card-title{font-size:.8125rem;font-weight:600;color:#f1f5f9}
+    .pw-card-sub{font-size:.75rem;color:#64748b;margin-top:.25rem}
+    .pw-card-body{padding:.875rem 1rem;display:flex;flex-direction:column;gap:.625rem}
+    .pw-hint{background:rgb(var(--gray-950,15 20 27));border:1px solid #2b3642;border-radius:.375rem;padding:.75rem;font-size:.75rem;color:#64748b;line-height:1.45}
+    .pw-desc{font-size:.75rem;color:#94a3b8;line-height:1.5}
+    .pw-input{width:100%;background:rgb(var(--gray-950,15 20 27));border:1px solid #2b3642;border-radius:.375rem;padding:.5rem .75rem;font-size:.8125rem;color:#f1f5f9;outline:none}
+    .pw-input:focus{border-color:var(--primary-500,#3b82f6)}
+    .pw-actions{display:flex;flex-direction:column;gap:.5rem}
   `;
   document.head.append(style);
 }
@@ -635,6 +669,266 @@ async function api(url, options = {}) {
   }
 }
 
+async function apiBinary(url, body, headers = {}, options = {}) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs ?? 0) || 0);
+  const controller = timeoutMs ? new AbortController() : null;
+  let timeoutId = null;
+  if (controller) {
+    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  }
+  try {
+    const response = await fetch(url, {
+      method: options.method ?? "POST",
+      headers: {
+        Accept: "application/json",
+        ...(headers ?? {}),
+      },
+      body,
+      signal: controller?.signal,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.error ?? `Request failed (${response.status}).`);
+    }
+    return payload;
+  } catch (error) {
+    if (controller && error?.name === "AbortError") {
+      throw new Error(
+        options.timeoutMessage ??
+          `The request timed out after ${Math.max(1, Math.round(timeoutMs / 1000))} seconds.`,
+      );
+    }
+    throw error;
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+function isDesktopApp() {
+  return Boolean(window.desktop);
+}
+
+async function pickLocalDirectory() {
+  if (!isDesktopApp() || !window.desktop?.pickDirectory) {
+    throw new Error("Folder picking is available only in the desktop app.");
+  }
+  return window.desktop.pickDirectory();
+}
+
+async function openLocalPath(targetPath) {
+  if (!targetPath) return;
+  if (!isDesktopApp() || !window.desktop?.openPath) {
+    throw new Error("Opening local folders is available only in the desktop app.");
+  }
+  const result = await window.desktop.openPath(targetPath);
+  if (result) {
+    throw new Error(result);
+  }
+}
+
+function currentDesktopSettings() {
+  return APP_STATE.state?.desktopSettings ?? {
+    keepServerRunningOnClose: false,
+    quickConsoleShortcut: "Ctrl+Shift+Space",
+  };
+}
+
+async function syncDesktopIntegration() {
+  if (!isDesktopApp() || !window.desktop?.applySettings) {
+    return;
+  }
+  try {
+    await window.desktop.applySettings(currentDesktopSettings());
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function normalizeShortcutKey(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "control" || normalized === "ctrl") return "Ctrl";
+  if (normalized === "alt" || normalized === "option") return "Alt";
+  if (normalized === "shift") return "Shift";
+  if (normalized === "meta" || normalized === "cmd" || normalized === "command" || normalized === "win") return "Meta";
+  if (normalized === " " || normalized === "space" || normalized === "spacebar") return "Space";
+  if (normalized === "escape" || normalized === "esc") return "Escape";
+  if (normalized === "arrowup") return "ArrowUp";
+  if (normalized === "arrowdown") return "ArrowDown";
+  if (normalized === "arrowleft") return "ArrowLeft";
+  if (normalized === "arrowright") return "ArrowRight";
+  if (normalized === "`" || normalized === "backquote" || normalized === "grave") return "Backquote";
+  if (normalized === "/") return "Slash";
+  if (normalized.length === 1) return normalized.toUpperCase();
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function normalizeShortcutString(value) {
+  const tokens = String(value ?? "")
+    .split("+")
+    .map((part) => normalizeShortcutKey(part))
+    .filter(Boolean);
+  const modifierOrder = ["Ctrl", "Alt", "Shift", "Meta"];
+  const modifiers = modifierOrder.filter((token) => tokens.includes(token));
+  const nonModifiers = tokens.filter((token) => !modifierOrder.includes(token));
+  return [...modifiers, ...nonModifiers].join("+") || "Ctrl+Shift+Space";
+}
+
+function eventMatchesShortcut(event, shortcutValue) {
+  const normalizedShortcut = normalizeShortcutString(shortcutValue);
+  const parts = normalizedShortcut.split("+").filter(Boolean);
+  if (!parts.length) {
+    return false;
+  }
+  const modifiers = new Set(parts.filter((token) => ["Ctrl", "Alt", "Shift", "Meta"].includes(token)));
+  const key = parts.find((token) => !["Ctrl", "Alt", "Shift", "Meta"].includes(token)) ?? "";
+  if (Boolean(event.ctrlKey) !== modifiers.has("Ctrl")) return false;
+  if (Boolean(event.altKey) !== modifiers.has("Alt")) return false;
+  if (Boolean(event.shiftKey) !== modifiers.has("Shift")) return false;
+  if (Boolean(event.metaKey) !== modifiers.has("Meta")) return false;
+  return normalizeShortcutKey(event.key) === key;
+}
+
+function injectQuickConsoleStyles() {
+  if (document.getElementById("releu-quick-console-style")) return;
+  const style = document.createElement("style");
+  style.id = "releu-quick-console-style";
+  style.textContent = `
+    #releu-quick-console{position:fixed;right:1rem;bottom:1rem;z-index:10020}
+    #releu-quick-console .rqc-shell{width:min(720px,calc(100vw - 2rem));border:1px solid #2b3642;border-radius:14px;overflow:hidden;background:#0f141b;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+    #releu-quick-console .rqc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;padding:1rem 1rem .8rem;border-bottom:1px solid #2b3642;background:#141922}
+    #releu-quick-console .rqc-kicker{font-size:.66rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#94a3b8}
+    #releu-quick-console .rqc-title{margin-top:.2rem;font-size:1.05rem;font-weight:700;color:#f8fafc}
+    #releu-quick-console .rqc-copy{margin-top:.25rem;font-size:.76rem;line-height:1.45;color:#94a3b8}
+    #releu-quick-console .rqc-actions{display:flex;gap:.5rem;flex-wrap:wrap}
+    #releu-quick-console .rqc-btn{border:1px solid #2b3642;border-radius:10px;background:#0f141b;padding:.55rem .8rem;font-size:.72rem;font-weight:700;color:#e2e8f0}
+    #releu-quick-console .rqc-btn:hover{border-color:#475569}
+    #releu-quick-console .rqc-btn[disabled]{opacity:.6;cursor:not-allowed}
+    #releu-quick-console .rqc-body{padding:1rem;display:grid;gap:.75rem}
+    #releu-quick-console .rqc-status{border:1px solid #2b3642;border-radius:10px;background:#141922;padding:.7rem .8rem;font-size:.75rem;color:#94a3b8}
+    #releu-quick-console .rqc-log{max-height:260px;overflow:auto;border:1px solid #2b3642;border-radius:10px;background:rgba(19,26,32,.92);padding:.85rem 1rem;white-space:pre-wrap;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:#e2e8f0}
+    #releu-quick-console .rqc-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.65rem}
+    #releu-quick-console .rqc-input{width:100%;border:1px solid #2b3642;border-radius:10px;background:#0f141b;padding:.75rem .9rem;font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;color:#f8fafc;outline:none}
+    #releu-quick-console .rqc-input:focus{border-color:#64748b}
+    #releu-quick-console .rqc-hint{font-size:.72rem;color:#64748b}
+    @media (max-width:680px){#releu-quick-console{left:.75rem;right:.75rem;bottom:.75rem}#releu-quick-console .rqc-row{grid-template-columns:1fr}}
+  `;
+  document.head.append(style);
+}
+
+function closeQuickConsole() {
+  APP_STATE.quickConsole.open = false;
+  renderQuickConsoleOverlay();
+}
+
+function renderQuickConsoleOverlay() {
+  let host = document.getElementById("releu-quick-console");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "releu-quick-console";
+    document.body.append(host);
+  }
+  const quickConsole = APP_STATE.quickConsole;
+  if (!quickConsole.open) {
+    host.innerHTML = "";
+    return;
+  }
+  injectQuickConsoleStyles();
+  const server = activeServer();
+  const shortcut = normalizeShortcutString(currentDesktopSettings().quickConsoleShortcut);
+  const serverRunning = server?.server?.status === "running";
+  host.innerHTML = `
+    <div class="rqc-shell">
+      <div class="rqc-head">
+        <div>
+          <div class="rqc-kicker">Quick Console</div>
+          <div class="rqc-title">${escapeHtml(server?.name ?? "No server selected")}</div>
+          <div class="rqc-copy">Shortcut: ${escapeHtml(shortcut)}. ${serverRunning ? "Send Minecraft commands without leaving the current page." : "View the latest logs even while the server is stopped."}</div>
+        </div>
+        <div class="rqc-actions">
+          <button type="button" class="rqc-btn" data-rqc-open-console>Open Console</button>
+          <button type="button" class="rqc-btn" data-rqc-close>Close</button>
+        </div>
+      </div>
+      <div class="rqc-body">
+        <div class="rqc-status">${escapeHtml(serverRunning ? "Server is running. Commands send instantly." : "Server is offline. You can still read logs here, but command sending is disabled.")}</div>
+        <pre class="rqc-log">${escapeHtml(toLogBlock(40) || "No logs yet.")}</pre>
+        <div class="rqc-row">
+          <input type="text" class="rqc-input" data-rqc-input value="${escapeHtml(quickConsole.draft ?? "")}" placeholder="${escapeHtml(serverRunning ? "Type a Minecraft command..." : "Server offline")}" ${serverRunning ? "" : "disabled"} />
+          <button type="button" class="rqc-btn" data-rqc-send ${serverRunning ? "" : "disabled"}>Send</button>
+        </div>
+        <div class="rqc-hint">Press ${escapeHtml(shortcut)} again to close this panel.</div>
+      </div>
+    </div>`;
+  host.querySelector("[data-rqc-close]")?.addEventListener("click", closeQuickConsole);
+  host.querySelector("[data-rqc-open-console]")?.addEventListener("click", () => {
+    closeQuickConsole();
+    navigateToPage("console.html");
+  });
+  const input = host.querySelector("[data-rqc-input]");
+  if (input) {
+    input.addEventListener("input", () => {
+      APP_STATE.quickConsole.draft = input.value;
+    });
+    input.addEventListener("keydown", async (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeQuickConsole();
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        await submitQuickConsoleCommand();
+      }
+    });
+    window.requestAnimationFrame(() => {
+      if (document.body.contains(input)) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
+  }
+  host.querySelector("[data-rqc-send]")?.addEventListener("click", async () => {
+    await submitQuickConsoleCommand();
+  });
+}
+
+async function submitQuickConsoleCommand() {
+  const server = activeServer();
+  if (!server || server.server?.status !== "running") {
+    return;
+  }
+  const command = String(APP_STATE.quickConsole.draft ?? "").trim();
+  if (!command) {
+    return;
+  }
+  await api(`/api/servers/${encodeURIComponent(activeServerId())}/server/command`, {
+    method: "POST",
+    body: { command },
+  });
+  APP_STATE.quickConsole.draft = "";
+  await refreshLogs();
+  renderQuickConsoleOverlay();
+}
+
+function ensureQuickConsoleBinding() {
+  if (APP_STATE.quickConsole.bindingReady) {
+    return;
+  }
+  APP_STATE.quickConsole.bindingReady = true;
+  document.addEventListener("keydown", async (event) => {
+    const shortcut = currentDesktopSettings().quickConsoleShortcut;
+    if (!shortcut || !eventMatchesShortcut(event, shortcut) || event.repeat) {
+      return;
+    }
+    event.preventDefault();
+    APP_STATE.quickConsole.open = !APP_STATE.quickConsole.open;
+    renderQuickConsoleOverlay();
+  });
+}
+
 async function refreshCloudBackupStatus(force = false) {
   if (APP_STATE.cloudBackup.loading) {
     return APP_STATE.cloudBackup.status;
@@ -671,6 +965,8 @@ async function refreshState(serverId = getRequestedServerId()) {
     syncServerIdInLocation(payload.state.activeServerId);
   }
   updateChrome(payload.state);
+  await syncDesktopIntegration();
+  renderQuickConsoleOverlay();
   return payload.state;
 }
 
@@ -679,6 +975,7 @@ async function refreshLogs() {
   const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
   const payload = await api(`/api/logs${query}`);
   APP_STATE.logs = payload.entries ?? [];
+  renderQuickConsoleOverlay();
   return APP_STATE.logs;
 }
 
@@ -1509,7 +1806,9 @@ async function patchCreateServerPage() {
   const ranges = [...document.querySelectorAll(".psw-range")];
   const nameInput = document.querySelector("[data-create-server-name]");
   const statusText = document.querySelector("[data-create-status]");
-  const javaInput = document.querySelector(".psw-java-row .psw-input");
+  const javaInput =
+    [...document.querySelectorAll(".psw-java-row .psw-input")].find((input) => input !== nameInput) ??
+    null;
   const installButton = [...document.querySelectorAll(".fi-btn.fi-ac-btn-action")].find((button) => /install|create/i.test(button.textContent));
 
   APP_STATE.createDraft.cpuCores = Math.min(APP_STATE.createDraft.cpuCores, hostCpu);
@@ -1920,13 +2219,41 @@ function patchConsolePage() {
       });
     }
   }
-  [...document.querySelectorAll(".fi-header-actions-ctn .fi-btn")].forEach((button) => {
+  const serverRunning = server.server?.status === "running";
+  [...document.querySelectorAll(".fi-header-actions-ctn .fi-btn, .fi-header-actions-ctn button")].forEach((button) => {
     const label = button.textContent.trim().toLowerCase();
-    if (button.dataset.releuBound) return;
-    if (label === "start" || label === "restart" || label === "stop") {
-      button.dataset.releuBound = "true";
-      button.addEventListener("click", () => runServerControl(label, button));
+    if (!(label === "start" || label === "restart" || label === "stop")) return;
+    button.dataset.releuControlCurrent = label;
+    const shouldDisable =
+      (label === "start" && serverRunning) ||
+      ((label === "restart" || label === "stop") && !serverRunning);
+    button.disabled = shouldDisable;
+    if (shouldDisable) {
+      button.setAttribute("disabled", "disabled");
+      button.setAttribute("aria-disabled", "true");
+      button.classList.add("fi-disabled");
+      button.style.pointerEvents = "none";
+      button.style.opacity = ".6";
+    } else {
+      button.removeAttribute("disabled");
+      button.setAttribute("aria-disabled", "false");
+      button.classList.remove("fi-disabled");
+      button.style.pointerEvents = "auto";
+      button.style.opacity = "";
     }
+    if (button.dataset.releuBound) return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", (event) => {
+      if (button.disabled) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      runServerControl(
+        button.dataset.releuControlCurrent || button.textContent.trim().toLowerCase(),
+        button,
+      );
+    });
   });
 }
 
@@ -1948,12 +2275,16 @@ function selectedInventoryCatalogItem() {
 
 function closePlayerInventoryModal() {
   APP_STATE.playerInventoryModal = null;
+  delete document.body.dataset.releuInventoryModalOpen;
+  document.documentElement.style.overflow = "";
+  document.body.style.overflow = "";
   renderPlayerInventoryModal();
 }
 
 async function searchPlayerInventoryCatalog(query = "") {
   const modal = inventoryModalState();
   if (!modal) return;
+  modal.catalogQueryDraft = query;
   modal.catalogLoading = true;
   renderPlayerInventoryModal();
   try {
@@ -1989,6 +2320,7 @@ async function loadPlayerInventoryModal(playerName, { preserveMessage = false } 
     );
     modal.playerName = playerName;
     modal.inventory = payload.inventory;
+    modal.lastLoadedAt = Date.now();
   } catch (error) {
     modal.message = error.message ?? String(error);
     modal.messageTone = "error";
@@ -2008,6 +2340,7 @@ async function openPlayerInventoryModal(playerName) {
     messageTone: "neutral",
     catalog: null,
     catalogQuery: "",
+    catalogQueryDraft: "",
     catalogLoading: false,
     selectedItemId: "",
     addCount: 1,
@@ -2137,6 +2470,8 @@ function renderPlayerInventoryModal() {
   if (!host) {
     host = document.createElement("div");
     host.id = "releu-player-inventory-modal";
+    host.style.position = "relative";
+    host.style.zIndex = "9999";
     document.body.append(host);
   }
   const modal = inventoryModalState();
@@ -2144,9 +2479,16 @@ function renderPlayerInventoryModal() {
     host.innerHTML = "";
     return;
   }
+  const previousCatalog = host.querySelector(".rvm-catalog");
+  const previousLog = host.querySelector(".rvm-log");
+  const previousCatalogScrollTop = previousCatalog?.scrollTop ?? 0;
+  const previousLogScrollTop = previousLog?.scrollTop ?? 0;
+  document.body.dataset.releuInventoryModalOpen = "true";
+  document.documentElement.style.overflow = "hidden";
+  document.body.style.overflow = "hidden";
   host.innerHTML = renderInventoryModalContent(modal);
   host.querySelector("[data-inventory-close]")?.addEventListener("click", closePlayerInventoryModal);
-  host.querySelector(".fixed.inset-0")?.addEventListener("click", (event) => {
+  host.querySelector(".rvm-overlay")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) {
       closePlayerInventoryModal();
     }
@@ -2214,6 +2556,9 @@ function renderPlayerInventoryModal() {
     const query = event.currentTarget.querySelector('[name="query"]')?.value ?? "";
     await searchPlayerInventoryCatalog(query);
   });
+  host.querySelector('[data-inventory-search-form] [name="query"]')?.addEventListener("input", (event) => {
+    modal.catalogQueryDraft = event.currentTarget.value ?? "";
+  });
   host.querySelector("[data-inventory-count]")?.addEventListener("input", (event) => {
     const numeric = Math.max(1, Math.min(9999, Number(event.currentTarget.value ?? 1) || 1));
     modal.addCount = numeric;
@@ -2254,6 +2599,14 @@ function renderPlayerInventoryModal() {
       renderPlayerInventoryModal();
     }
   });
+  const newCatalog = host.querySelector(".rvm-catalog");
+  if (newCatalog) {
+    newCatalog.scrollTop = previousCatalogScrollTop;
+  }
+  const newLog = host.querySelector(".rvm-log");
+  if (newLog) {
+    newLog.scrollTop = previousLogScrollTop;
+  }
 }
 
 function inventoryItemAssetName(itemId = "") {
@@ -2337,7 +2690,7 @@ function renderInventoryModalContent(modal) {
         : "rvm-status-neutral";
   const playerInfo = inventory?.player ?? null;
   return `<style id="releu-player-inventory-modal-style">
-    #releu-player-inventory-modal .rvm-overlay{background:rgba(2,6,23,.97)}
+    #releu-player-inventory-modal .rvm-overlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;overflow:auto;background:rgba(2,6,23,.97)}
     #releu-player-inventory-modal .rvm-shell{position:relative;isolation:isolate;width:min(1400px,100%);max-height:calc(100vh - 2rem);overflow:auto;border-radius:18px;border:1px solid rgba(255,255,255,.08);background:#111318;color:#e2e4e9;box-shadow:0 28px 90px rgba(0,0,0,.55)}
     #releu-player-inventory-modal .rvm-shell::-webkit-scrollbar{width:8px}
     #releu-player-inventory-modal .rvm-shell::-webkit-scrollbar-thumb{background:rgba(148,163,184,.28);border-radius:999px}
@@ -2427,7 +2780,7 @@ function renderInventoryModalContent(modal) {
     @media (max-width:880px){#releu-player-inventory-modal .rvm-shell{max-height:calc(100vh - 1rem)}#releu-player-inventory-modal .rvm-header{padding:1rem}#releu-player-inventory-modal .rvm-grid{padding:1rem}#releu-player-inventory-modal .rvm-shell-grid{grid-template-columns:1fr}#releu-player-inventory-modal .rvm-search-row,#releu-player-inventory-modal .rvm-add-row{grid-template-columns:1fr;display:grid}#releu-player-inventory-modal .rvm-slot-grid{grid-template-columns:repeat(3,minmax(0,1fr))}#releu-player-inventory-modal .rvm-slot-col,#releu-player-inventory-modal .rvm-slot-stack{gap:.75rem}}
     @media (max-width:640px){#releu-player-inventory-modal .rvm-header{flex-direction:column;align-items:stretch}#releu-player-inventory-modal .rvm-header-actions{justify-content:flex-end}#releu-player-inventory-modal .rvm-playerbar{display:grid;grid-template-columns:42px minmax(0,1fr);align-items:start}#releu-player-inventory-modal .rvm-tags,#releu-player-inventory-modal .rvm-stat{grid-column:1 / -1}#releu-player-inventory-modal .rvm-stat{margin-top:.15rem;text-align:left}}
   </style>
-  <div class="fixed inset-0 z-[120] flex items-center justify-center p-4 rvm-overlay">
+  <div class="rvm-overlay">
     <div class="rvm-shell">
       <div class="rvm-header">
         <div class="rvm-header-main">
@@ -2498,7 +2851,7 @@ function renderInventoryModalContent(modal) {
           <div class="rvm-card">
             <div class="rvm-card-title">Item Catalog</div>
             <form class="rvm-search-row" data-inventory-search-form>
-              <input type="text" name="query" value="${escapeHtml(modal.catalogQuery ?? "")}" placeholder="Search items..." class="rvm-input" />
+              <input type="text" name="query" value="${escapeHtml(modal.catalogQueryDraft ?? modal.catalogQuery ?? "")}" placeholder="Search items..." class="rvm-input" />
               <button type="submit" class="rvm-btn">${modal.catalogLoading ? "Searching..." : "Search"}</button>
             </form>
             <div class="rvm-add-row">
@@ -2595,62 +2948,269 @@ function patchPlayersPage() {
       }
     });
   });
-  renderPlayerInventoryModal();
 }
 
 function patchWorldsPage() {
   const server = activeServer();
   if (!server) return;
+  injectWorldPageStyles();
   const worlds = server.worlds ?? [];
   const activeWorld = worlds.find((entry) => entry.isActive) ?? worlds[0] ?? null;
-  const inputs = [...document.querySelectorAll(".pw-input")];
-  const worldNameInput = inputs[0] ?? null;
-  const sourcePathInput = inputs[1] ?? null;
-  const importNameInput = inputs[2] ?? null;
-  if (worldNameInput && activeWorld) worldNameInput.value = activeWorld.name;
-  const activePath = document.querySelector(".pw-card .pw-card-path");
-  if (activePath && activeWorld) activePath.textContent = activeWorld.path;
-  const useButton = [...document.querySelectorAll(".pw-card .fi-btn")].find((button) => /use this world/i.test(button.textContent));
-  const regenButton = [...document.querySelectorAll(".pw-card .fi-btn")].find((button) => /regenerate active world/i.test(button.textContent));
-  const uploadButton = [...document.querySelectorAll(".fi-btn")].find((button) => /upload world archive/i.test(button.textContent));
-  const importButton = [...document.querySelectorAll(".fi-btn")].find((button) => /import world folder/i.test(button.textContent));
-  if (useButton && !useButton.dataset.releuBound) useButton.addEventListener("click", async () => {
+  const activeWorldName = activeWorld?.name ?? server.server?.properties?.["level-name"] ?? "world";
+  const levelSeed = String(server.server?.properties?.["level-seed"] ?? "").trim();
+  const section = document.querySelector(".fi-section-content");
+  if (!section) return;
+
+  const renderWorldCard = (world) => {
+    const badges = [
+      world.exists ? "Base" : "Base Missing",
+      world.netherExists ? "Nether" : "No Nether",
+      world.endExists ? "End" : "No End",
+    ]
+      .map((label) => `<span style="border:1px solid #2b3642;border-radius:999px;padding:.22rem .55rem;font-size:.64rem;color:#94a3b8;">${escapeHtml(label)}</span>`)
+      .join("");
+    return `<article class="pw-card" data-world-card="${escapeHtml(world.name)}">
+      <div class="pw-card-head">
+        <p class="pw-card-title">${escapeHtml(world.name)}</p>
+        <p class="pw-card-sub">${world.isActive ? "Active world folder" : world.exists ? "Saved world folder" : "World slot"}</p>
+      </div>
+      <div class="pw-card-body">
+        <p class="pw-desc">${escapeHtml(world.path)}</p>
+        <div style="display:flex;flex-wrap:wrap;gap:.45rem;">${badges}</div>
+        <div class="pw-desc">${world.isActive && !world.exists
+          ? "This world name is active, but the folder is currently missing. Minecraft will generate a fresh world with this name on the next start."
+          : `Last changed: ${escapeHtml(formatDate(world.lastModifiedAt))}`}</div>
+        <div class="pw-actions" style="flex-direction:row;flex-wrap:wrap;">
+          <button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-use="${escapeHtml(world.name)}">Use This World</button>
+          <button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-regen="${escapeHtml(world.name)}">Regenerate</button>
+          ${isDesktopApp() ? `<button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-open="${escapeHtml(world.path)}">Open Folder</button>` : ""}
+        </div>
+      </div>
+    </article>`;
+  };
+
+  section.innerHTML = `
+    <div class="pw-grid3">
+      <div class="pw-card">
+        <div class="pw-card-head">
+          <p class="pw-card-title"><span class="releu-panel-title"><svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg><span>Active World</span></span></p>
+          <p class="pw-card-sub">${escapeHtml(activeWorldName)}</p>
+        </div>
+        <div class="pw-card-body">
+          <div class="pw-desc">Choose which saved world name the server should use on the next start.</div>
+          <select id="releu-world-select" class="pw-input">${(worlds.length ? worlds : [{ name: activeWorldName, isActive: true }]).map((entry) => `<option value="${escapeHtml(entry.name)}" ${entry.isActive ? "selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}</select>
+          <input id="releu-world-seed" type="text" class="pw-input" placeholder="Seed for fresh generation (optional)" value="${escapeHtml(levelSeed)}">
+          <div class="pw-hint">${activeWorld ? escapeHtml(activeWorld.path) : "No world detected yet."}</div>
+          <div class="pw-actions" style="flex-direction:row;flex-wrap:wrap;">
+            <button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-use-active>Use This World</button>
+            <button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-regen-active>Regenerate Active World</button>
+          </div>
+        </div>
+      </div>
+      <div class="pw-card">
+        <div class="pw-card-head">
+          <p class="pw-card-title"><span class="releu-panel-title"><svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>Import A Zip</span></span></p>
+          <p class="pw-card-sub">Upload world archive</p>
+        </div>
+        <div class="pw-card-body">
+          <div class="pw-hint">Choose a world archive and import it as a server world.</div>
+          <input type="file" accept=".zip,.mcworld" data-world-archive-file style="width:100%;font-size:.78rem;color:#cbd5e1;">
+          <input type="text" class="pw-input" placeholder="survival-archive" data-world-archive-name>
+          <div class="pw-desc">If you leave the world name blank, Releu uses the archive name automatically.</div>
+          <button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-upload>Upload World Archive</button>
+        </div>
+      </div>
+      <div class="pw-card">
+        <div class="pw-card-head">
+          <p class="pw-card-title"><span class="releu-panel-title"><svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h5l2 2h11v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg><span>Use A Local World Folder</span></span></p>
+          <p class="pw-card-sub">Import local folder</p>
+        </div>
+        <div class="pw-card-body">
+          <div class="pw-hint">Import a world folder from disk without leaving the new UI.</div>
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+            <input type="text" class="pw-input" placeholder="C:\\Worlds\\MyWorld" data-world-folder-path style="flex:1 1 220px;">
+            ${isDesktopApp() ? `<button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-browse-folder>Browse</button>` : ""}
+          </div>
+          <input type="text" class="pw-input" placeholder="local-import-01" data-world-folder-name>
+          <div class="pw-desc">Releu copies the folder into this server and can make it the active world immediately.</div>
+          <button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-import-folder>Import World Folder</button>
+        </div>
+      </div>
+    </div>
+    <div class="pw-grid2" data-world-library>
+      ${worlds.length ? worlds.map(renderWorldCard).join("") : `<div class="pw-card"><div class="pw-card-body"><div class="pw-desc">No world folders were detected yet.</div></div></div>`}
+    </div>
+  `;
+
+  const worldSelect = section.querySelector("#releu-world-select");
+  const worldSeedInput = section.querySelector("#releu-world-seed");
+  const archiveFileInput = section.querySelector("[data-world-archive-file]");
+  const archiveNameInput = section.querySelector("[data-world-archive-name]");
+  const folderPathInput = section.querySelector("[data-world-folder-path]");
+  const folderNameInput = section.querySelector("[data-world-folder-name]");
+  const useActiveButton = section.querySelector("[data-world-use-active]");
+  const regenActiveButton = section.querySelector("[data-world-regen-active]");
+  const uploadButton = section.querySelector("[data-world-upload]");
+  const browseFolderButton = section.querySelector("[data-world-browse-folder]");
+  const importFolderButton = section.querySelector("[data-world-import-folder]");
+
+  const regenerateWithConfirm = async (worldName, button) => {
+    if (!window.confirm(`Regenerate "${worldName}"?\n\nReleu will keep the current world as a saved switchable world, then Minecraft will generate a fresh "${worldName}" on the next server start.`)) {
+      return;
+    }
     try {
-      setButtonBusy(useButton, true);
-      await api(`/api/servers/${encodeURIComponent(activeServerId())}/worlds/select`, { method: "POST", body: { name: worldNameInput?.value ?? activeWorld?.name ?? "world" } });
+      setButtonBusy(button, true, "Regenerating...");
+      await api(`/api/servers/${encodeURIComponent(activeServerId())}/worlds/regenerate`, {
+        method: "POST",
+        body: { name: worldName, seed: worldSeedInput?.value ?? "" },
+      });
       await refreshState(activeServerId());
+      await refreshLogs();
+      showStatus(`Regenerated "${worldName}". The previous world was kept as a saved switchable world.`, "success");
       patchWorldsPage();
     } catch (error) {
       showError(error);
     } finally {
-      setButtonBusy(useButton, false);
+      setButtonBusy(button, false);
     }
-  }), useButton && (useButton.dataset.releuBound = "true");
-  if (regenButton && !regenButton.dataset.releuBound) regenButton.addEventListener("click", async () => {
+  };
+
+  useActiveButton?.addEventListener("click", async () => {
+    const worldName = worldSelect?.value ?? activeWorldName;
     try {
-      setButtonBusy(regenButton, true);
-      await api(`/api/servers/${encodeURIComponent(activeServerId())}/worlds/regenerate`, { method: "POST", body: { name: worldNameInput?.value ?? activeWorld?.name ?? "world" } });
+      setButtonBusy(useActiveButton, true);
+      await api(`/api/servers/${encodeURIComponent(activeServerId())}/worlds/select`, {
+        method: "POST",
+        body: { name: worldName, seed: worldSeedInput?.value ?? "" },
+      });
       await refreshState(activeServerId());
+      showStatus(`Selected "${worldName}" as the active world.`, "success");
       patchWorldsPage();
     } catch (error) {
       showError(error);
     } finally {
-      setButtonBusy(regenButton, false);
+      setButtonBusy(useActiveButton, false);
     }
-  }), regenButton && (regenButton.dataset.releuBound = "true");
-  if (uploadButton && !uploadButton.dataset.releuBound) uploadButton.addEventListener("click", () => showStatus("World archive upload is still handled by the classic UI for now.")), uploadButton.dataset.releuBound = "true";
-  if (importButton && !importButton.dataset.releuBound) importButton.addEventListener("click", async () => {
+  });
+
+  regenActiveButton?.addEventListener("click", async () => {
+    const worldName = worldSelect?.value ?? activeWorldName;
+    await regenerateWithConfirm(worldName, regenActiveButton);
+  });
+
+  uploadButton?.addEventListener("click", async () => {
+    const file = archiveFileInput?.files?.[0];
+    if (!file) {
+      showError(new Error("Choose a world archive first."));
+      return;
+    }
     try {
-      setButtonBusy(importButton, true);
-      await api(`/api/servers/${encodeURIComponent(activeServerId())}/worlds/import-folder`, { method: "POST", body: { sourcePath: sourcePathInput?.value ?? "", worldName: importNameInput?.value ?? "" } });
+      setButtonBusy(uploadButton, true, "Uploading...");
+      const params = new URLSearchParams();
+      const worldName = String(archiveNameInput?.value ?? "").trim();
+      if (worldName) {
+        params.set("worldName", worldName);
+      }
+      await apiBinary(
+        `/api/servers/${encodeURIComponent(activeServerId())}/worlds/upload-archive?${params.toString()}`,
+        await file.arrayBuffer(),
+        {
+          "Content-Type": "application/octet-stream",
+          "X-File-Name": file.name,
+        },
+        {
+          timeoutMs: 300000,
+          timeoutMessage: "The world archive upload took too long and was cancelled.",
+        },
+      );
+      if (archiveFileInput) archiveFileInput.value = "";
+      if (archiveNameInput) archiveNameInput.value = "";
       await refreshState(activeServerId());
+      await refreshLogs();
+      showStatus(`Imported world archive "${file.name}".`, "success");
       patchWorldsPage();
     } catch (error) {
       showError(error);
     } finally {
-      setButtonBusy(importButton, false);
+      setButtonBusy(uploadButton, false);
     }
-  }), importButton && (importButton.dataset.releuBound = "true");
+  });
+
+  browseFolderButton?.addEventListener("click", async () => {
+    try {
+      setButtonBusy(browseFolderButton, true, "Browsing...");
+      const pickedPath = await pickLocalDirectory();
+      if (pickedPath && folderPathInput) {
+        folderPathInput.value = pickedPath;
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(browseFolderButton, false);
+    }
+  });
+
+  importFolderButton?.addEventListener("click", async () => {
+    try {
+      setButtonBusy(importFolderButton, true, "Importing...");
+      await api(`/api/servers/${encodeURIComponent(activeServerId())}/worlds/import-folder`, {
+        method: "POST",
+        body: {
+          sourcePath: folderPathInput?.value ?? "",
+          worldName: folderNameInput?.value ?? "",
+        },
+      });
+      if (folderPathInput) folderPathInput.value = "";
+      if (folderNameInput) folderNameInput.value = "";
+      await refreshState(activeServerId());
+      await refreshLogs();
+      showStatus("Imported the world folder.", "success");
+      patchWorldsPage();
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(importFolderButton, false);
+    }
+  });
+
+  section.querySelectorAll("[data-world-use]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const worldName = button.dataset.worldUse ?? activeWorldName;
+      try {
+        setButtonBusy(button, true);
+        await api(`/api/servers/${encodeURIComponent(activeServerId())}/worlds/select`, {
+          method: "POST",
+          body: { name: worldName },
+        });
+        await refreshState(activeServerId());
+        showStatus(`Selected "${worldName}" as the active world.`, "success");
+        patchWorldsPage();
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+
+  section.querySelectorAll("[data-world-regen]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await regenerateWithConfirm(button.dataset.worldRegen ?? activeWorldName, button);
+    });
+  });
+
+  section.querySelectorAll("[data-world-open]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        setButtonBusy(button, true, "Opening...");
+        await openLocalPath(button.dataset.worldOpen);
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
 }
 
 async function patchSoftwarePage() {
@@ -3796,14 +4356,650 @@ function patchBackupsPage() {
   }), createButton && (createButton.dataset.releuBound = "true");
 }
 
-function patchFilesPage() {
-  const content = document.querySelector(".fi-page-content") ?? document.querySelector("main");
-  if (!content || content.querySelector("[data-releu-files-note]")) return;
-  const note = document.createElement("section");
-  note.dataset.releuFilesNote = "true";
-  note.className = "fi-section mt-6";
-  note.innerHTML = `<div class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4 text-sm text-slate-300">Releu does not have a file browser API yet. Use the classic Releu UI for file management for now.</div>`;
-  content.prepend(note);
+function injectFilesPageStyles() {
+  if (document.getElementById("releu-files-style")) return;
+  const style = document.createElement("style");
+  style.id = "releu-files-style";
+  style.textContent = `
+    .releu-files-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      padding: 1rem 0;
+    }
+    .releu-files-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 1rem;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 1rem;
+      background: rgba(15, 20, 27, 0.92);
+    }
+    .releu-files-toolbar-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      min-width: 0;
+    }
+    .releu-files-toolbar-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: #94a3b8;
+    }
+    .releu-files-toolbar-path {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: #f8fafc;
+      word-break: break-word;
+    }
+    .releu-files-toolbar-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .releu-files-table-wrap {
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 1rem;
+      background: rgba(15, 20, 27, 0.92);
+    }
+    .releu-files-table {
+      width: 100%;
+    }
+    .releu-files-table .fi-ta-header-cell,
+    .releu-files-table .fi-ta-cell {
+      vertical-align: middle;
+    }
+    .releu-files-empty {
+      padding: 1.5rem;
+      text-align: center;
+      color: #94a3b8;
+      font-size: 0.95rem;
+    }
+    .releu-files-name-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      min-width: 0;
+      color: #e2e8f0;
+      transition: color 150ms ease;
+    }
+    .releu-files-name-btn:hover {
+      color: #ffffff;
+    }
+    .releu-files-name-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 0.12rem;
+      min-width: 0;
+      text-align: left;
+    }
+    .releu-files-name {
+      font-weight: 600;
+      color: inherit;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .releu-files-sub {
+      font-size: 0.78rem;
+      color: #94a3b8;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .releu-files-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: 0.75rem;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      color: #cbd5e1;
+      flex-shrink: 0;
+    }
+    .releu-files-kind {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: capitalize;
+      color: #cbd5e1;
+    }
+    .releu-files-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+    .releu-files-editor-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 9998;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      background: rgba(2, 6, 23, 0.78);
+      backdrop-filter: blur(8px);
+    }
+    .releu-files-editor {
+      width: min(78rem, 96vw);
+      max-height: calc(100vh - 3rem);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 1.25rem;
+      background: #0f141b;
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+    }
+    .releu-files-editor-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1.25rem 1.25rem 1rem;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .releu-files-editor-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #f8fafc;
+      word-break: break-word;
+    }
+    .releu-files-editor-meta {
+      margin-top: 0.3rem;
+      font-size: 0.82rem;
+      color: #94a3b8;
+    }
+    .releu-files-editor-body {
+      padding: 1rem 1.25rem 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      overflow: auto;
+    }
+    .releu-files-editor-note {
+      font-size: 0.88rem;
+      color: #94a3b8;
+    }
+    .releu-files-editor-textarea {
+      min-height: min(60vh, 36rem);
+      width: 100%;
+      resize: vertical;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 1rem;
+      background: #091018;
+      padding: 1rem;
+      color: #e2e8f0;
+      font: 400 0.92rem/1.55 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+      outline: none;
+      white-space: pre;
+    }
+    .releu-files-editor-textarea:focus {
+      border-color: rgba(148, 163, 184, 0.5);
+    }
+    .releu-files-editor-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+    }
+  `;
+  document.head.append(style);
+}
+
+function normalizeFilesBrowserPath(value) {
+  return String(value ?? "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((segment) => segment && segment !== ".")
+    .join("/");
+}
+
+function filesDownloadHref(relativePath) {
+  const params = new URLSearchParams();
+  params.set("path", relativePath);
+  return `/api/servers/${encodeURIComponent(activeServerId())}/files/download?${params.toString()}`;
+}
+
+function filesPathLabel(relativePath) {
+  return relativePath ? `Server Root / ${relativePath}` : "Server Root";
+}
+
+function fileEntryIcon(entry) {
+  if (entry?.type === "directory") {
+    return `<svg class="fi-icon fi-size-md" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H3z"/><path d="M3 10h18v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`;
+  }
+  return `<svg class="fi-icon fi-size-md" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v5a1 1 0 0 0 1 1h5"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l6 6v10a2 2 0 0 1-2 2z"/></svg>`;
+}
+
+async function loadFilesListing(pathValue = APP_STATE.filesBrowser.path, searchValue = APP_STATE.filesBrowser.search) {
+  const normalizedPath = normalizeFilesBrowserPath(pathValue);
+  const query = new URLSearchParams();
+  if (normalizedPath) {
+    query.set("path", normalizedPath);
+  }
+  const trimmedSearch = String(searchValue ?? "").trim();
+  if (trimmedSearch) {
+    query.set("search", trimmedSearch);
+  }
+  try {
+    const payload = await api(
+      `/api/servers/${encodeURIComponent(activeServerId())}/files?${query.toString()}`,
+    );
+    APP_STATE.filesBrowser.path = payload.files?.path ?? normalizedPath;
+    APP_STATE.filesBrowser.search = trimmedSearch;
+    APP_STATE.filesBrowser.listing = payload.files ?? null;
+    return APP_STATE.filesBrowser.listing;
+  } catch (error) {
+    if (normalizedPath) {
+      APP_STATE.filesBrowser.path = "";
+      return loadFilesListing("", searchValue);
+    }
+    throw error;
+  }
+}
+
+function renderFilesBrowserRows(listing) {
+  const parentRow = listing.parentPath !== null
+    ? `<tr class="fi-ta-row">
+        <td class="fi-ta-cell">
+          <button type="button" class="releu-files-name-btn" data-files-nav="${escapeHtml(listing.parentPath ?? "")}">
+            <span class="releu-files-icon"><svg class="fi-icon fi-size-md" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></span>
+            <span class="releu-files-name-copy">
+              <span class="releu-files-name">..</span>
+              <span class="releu-files-sub">Go up one folder</span>
+            </span>
+          </button>
+        </td>
+        <td class="fi-ta-cell"><span class="releu-files-kind">directory</span></td>
+        <td class="fi-ta-cell text-slate-500">-</td>
+        <td class="fi-ta-cell text-slate-400">${escapeHtml(formatDate(null))}</td>
+        <td class="fi-ta-cell"><div class="releu-files-actions"></div></td>
+      </tr>`
+    : "";
+
+  const entryRows = (listing.entries ?? []).map((entry) => {
+    const primaryAction =
+      entry.type === "directory"
+        ? `<button type="button" class="releu-files-name-btn" data-files-nav="${escapeHtml(entry.path)}">`
+        : entry.isTextEditable
+          ? `<button type="button" class="releu-files-name-btn" data-files-edit="${escapeHtml(entry.path)}">`
+          : `<a href="${escapeHtml(filesDownloadHref(entry.path))}" class="releu-files-name-btn">`;
+    const primaryClose = entry.type === "directory" || entry.isTextEditable ? "</button>" : "</a>";
+    const actionButtons = entry.type === "directory"
+      ? `<button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-files-nav="${escapeHtml(entry.path)}">Open</button>`
+      : `${entry.isTextEditable ? `<button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-files-edit="${escapeHtml(entry.path)}">Edit</button>` : ""}<a href="${escapeHtml(filesDownloadHref(entry.path))}" class="fi-btn fi-size-sm fi-ac-btn-action">Download</a>`;
+    return `<tr class="fi-ta-row">
+      <td class="fi-ta-cell">
+        ${primaryAction}
+          <span class="releu-files-icon">${fileEntryIcon(entry)}</span>
+          <span class="releu-files-name-copy">
+            <span class="releu-files-name">${escapeHtml(entry.name)}</span>
+            <span class="releu-files-sub">${escapeHtml(entry.path)}</span>
+          </span>
+        ${primaryClose}
+      </td>
+      <td class="fi-ta-cell"><span class="releu-files-kind">${escapeHtml(entry.type)}</span></td>
+      <td class="fi-ta-cell text-slate-300">${entry.type === "file" ? escapeHtml(formatBytes(entry.sizeBytes ?? 0)) : "-"}</td>
+      <td class="fi-ta-cell text-slate-400">${escapeHtml(formatDate(entry.modifiedAt))}</td>
+      <td class="fi-ta-cell">
+        <div class="releu-files-actions">
+          ${actionButtons}
+          <button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-files-delete="${escapeHtml(entry.path)}">Delete</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+
+  if (!parentRow && !entryRows) {
+    return `<tr><td colspan="5" class="releu-files-empty">This folder is empty.</td></tr>`;
+  }
+  return `${parentRow}${entryRows}`;
+}
+
+function renderFilesEditorModal() {
+  const editor = APP_STATE.filesBrowser.editor;
+  if (!editor) return "";
+  const draft = editor.draft ?? editor.content ?? "";
+  const saveLabel = editor.saving ? "Saving..." : "Save File";
+  return `<div class="releu-files-editor-backdrop" data-files-close-editor>
+    <div class="releu-files-editor" role="dialog" aria-modal="true" aria-label="Edit file" onclick="event.stopPropagation()">
+      <div class="releu-files-editor-head">
+        <div>
+          <div class="releu-files-editor-title">${escapeHtml(editor.path)}</div>
+          <div class="releu-files-editor-meta">${escapeHtml(formatBytes(editor.sizeBytes ?? 0))} • ${escapeHtml(formatDate(editor.modifiedAt))}</div>
+        </div>
+        <button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-files-close-editor>Close</button>
+      </div>
+      <form class="releu-files-editor-body" data-files-editor-form>
+        <div class="releu-files-editor-note">Edit the live server file directly from the new UI. Unsupported binary files stay download-only.</div>
+        <textarea class="releu-files-editor-textarea" data-files-editor-textarea spellcheck="false">${escapeHtml(draft)}</textarea>
+        <div class="releu-files-editor-actions">
+          <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-files-close-editor>Cancel</button>
+          <button type="submit" class="fi-btn fi-btn-color-primary fi-size-md" data-files-save-editor ${editor.saving ? "disabled" : ""}>${escapeHtml(saveLabel)}</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+}
+
+function renderFilesBrowserContent(listing) {
+  return `<div class="releu-files-shell">
+    <div class="releu-files-toolbar">
+      <div class="releu-files-toolbar-copy">
+        <div class="releu-files-toolbar-label">File Manager</div>
+        <div class="releu-files-toolbar-path">${escapeHtml(filesPathLabel(listing.path))}</div>
+      </div>
+      <div class="releu-files-toolbar-actions">
+        <button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-files-up ${listing.parentPath === null ? "disabled" : ""}>Up</button>
+        <button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-files-refresh>Refresh</button>
+        <button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-files-new-folder>New Folder</button>
+        ${isDesktopApp() ? `<button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-files-open-root>Open Server Folder</button>` : ""}
+      </div>
+    </div>
+    <div class="releu-files-table-wrap">
+      <table class="fi-ta-table releu-files-table">
+        <thead>
+          <tr>
+            <th class="fi-ta-header-cell">Name</th>
+            <th class="fi-ta-header-cell">Type</th>
+            <th class="fi-ta-header-cell">Size</th>
+            <th class="fi-ta-header-cell">Modified</th>
+            <th class="fi-ta-header-cell">Actions</th>
+          </tr>
+        </thead>
+        <tbody>${renderFilesBrowserRows(listing)}</tbody>
+      </table>
+    </div>
+  </div>${renderFilesEditorModal()}`;
+}
+
+async function patchFilesPage() {
+  const server = activeServer();
+  if (!server) return;
+  injectFilesPageStyles();
+  if (APP_STATE.filesBrowser.serverId !== activeServerId()) {
+    APP_STATE.filesBrowser.serverId = activeServerId();
+    APP_STATE.filesBrowser.path = "";
+    APP_STATE.filesBrowser.search = "";
+    APP_STATE.filesBrowser.listing = null;
+    APP_STATE.filesBrowser.editor = null;
+  }
+
+  const tableContainer = document.querySelector(".fi-ta-content-ctn");
+  const searchInput = document.querySelector(".fi-ta-search-field input");
+  const uploadButton = document.querySelector('button[aria-label="File upload"]');
+  const uploadInput = document.querySelector('input[type="file"][x-ref="fileInput"], input[type="file"].hidden');
+  if (!tableContainer || !searchInput || !uploadButton || !uploadInput) return;
+
+  document.querySelectorAll(".fi-ta-selection-indicator, .fi-pagination, .fi-ta-filter-indicators").forEach((node) => {
+    node.style.display = "none";
+  });
+  document.querySelectorAll('button[aria-label="Upload u r l"], button[aria-label="Search"]').forEach((node) => {
+    node.style.display = "none";
+  });
+
+  if (!searchInput.dataset.releuFilesBound) {
+    searchInput.addEventListener("input", () => {
+      APP_STATE.filesBrowser.search = searchInput.value.trim();
+      if (APP_STATE.filesBrowser.searchTimer) {
+        window.clearTimeout(APP_STATE.filesBrowser.searchTimer);
+      }
+      APP_STATE.filesBrowser.searchTimer = window.setTimeout(() => {
+        loadFilesListing(APP_STATE.filesBrowser.path, APP_STATE.filesBrowser.search)
+          .then(() => patchFilesPage())
+          .catch(showError);
+      }, 180);
+    });
+    searchInput.dataset.releuFilesBound = "true";
+  }
+  if (searchInput.value !== APP_STATE.filesBrowser.search) {
+    searchInput.value = APP_STATE.filesBrowser.search;
+  }
+
+  if (!uploadButton.dataset.releuFilesBound) {
+    uploadButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      uploadInput.click();
+    });
+    uploadButton.dataset.releuFilesBound = "true";
+  }
+
+  if (!uploadInput.dataset.releuFilesBound) {
+    uploadInput.addEventListener("change", async () => {
+      const files = Array.from(uploadInput.files ?? []);
+      if (!files.length) return;
+      try {
+        setButtonBusy(uploadButton, true, files.length > 1 ? "Uploading..." : "Uploading...");
+        for (const file of files) {
+          await apiBinary(
+            `/api/servers/${encodeURIComponent(activeServerId())}/files/upload?path=${encodeURIComponent(APP_STATE.filesBrowser.path ?? "")}`,
+            await file.arrayBuffer(),
+            {
+              "Content-Type": "application/octet-stream",
+              "X-File-Name": file.name,
+            },
+            { timeoutMs: Math.max(30_000, Math.min(15 * 60_000, file.size * 4)) },
+          );
+        }
+        await loadFilesListing(APP_STATE.filesBrowser.path, APP_STATE.filesBrowser.search);
+        await patchFilesPage();
+        showStatus(files.length === 1 ? `Uploaded ${files[0].name}.` : `Uploaded ${files.length} files.`, "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        uploadInput.value = "";
+        setButtonBusy(uploadButton, false);
+      }
+    });
+    uploadInput.dataset.releuFilesBound = "true";
+  }
+
+  if (!tableContainer.dataset.releuFilesBound) {
+    tableContainer.addEventListener("click", async (event) => {
+      const navButton = event.target.closest("[data-files-nav]");
+      if (navButton) {
+        APP_STATE.filesBrowser.path = navButton.dataset.filesNav ?? "";
+        APP_STATE.filesBrowser.editor = null;
+        await loadFilesListing(APP_STATE.filesBrowser.path, APP_STATE.filesBrowser.search);
+        await patchFilesPage();
+        return;
+      }
+
+      const upButton = event.target.closest("[data-files-up]");
+      if (upButton) {
+        const listing = APP_STATE.filesBrowser.listing;
+        if (listing?.parentPath !== null) {
+          APP_STATE.filesBrowser.path = listing?.parentPath ?? "";
+          APP_STATE.filesBrowser.editor = null;
+          await loadFilesListing(APP_STATE.filesBrowser.path, APP_STATE.filesBrowser.search);
+          await patchFilesPage();
+        }
+        return;
+      }
+
+      const refreshButton = event.target.closest("[data-files-refresh]");
+      if (refreshButton) {
+        await loadFilesListing(APP_STATE.filesBrowser.path, APP_STATE.filesBrowser.search);
+        await patchFilesPage();
+        return;
+      }
+
+      const openRootButton = event.target.closest("[data-files-open-root]");
+      if (openRootButton) {
+        try {
+          await openLocalPath(server.serverDir);
+        } catch (error) {
+          showError(error);
+        }
+        return;
+      }
+
+      const newFolderButton = event.target.closest("[data-files-new-folder]");
+      if (newFolderButton) {
+        const folderName = window.prompt("Folder name");
+        if (!folderName) return;
+        try {
+          setButtonBusy(newFolderButton, true, "Creating...");
+          const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/files/folder`, {
+            method: "POST",
+            body: {
+              path: APP_STATE.filesBrowser.path,
+              name: folderName,
+            },
+          });
+          APP_STATE.filesBrowser.listing = payload.files ?? APP_STATE.filesBrowser.listing;
+          await patchFilesPage();
+          showStatus(`Created folder ${folderName}.`, "success");
+        } catch (error) {
+          showError(error);
+        } finally {
+          setButtonBusy(newFolderButton, false);
+        }
+        return;
+      }
+
+      const deleteButton = event.target.closest("[data-files-delete]");
+      if (deleteButton) {
+        const targetPath = deleteButton.dataset.filesDelete ?? "";
+        if (!targetPath) return;
+        if (!window.confirm(`Delete ${targetPath}?`)) return;
+        try {
+          setButtonBusy(deleteButton, true, "Deleting...");
+          const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/files?path=${encodeURIComponent(targetPath)}`, {
+            method: "DELETE",
+          });
+          APP_STATE.filesBrowser.editor =
+            APP_STATE.filesBrowser.editor?.path === targetPath ? null : APP_STATE.filesBrowser.editor;
+          APP_STATE.filesBrowser.listing = payload.files ?? APP_STATE.filesBrowser.listing;
+          APP_STATE.filesBrowser.path = payload.files?.path ?? APP_STATE.filesBrowser.path;
+          await patchFilesPage();
+          showStatus(`Deleted ${targetPath}.`, "success");
+        } catch (error) {
+          showError(error);
+        } finally {
+          setButtonBusy(deleteButton, false);
+        }
+        return;
+      }
+
+      const editButton = event.target.closest("[data-files-edit]");
+      if (editButton) {
+        const targetPath = editButton.dataset.filesEdit ?? "";
+        if (!targetPath) return;
+        APP_STATE.filesBrowser.editor = {
+          serverId: activeServerId(),
+          path: targetPath,
+          loading: true,
+          draft: "",
+          dirty: false,
+          saving: false,
+        };
+        await patchFilesPage();
+        try {
+          const payload = await api(
+            `/api/servers/${encodeURIComponent(activeServerId())}/files/read?path=${encodeURIComponent(targetPath)}`,
+          );
+          APP_STATE.filesBrowser.editor = {
+            serverId: activeServerId(),
+            path: payload.file?.path ?? targetPath,
+            sizeBytes: payload.file?.sizeBytes ?? 0,
+            modifiedAt: payload.file?.modifiedAt ?? null,
+            content: payload.file?.content ?? "",
+            draft: payload.file?.content ?? "",
+            dirty: false,
+            saving: false,
+            loading: false,
+          };
+          await patchFilesPage();
+        } catch (error) {
+          APP_STATE.filesBrowser.editor = null;
+          showError(error);
+        }
+        return;
+      }
+
+      const closeEditorButton = event.target.closest("[data-files-close-editor]");
+      if (closeEditorButton) {
+        if (APP_STATE.filesBrowser.editor?.dirty && !window.confirm("Discard unsaved file changes?")) {
+          return;
+        }
+        APP_STATE.filesBrowser.editor = null;
+        await patchFilesPage();
+      }
+    });
+
+    tableContainer.addEventListener("input", (event) => {
+      if (!event.target.matches("[data-files-editor-textarea]")) return;
+      const editor = APP_STATE.filesBrowser.editor;
+      if (!editor) return;
+      const nextDraft = event.target.value;
+      editor.draft = nextDraft;
+      editor.dirty = nextDraft !== (editor.content ?? "");
+    });
+
+    tableContainer.addEventListener("submit", async (event) => {
+      if (!event.target.matches("[data-files-editor-form]")) return;
+      event.preventDefault();
+      const editor = APP_STATE.filesBrowser.editor;
+      if (!editor || editor.loading || editor.saving) return;
+      try {
+        editor.saving = true;
+        await patchFilesPage();
+        const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/files/write`, {
+          method: "POST",
+          body: {
+            path: editor.path,
+            content: editor.draft ?? editor.content ?? "",
+          },
+        });
+        APP_STATE.filesBrowser.editor = {
+          serverId: activeServerId(),
+          path: payload.file?.path ?? editor.path,
+          sizeBytes: payload.file?.sizeBytes ?? 0,
+          modifiedAt: payload.file?.modifiedAt ?? null,
+          content: payload.file?.content ?? editor.draft ?? "",
+          draft: payload.file?.content ?? editor.draft ?? "",
+          dirty: false,
+          saving: false,
+          loading: false,
+        };
+        await loadFilesListing(APP_STATE.filesBrowser.path, APP_STATE.filesBrowser.search);
+        await patchFilesPage();
+        showStatus(`Saved ${editor.path}.`, "success");
+      } catch (error) {
+        if (APP_STATE.filesBrowser.editor) {
+          APP_STATE.filesBrowser.editor.saving = false;
+        }
+        showError(error);
+        await patchFilesPage();
+      }
+    });
+
+    tableContainer.dataset.releuFilesBound = "true";
+  }
+
+  const activelyEditing =
+    APP_STATE.filesBrowser.editor?.dirty &&
+    document.activeElement?.matches?.("[data-files-editor-textarea]");
+  if (!activelyEditing) {
+    await loadFilesListing(APP_STATE.filesBrowser.path, APP_STATE.filesBrowser.search);
+  }
+
+  const listing = APP_STATE.filesBrowser.listing ?? {
+    path: "",
+    parentPath: null,
+    entries: [],
+  };
+  tableContainer.innerHTML = renderFilesBrowserContent(listing);
 }
 
 function patchMiscPage() {
@@ -4150,12 +5346,47 @@ function patchSettingsPage() {
       uploadButton?.removeAttribute("disabled");
     }
   }), uploadInput && (uploadInput.dataset.releuBound = "true");
+  const playitSection = [...document.querySelectorAll(".fi-section")].find((section) =>
+    /playit agent/i.test(section.querySelector(".fi-section-header-heading")?.textContent ?? ""),
+  );
+  const playitFooter = playitSection?.querySelector(".fi-section-footer .fi-sc");
+  if (playitFooter) {
+    const dashboardUrl = state.playit?.dashboardTunnelUrl || "https://playit.gg/account/tunnels";
+    playitFooter.innerHTML = state.playit?.secretConfigured
+      ? `
+        <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-playit-open-dashboard>Open Dashboard</button>
+        <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-playit-reset>Reset Agent</button>`
+      : `
+        <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-playit-connect>Connect Agent</button>`;
+    playitFooter.dataset.releuDashboardUrl = dashboardUrl;
+  }
+
   const buttons = [...document.querySelectorAll(".fi-section-footer .fi-btn")];
-  const dashboardButton = buttons.find((button) => /open dashboard/i.test(button.textContent));
+  const dashboardButton = buttons.find((button) => button.hasAttribute("data-releu-playit-open-dashboard") || /open dashboard/i.test(button.textContent));
   if (dashboardButton && !dashboardButton.dataset.releuBound) dashboardButton.addEventListener("click", () => {
     window.open(state.playit?.dashboardTunnelUrl || "https://playit.gg/account/tunnels", "_blank", "noopener,noreferrer");
   }), dashboardButton.dataset.releuBound = "true";
-  const resetButton = buttons.find((button) => /reset agent/i.test(button.textContent));
+  const connectButton = buttons.find((button) => button.hasAttribute("data-releu-playit-connect") || /connect agent/i.test(button.textContent));
+  if (connectButton && !connectButton.dataset.releuBound) connectButton.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    try {
+      setButtonBusy(button, true, "Connecting...");
+      const payload = await api("/api/playit/connect", { method: "POST" });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      await refreshState(activeServerId());
+      patchSettingsPage();
+      if (payload.connect?.claimUrl) {
+        window.open(payload.connect.claimUrl, "_blank", "noopener,noreferrer");
+      } else if (APP_STATE.state?.playit?.dashboardTunnelUrl) {
+        window.open(APP_STATE.state.playit.dashboardTunnelUrl, "_blank", "noopener,noreferrer");
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  }), connectButton.dataset.releuBound = "true";
+  const resetButton = buttons.find((button) => button.hasAttribute("data-releu-playit-reset") || /reset agent/i.test(button.textContent));
   if (resetButton && !resetButton.dataset.releuBound) resetButton.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     if (!window.confirm("Reset the linked playit agent?")) return;
@@ -4486,6 +5717,88 @@ function patchSettingsPage() {
       }
     });
   });
+  let desktopSection = document.querySelector("[data-releu-desktop-section]");
+  if (!desktopSection) {
+    desktopSection = document.createElement("section");
+    desktopSection.className = "fi-section mt-6";
+    desktopSection.dataset.releuDesktopSection = "true";
+    document.querySelector(".fi-page-content")?.append(desktopSection);
+  }
+  const desktopSettings = currentDesktopSettings();
+  desktopSection.innerHTML = `
+    <header class="fi-section-header">
+      <div>
+        <h2 class="fi-section-header-heading">Desktop App</h2>
+        <p class="fi-section-header-description">Background behavior and quick-access tools for the Releu desktop app.</p>
+      </div>
+    </header>
+    <div class="fi-section-content-ctn">
+      <div class="fi-section-content" style="display:grid;gap:1rem;">
+        <div class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4 text-sm text-slate-300" style="display:grid;gap:1rem;">
+          <label style="display:flex;align-items:flex-start;gap:.75rem;">
+            <input type="checkbox" data-releu-desktop-keep-running ${desktopSettings.keepServerRunningOnClose ? "checked" : ""}>
+            <span>
+              <span style="display:block;font-weight:600;color:#f8fafc;">Keep server running after the app is closed</span>
+              <span style="display:block;margin-top:.35rem;font-size:.75rem;color:#94a3b8;">Closing the Releu window will hide the app and keep the server running in the background until you reopen Releu or stop the server.</span>
+            </span>
+          </label>
+          <label style="display:grid;gap:.5rem;">
+            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Quick Console Shortcut</span>
+            <input class="fi-input" data-releu-desktop-shortcut type="text" value="${escapeHtml(normalizeShortcutString(desktopSettings.quickConsoleShortcut))}" placeholder="Ctrl+Shift+Space">
+            <span class="text-xs text-slate-400">Press this shortcut while Releu is focused to open a small console overlay from any page.</span>
+          </label>
+          <div style="display:flex;gap:.65rem;flex-wrap:wrap;">
+            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-desktop-save>Save Desktop Settings</button>
+            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-desktop-open-console>Open Quick Console</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  const desktopKeepRunning = desktopSection.querySelector("[data-releu-desktop-keep-running]");
+  const desktopShortcut = desktopSection.querySelector("[data-releu-desktop-shortcut]");
+  const saveDesktopButton = desktopSection.querySelector("[data-releu-desktop-save]");
+  const openQuickConsoleButton = desktopSection.querySelector("[data-releu-desktop-open-console]");
+  if (desktopShortcut && !desktopShortcut.dataset.releuBound) {
+    desktopShortcut.dataset.releuBound = "true";
+    desktopShortcut.addEventListener("blur", () => {
+      desktopShortcut.value = normalizeShortcutString(desktopShortcut.value);
+    });
+  }
+  if (saveDesktopButton && !saveDesktopButton.dataset.releuBound) {
+    saveDesktopButton.dataset.releuBound = "true";
+    saveDesktopButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(saveDesktopButton, true, "Saving...");
+        const payload = await api("/api/settings/desktop", {
+          method: "POST",
+          body: {
+            keepServerRunningOnClose: Boolean(desktopKeepRunning?.checked),
+            quickConsoleShortcut: normalizeShortcutString(desktopShortcut?.value ?? ""),
+          },
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        if (desktopShortcut) {
+          desktopShortcut.value = normalizeShortcutString(
+            APP_STATE.state?.desktopSettings?.quickConsoleShortcut ?? desktopShortcut.value,
+          );
+        }
+        await syncDesktopIntegration();
+        patchSettingsPage();
+        showStatus("Desktop settings saved.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(saveDesktopButton, false);
+      }
+    });
+  }
+  if (openQuickConsoleButton && !openQuickConsoleButton.dataset.releuBound) {
+    openQuickConsoleButton.dataset.releuBound = "true";
+    openQuickConsoleButton.addEventListener("click", () => {
+      APP_STATE.quickConsole.open = true;
+      renderQuickConsoleOverlay();
+    });
+  }
   document.querySelector("[data-releu-ui-section]")?.remove();
   let devSection = document.querySelector("[data-releu-dev-section]");
   if (!devSection) {
@@ -4531,22 +5844,24 @@ function patchSettingsPage() {
 }
 
 async function patchPage() {
-  if (PAGE === "servers.html") return patchServersPageExactShell();
-  if (PAGE === "create-server.html") return patchCreateServerPage();
-  if (PAGE === "overview.html") return patchOverviewPage();
-  if (PAGE === "console.html") return patchConsolePage();
-  if (PAGE === "players.html") return patchPlayersPage();
-  if (PAGE === "worlds.html") return patchWorldsPage();
-  if (PAGE === "software.html") return patchSoftwarePage();
-  if (PAGE === "addons-mods.html") return patchAddonsPage();
-  if (PAGE === "backups.html") return patchBackupsPage();
-  if (PAGE === "files.html") return patchFilesPage();
-  if (PAGE === "misc.html") return patchMiscPage();
-  if (PAGE === "settings.html") return patchSettingsPage();
+  if (PAGE === "servers.html") patchServersPageExactShell();
+  if (PAGE === "create-server.html") patchCreateServerPage();
+  if (PAGE === "overview.html") patchOverviewPage();
+  if (PAGE === "console.html") patchConsolePage();
+  if (PAGE === "players.html") patchPlayersPage();
+  if (PAGE === "worlds.html") patchWorldsPage();
+  if (PAGE === "software.html") patchSoftwarePage();
+  if (PAGE === "addons-mods.html") patchAddonsPage();
+  if (PAGE === "backups.html") patchBackupsPage();
+  if (PAGE === "files.html") patchFilesPage();
+  if (PAGE === "misc.html") patchMiscPage();
+  if (PAGE === "settings.html") patchSettingsPage();
+  renderQuickConsoleOverlay();
 }
 
 async function boot() {
   injectReleaseChromeStyles();
+  ensureQuickConsoleBinding();
   beginShellEnter();
   wireLocalNavigation();
   suppressSavedShellBehavior();

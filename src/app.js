@@ -195,6 +195,36 @@ export async function startPanelServer() {
   );
 
   app.post(
+    "/api/cloud-backup/register",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        cloudBackup: await panel.registerCloudBackupAccount(request.body ?? {}),
+        state: await panel.getState(resolveServerId(request)),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/cloud-backup/login",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        cloudBackup: await panel.loginCloudBackupAccount(request.body ?? {}),
+        state: await panel.getState(resolveServerId(request)),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/cloud-backup/logout",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        cloudBackup: await panel.logoutCloudBackupAccount(),
+        state: await panel.getState(resolveServerId(request)),
+      });
+    }),
+  );
+
+  app.post(
     "/api/servers",
     asyncRoute(async (request, response) => {
       sendOk(response, {
@@ -299,6 +329,16 @@ export async function startPanelServer() {
       sendOk(response, {
         config: await panel.updateUpdaterSettings(request.body ?? {}),
         state: await panel.getState(panel.activeServerId),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/settings/desktop",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        config: await panel.updateDesktopSettings(request.body ?? {}),
+        state: await panel.getState(resolveServerId(request)),
       });
     }),
   );
@@ -506,6 +546,94 @@ export async function startPanelServer() {
     }),
   );
 
+  app.get(
+    "/api/servers/:serverId/files",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        files: await panel.listManagedFiles(request.params.serverId, request.query ?? {}),
+      });
+    }),
+  );
+
+  app.get(
+    "/api/servers/:serverId/files/download",
+    asyncRoute(async (request, response) => {
+      const file = await panel.resolveManagedServerPath(
+        request.params.serverId,
+        request.query.path ?? "",
+      );
+      const stats = await fs.stat(file.absolutePath).catch(() => null);
+      if (!stats?.isFile()) {
+        throw new Error("That file does not exist.");
+      }
+      response.download(file.absolutePath, path.basename(file.absolutePath));
+    }),
+  );
+
+  app.get(
+    "/api/servers/:serverId/files/read",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        file: await panel.readManagedTextFile(
+          request.params.serverId,
+          request.query.path ?? "",
+        ),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/files/write",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        file: await panel.writeManagedTextFile(request.params.serverId, request.body ?? {}),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/files/folder",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        files: await panel.createManagedFolder(request.params.serverId, request.body ?? {}),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/files/upload",
+    express.raw({ limit: "256mb", type: "application/octet-stream" }),
+    asyncRoute(async (request, response) => {
+      const fileName =
+        request.headers["x-file-name"] ??
+        request.query.fileName ??
+        "upload.bin";
+      sendOk(response, {
+        upload: await panel.uploadManagedFile(
+          request.params.serverId,
+          request.query.path ?? "",
+          String(fileName),
+          request.body,
+        ),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
+  app.delete(
+    "/api/servers/:serverId/files",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        files: await panel.deleteManagedPath(
+          request.params.serverId,
+          request.query.path ?? "",
+        ),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
   app.post(
     "/api/servers/:serverId/players/register",
     asyncRoute(async (request, response) => {
@@ -525,6 +653,53 @@ export async function startPanelServer() {
           request.params.name,
           request.body.action,
           request.body,
+        ),
+      });
+    }),
+  );
+
+  app.get(
+    "/api/servers/:serverId/items/catalog",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        catalog: await panel.searchInventoryCatalog(request.params.serverId, request.query ?? {}),
+      });
+    }),
+  );
+
+  app.get(
+    "/api/servers/:serverId/players/:name/inventory",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        inventory: await panel.getPlayerInventory(
+          request.params.serverId,
+          request.params.name,
+        ),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/players/:name/inventory/give",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        inventory: await panel.givePlayerInventoryItem(
+          request.params.serverId,
+          request.params.name,
+          request.body ?? {},
+        ),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/players/:name/inventory/clear",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        inventory: await panel.clearPlayerInventory(
+          request.params.serverId,
+          request.params.name,
+          request.body ?? {},
         ),
       });
     }),

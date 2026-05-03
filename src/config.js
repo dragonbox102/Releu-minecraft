@@ -62,14 +62,25 @@ export const paths = {
 };
 
 export const defaultServerProperties = {
+  "allow-end": "true",
   "allow-flight": "false",
+  "allow-nether": "true",
   "difficulty": "normal",
   "enable-command-block": "false",
+  "enable-status": "true",
+  "force-gamemode": "false",
   "gamemode": "survival",
+  "generate-structures": "true",
+  "hardcore": "false",
+  "hide-online-players": "false",
   "level-name": "world",
+  "log-ips": "true",
   "max-players": "20",
   "motd": "Hosted by Local Minecraft Panel",
   "online-mode": "true",
+  "pause-when-empty-seconds": "60",
+  "player-idle-timeout": "0",
+  "prevent-proxy-connections": "false",
   "pvp": "true",
   "require-resource-pack": "false",
   "resource-pack": "",
@@ -90,8 +101,8 @@ export const defaultConfig = {
     port: 8787,
   },
   ui: {
-    variant: "classic",
-    hasChosenVariant: false,
+    variant: "pelican-blueprint",
+    hasChosenVariant: true,
   },
   playit: {
     autoStart: true,
@@ -106,9 +117,13 @@ export const defaultConfig = {
     assetName: getDefaultUpdaterAssetName(),
     allowPrerelease: false,
   },
+  desktop: {
+    keepServerRunningOnClose: false,
+    quickConsoleShortcut: "Ctrl+Shift+Space",
+  },
   cloudBackup: {
     enabled: false,
-    provider: "supabase",
+    provider: "tailscale-ssh",
     functionName: "releu-cloud-backup",
     bucket: "releu-backups",
     uploadLimitMb: 50,
@@ -116,7 +131,10 @@ export const defaultConfig = {
     publishableKey: "sb_publishable_jYXQJJKCYUBHrJUUyB-xvA_u7oj_sbx",
     serviceKey: "",
     restoreKey: "",
+    targetRestoreKey: "",
     deviceLabel: "",
+    accountUsername: "",
+    sessionToken: "",
     tailscaleHost: "",
     tailscaleUser: "",
     tailscaleRemoteDir: "",
@@ -148,7 +166,9 @@ function normalizeUpdaterConfig(config, storedConfig = null) {
 function normalizeCloudBackupConfig(config) {
   const merged = deepMerge(defaultConfig.cloudBackup, config ?? {});
   merged.enabled = Boolean(merged.enabled);
-  merged.provider = String(merged.provider ?? defaultConfig.cloudBackup.provider).trim().toLowerCase() || defaultConfig.cloudBackup.provider;
+  const rawProvider =
+    String(merged.provider ?? defaultConfig.cloudBackup.provider).trim().toLowerCase() ||
+    defaultConfig.cloudBackup.provider;
   merged.functionName = String(merged.functionName ?? defaultConfig.cloudBackup.functionName).trim() || defaultConfig.cloudBackup.functionName;
   merged.bucket = String(merged.bucket ?? defaultConfig.cloudBackup.bucket).trim() || defaultConfig.cloudBackup.bucket;
   merged.uploadLimitMb = Math.max(
@@ -162,10 +182,33 @@ function normalizeCloudBackupConfig(config) {
   ).trim();
   merged.serviceKey = String(merged.serviceKey ?? "").trim();
   merged.restoreKey = String(merged.restoreKey ?? "").trim();
+  merged.targetRestoreKey = String(merged.targetRestoreKey ?? "").trim();
   merged.deviceLabel = String(merged.deviceLabel ?? "").trim();
+  merged.accountUsername = String(merged.accountUsername ?? "").trim().toLowerCase();
+  merged.sessionToken = String(merged.sessionToken ?? "").trim();
   merged.tailscaleHost = String(merged.tailscaleHost ?? "").trim();
   merged.tailscaleUser = String(merged.tailscaleUser ?? "").trim();
   merged.tailscaleRemoteDir = String(merged.tailscaleRemoteDir ?? "").trim();
+  const hasTailscaleConfig =
+    Boolean(merged.tailscaleHost) &&
+    Boolean(merged.tailscaleUser) &&
+    Boolean(merged.tailscaleRemoteDir);
+  merged.provider =
+    rawProvider === "tailscale-ssh" ||
+    (rawProvider === "supabase" && hasTailscaleConfig)
+      ? "tailscale-ssh"
+      : rawProvider;
+  return merged;
+}
+
+function normalizeDesktopConfig(config) {
+  const merged = deepMerge(defaultConfig.desktop, config ?? {});
+  merged.keepServerRunningOnClose = Boolean(merged.keepServerRunningOnClose);
+  const shortcut = String(
+    merged.quickConsoleShortcut ?? defaultConfig.desktop.quickConsoleShortcut,
+  ).trim();
+  merged.quickConsoleShortcut =
+    shortcut || defaultConfig.desktop.quickConsoleShortcut;
   return merged;
 }
 
@@ -174,11 +217,13 @@ function normalizeUiConfig(config) {
   const variant = String(merged.variant ?? defaultConfig.ui.variant)
     .trim()
     .toLowerCase();
-  merged.variant =
-    variant === "pelican-blueprint"
-      ? "pelican-blueprint"
-      : defaultConfig.ui.variant;
-  merged.hasChosenVariant = Boolean(merged.hasChosenVariant);
+  if (Boolean(merged.hasChosenVariant)) {
+    merged.variant = variant === "classic" ? "classic" : "pelican-blueprint";
+    merged.hasChosenVariant = true;
+    return merged;
+  }
+  merged.variant = "pelican-blueprint";
+  merged.hasChosenVariant = true;
   return merged;
 }
 
@@ -286,6 +331,7 @@ export async function loadPanelConfig() {
   const merged = deepMerge(defaultConfig, stored);
   merged.ui = normalizeUiConfig(merged.ui);
   merged.updater = normalizeUpdaterConfig(merged.updater, stored);
+  merged.desktop = normalizeDesktopConfig(merged.desktop);
   merged.cloudBackup = normalizeCloudBackupConfig(merged.cloudBackup);
   await writeJsonFile(paths.configFile, merged);
   return merged;
@@ -295,6 +341,7 @@ export async function savePanelConfig(config) {
   const merged = deepMerge(defaultConfig, config);
   merged.ui = normalizeUiConfig(merged.ui);
   merged.updater = normalizeUpdaterConfig(merged.updater, merged);
+  merged.desktop = normalizeDesktopConfig(merged.desktop);
   merged.cloudBackup = normalizeCloudBackupConfig(merged.cloudBackup);
   await writeJsonFile(paths.configFile, merged);
   return merged;

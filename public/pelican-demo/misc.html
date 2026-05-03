@@ -10,104 +10,87 @@
     <link rel="stylesheet" href="./Settings - Pelican Demo_files/app.css">
 
     <style>
-      [x-cloak] { display: none !important; }
+      [x-cloak]{display:none!important}
+      :root{
+        --font-family:"Inter Variable";
+        --mono-font-family:"ui-monospace";
+        --sidebar-width:20rem;
+        --collapsed-sidebar-width:4.5rem;
+        --default-theme-mode:system;
+      }
+      html.fi{--livewire-progress-bar-color:var(--primary-500)}
+      .releu-panel-title{display:inline-flex;align-items:center;gap:.625rem;line-height:1.2}
+      .releu-panel-icon{width:1rem;height:1rem;flex-shrink:0;color:#64748b;display:inline-block;vertical-align:middle}
+      .fi-header-heading .releu-panel-icon{width:1.05rem;height:1.05rem}
+      .pelican-stat-label .releu-panel-icon,.pelican-panel-head .releu-panel-icon,.pelican-res-name .releu-panel-icon,.pelican-console-title .releu-panel-icon,.pw-card-title .releu-panel-icon,.psw-card-head .releu-panel-icon,.pm-respack-head .releu-panel-icon,.fi-section-header-heading .releu-panel-icon{color:#94a3b8}
 
-      :root {
-        --font-family: "Inter Variable";
-        --mono-font-family: "ui-monospace";
-        --serif-font-family: "ui-serif";
-        --sidebar-width: 20rem;
-        --collapsed-sidebar-width: 4.5rem;
-        --default-theme-mode: system;
-      }
+      /* ─── copied verbatim from Overview pelican-* tokens ─── */
 
-      html.fi {
-        --livewire-progress-bar-color: var(--primary-500);
-      }
+      /* section spacing */
+      .misc-form{display:flex;flex-direction:column;gap:1.25rem}
 
-      .misc-section { margin-bottom: .875rem; }
-      .misc-panel {
-        background: rgb(var(--gray-900, 17 24 32));
-        border: 1px solid #2b3642;
-        border-radius: .5rem;
-        overflow: hidden;
+      /* panel = pelican-panel */
+      .pelican-panel{background:#0f141b!important;border:1px solid #2b3642;border-radius:.5rem;overflow:hidden}
+      .pelican-panel-head{padding:.75rem 1rem;border-bottom:1px solid #2b3642;font-size:.8125rem;font-weight:600;color:#f1f5f9;display:flex;align-items:center;gap:.5rem}
+      .pelican-panel-head svg{width:14px;height:14px;color:#64748b;flex-shrink:0}
+      .pelican-panel-body{padding:.875rem 1rem;background:#0f141b!important}
+
+      /* section heading row inside panel body */
+      .misc-group{display:flex;flex-direction:column;gap:.625rem}
+      .misc-group-label{font-size:.6875rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:rgb(var(--gray-500,100 116 139));display:flex;align-items:center;gap:.35rem;margin-bottom:.125rem}
+      .misc-group-label svg{width:11px;height:11px;flex-shrink:0}
+
+      /* card grid layouts */
+      .misc-grid-2{display:grid;gap:.75rem;grid-template-columns:repeat(2,minmax(0,1fr))}
+      .misc-grid-3{display:grid;gap:.75rem;grid-template-columns:repeat(3,minmax(0,1fr))}
+      .misc-grid-4{display:grid;gap:.75rem;grid-template-columns:repeat(4,minmax(0,1fr))}
+      @media(max-width:1200px){.misc-grid-4{grid-template-columns:repeat(2,1fr)}}
+      @media(max-width:900px){.misc-grid-3{grid-template-columns:repeat(2,1fr)}}
+      @media(max-width:640px){.misc-grid-2,.misc-grid-3,.misc-grid-4{grid-template-columns:1fr}}
+      .misc-2col{display:grid;gap:.75rem;grid-template-columns:repeat(2,minmax(0,1fr))}
+      @media(max-width:900px){.misc-2col{grid-template-columns:1fr}}
+
+      /* card = pelican-stat-card */
+      .pelican-stat-card{background:#0f141b!important;border:1px solid #2b3642!important;border-radius:.5rem;padding:1rem 1.125rem;box-shadow:none!important;min-width:0}
+
+      /* label = pelican-stat-label */
+      .pelican-stat-label{font-size:.6875rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:rgb(var(--gray-500,100 116 139));display:flex;align-items:center;gap:.375rem}
+      .pelican-stat-label svg{width:12px;height:12px;flex-shrink:0}
+
+      /* value = pelican-stat-value */
+      .pelican-stat-value{font-size:1rem;font-weight:600;color:#f1f5f9;margin-top:.625rem;line-height:1.3}
+
+      /* desc = pelican-stat-desc */
+      .pelican-stat-desc{font-size:.75rem;color:#64748b;margin-top:.375rem;line-height:1.4}
+
+      /* select control inside card */
+      .misc-select{
+        width:100%;margin-top:.625rem;
+        background:#0f141b!important;
+        border:1px solid #2b3642!important;border-radius:.375rem;
+        padding:.4rem .625rem;padding-right:1.75rem;
+        font-size:.75rem;color:#f1f5f9;
+        outline:none;font-family:inherit;appearance:none;
+        background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+        background-repeat:no-repeat;background-position:right .5rem center;cursor:pointer;
       }
-      .misc-panel-head {
-        padding: 1rem 1.25rem;
-        border-bottom: 1px solid #2b3642;
+      .misc-select:focus{border-color:#64748b!important;box-shadow:0 0 0 1px rgba(100,116,139,.18)!important}
+
+      /* number input */
+      .misc-input{
+        width:100%;margin-top:.625rem;
+        background:#0f141b!important;
+        border:1px solid #2b3642!important;border-radius:.375rem;
+        padding:.4rem .625rem;
+        font-size:.75rem;color:#f1f5f9;
+        outline:none;font-family:inherit;
       }
-      .misc-panel-head h2 {
-        font-size: 1rem;
-        font-weight: 600;
-        color: #f1f5f9;
-      }
-      .misc-panel-head p {
-        margin-top: .35rem;
-        font-size: .8125rem;
-        color: #94a3b8;
-      }
-      .misc-panel-body {
-        padding: 1rem 1.25rem;
-      }
-      .misc-card {
-        border: 1px solid #2b3642;
-        background: rgb(var(--gray-900, 17 24 32));
-        border-radius: .5rem;
-        padding: 1rem;
-      }
-      .misc-fieldset {
-        border: none;
-        background: transparent;
-        border-radius: 0;
-        padding: 0;
-        margin: 0;
-      }
-      .misc-fieldset legend {
-        font-size: .625rem;
-        font-weight: 700;
-        letter-spacing: .12em;
-        text-transform: uppercase;
-        color: #64748b;
-        padding: 0;
-        margin-bottom: .625rem;
-        display: flex;
-        align-items: center;
-        gap: .4rem;
-      }
-      .misc-fieldset legend svg { width: 12px; height: 12px; flex-shrink: 0; }
-      .misc-fields-grid { display: grid; gap: .75rem; grid-template-columns: repeat(2, 1fr); }
-      @media (max-width: 700px) { .misc-fields-grid { grid-template-columns: 1fr; } }
-      .misc-field { display: flex; flex-direction: column; gap: .3rem; }
-      .misc-label {
-        display: flex;
-        align-items: center;
-        gap: .375rem;
-        font-size: .75rem;
-        font-weight: 500;
-        color: #cbd5e1;
-      }
-      .misc-label svg { width: 13px; height: 13px; color: #64748b; flex-shrink: 0; }
-      .misc-select-wrap { position: relative; }
-      .misc-select-wrap svg.arr {
-        position: absolute;
-        right: .625rem;
-        top: 50%;
-        transform: translateY(-50%);
-        pointer-events: none;
-        color: #64748b;
-        width: 12px;
-        height: 12px;
-      }
-      .misc-select {
-        width: 100%;
-        padding: .45rem 1.75rem .45rem .625rem;
-        font-size: .8125rem;
-        outline: none;
-        font-family: inherit;
-        appearance: none;
-      }
-      .misc-content-cols { display: grid; gap: .75rem; grid-template-columns: repeat(2, 1fr); }
-      @media (max-width: 900px) { .misc-content-cols { grid-template-columns: 1fr; } }
+      .misc-input:focus{border-color:#64748b!important;box-shadow:0 0 0 1px rgba(100,116,139,.18)!important}
+      .misc-input::placeholder{color:#475569}
+
+      /* apply row */
+      .misc-apply-row{display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap}
+      .misc-apply-hint{font-size:.75rem;color:#64748b;line-height:1.5;flex:1;min-width:180px}
     </style>
   </head>
   <body class="fi-body fi-panel-server fi-body-has-navigation">
@@ -170,162 +153,170 @@
       <div class="fi-main-ctn" style="display: flex; opacity: 1;">
         <main class="fi-main fi-width-screen-2xl">
           <div class="fi-page">
-            <section class="fi-header">
-              <div>
-                <h1 class="fi-header-heading">Misc</h1>
-                <p class="fi-header-subheading">Gameplay and access settings only.</p>
-              </div>
-            </section>
-
-            <div class="fi-page-content">
-              <form data-releu-misc-form class="fi-sc fi-sc-has-gap fi-grid" style="--cols-default: repeat(1, minmax(0, 1fr));">
-                <section class="misc-panel misc-section">
-                  <div class="misc-panel-head">
-                    <h2>Player Access</h2>
-                    <p>Who can join and how they are allowed in.</p>
+            <div class="fi-page-content space-y-8">
+              <section class="fi-section fi-section-has-header">
+                <header class="fi-section-header">
+                  <div class="fi-section-header-text-ctn">
+                    <h2 class="fi-section-header-heading">
+                      <span class="releu-panel-title">
+                        <svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <circle cx="12" cy="8" r="4"></circle>
+                          <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"></path>
+                        </svg>
+                        <span>Misc</span>
+                      </span>
+                    </h2>
+                    <p class="fi-section-header-description">Gameplay and access settings only.</p>
                   </div>
-                  <div class="misc-panel-body">
-                    <div class="misc-content-cols">
-                      <fieldset class="misc-fieldset">
-                        <legend>
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-                          Entry Rules
-                        </legend>
-                        <div class="misc-fields-grid">
-                          <div class="misc-field misc-card">
-                            <label class="misc-label" for="misc-cracked">
-                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
-                              Allow Cracked Clients
-                            </label>
-                            <div class="misc-select-wrap">
-                              <select id="misc-cracked" name="allowCrackedClients" class="misc-select fi-input">
-                                <option value="false">Disabled</option>
-                                <option value="true">Enabled</option>
-                              </select>
-                              <svg class="arr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                            </div>
-                          </div>
-
-                          <div class="misc-field misc-card">
-                            <label class="misc-label" for="misc-whitelist">
-                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                              Whitelist
-                            </label>
-                            <div class="misc-select-wrap">
-                              <select id="misc-whitelist" name="whitelist" class="misc-select fi-input">
-                                <option value="false">Disabled</option>
-                                <option value="true">Enabled</option>
-                              </select>
-                              <svg class="arr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                            </div>
-                          </div>
-                        </div>
-                      </fieldset>
-
-                      <fieldset class="misc-fieldset">
-                        <legend>
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                          Admin Tools
-                        </legend>
-                        <div class="misc-fields-grid" style="grid-template-columns: 1fr;">
-                          <div class="misc-field misc-card">
-                            <label class="misc-label" for="misc-command-blocks">
-                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7l5 5-5 5"/><line x1="12" y1="19" x2="19" y2="19"/></svg>
-                              Command Blocks
-                            </label>
-                            <div class="misc-select-wrap">
-                              <select id="misc-command-blocks" name="commandBlocks" class="misc-select fi-input">
-                                <option value="false">Disabled</option>
-                                <option value="true">Enabled</option>
-                              </select>
-                              <svg class="arr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                            </div>
-                          </div>
-                        </div>
-                      </fieldset>
-                    </div>
+                </header>
+                <div class="fi-section-content-ctn">
+                  <div class="fi-section-content">
+                    <form data-releu-misc-form class="misc-form">
+                <div class="pelican-panel">
+  <div class="pelican-panel-head"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>Player Access</div>
+  <div class="pelican-panel-body">
+    <p class="pelican-stat-desc" style="margin-bottom:.875rem">Control who can connect and how they get in.</p>
+    <div class="misc-2col"><div class="misc-group">
+  <p class="misc-group-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>Entry Rules</p>
+  <div class="misc-grid-2">
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>Allow Cracked Clients</p>
+  <p class="pelican-stat-desc">Let non-premium accounts connect by turning online-mode off.</p>
+  <select name="allowCrackedClients" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Whitelist</p>
+  <p class="pelican-stat-desc">Only approved players can join</p>
+  <select name="whitelist" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5"/><path d="M9 10h6"/><path d="M7 17c1.7-1.3 3.5-2 5-2s3.3.7 5 2"/></svg>Show Player Count</p>
+  <p class="pelican-stat-desc">Expose the server in the list with live status and player counts.</p>
+  <select name="showPlayerCount" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Max Players</p>
+  <p class="pelican-stat-desc">How many players can join at once. Defaults to 100 if nothing has been set yet.</p>
+  <input type="number" name="maxPlayers" class="misc-input" value="100" min="1" placeholder="100">
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>Hide Online Players</p>
+  <p class="pelican-stat-desc">Hide the player sample in status pings while keeping the server visible.</p>
+  <select name="hideOnlinePlayers" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Allow Proxy Connections</p>
+  <p class="pelican-stat-desc">Allow joins coming through proxies and tunnels instead of blocking them.</p>
+  <select name="allowProxyConnections" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+  </div>
+</div><div class="misc-group">
+  <p class="misc-group-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>Admin &amp; Server</p>
+  <div class="misc-grid-2">
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7l5 5-5 5"/><line x1="12" y1="19" x2="19" y2="19"/></svg>Command Blocks</p>
+  <p class="pelican-stat-desc">Enable in-world command blocks</p>
+  <select name="commandBlocks" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Idle Kick Time</p>
+  <p class="pelican-stat-desc">Minutes before an idle player is kicked. Set 0 to disable it.</p>
+  <input type="number" name="playerIdleTimeout" class="misc-input" value="0" min="0" placeholder="0">
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="12" cy="11" r="1"/></svg>Spawn Protection</p>
+  <p class="pelican-stat-desc">Radius in blocks around spawn ops-only can edit</p>
+  <input type="number" name="spawnProtection" class="misc-input" value="16" min="0" placeholder="16">
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Pause When Empty</p>
+  <p class="pelican-stat-desc">Pause simulation with no players online</p>
+  <select name="pauseWhenEmpty" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+  </div>
+</div></div>
+  </div>
+</div>
+                <div class="pelican-panel">
+  <div class="pelican-panel-head"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>World Rules</div>
+  <div class="pelican-panel-body">
+    <p class="pelican-stat-desc" style="margin-bottom:.875rem">Combat, survival, and dimension behaviour.</p>
+    <div class="misc-grid-4">
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><path d="M13 19l6-6"/><path d="M16 16l4 4"/><path d="M19 21l2-2"/><path d="M3 21l7-7"/><path d="M6 4l4 4"/></svg>PvP</p>
+  <p class="pelican-stat-desc">Player vs player damage</p>
+  <select name="pvp" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21 4 19 4c-2 0-4 1-4 1L11 6.2"/><path d="M16.5 11.5l-9.1 1.4L4 16l4 1 1 4 3.1-3.4 1.4-9.1"/></svg>Allow Flight</p>
+  <p class="pelican-stat-desc">Survival flying with mods/plugins</p>
+  <select name="allowFlight" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>Keep Inventory</p>
+  <p class="pelican-stat-desc">Keep items when dying</p>
+  <select name="keepInventory" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>Shared Health</p>
+  <p class="pelican-stat-desc">All players share one HP pool</p>
+  <select name="sharedHealth" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>Hardcore Mode</p>
+  <p class="pelican-stat-desc">Perma-death mode with spectator-on-death behavior.</p>
+  <select name="hardcore" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>Force Gamemode</p>
+  <p class="pelican-stat-desc">Reset players to default mode on join</p>
+  <select name="forceGamemode" class="misc-select"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>Generate Structures</p>
+  <p class="pelican-stat-desc">Spawn villages, temples, etc.</p>
+  <select name="generateStructures" class="misc-select"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Log Player IPs</p>
+  <p class="pelican-stat-desc">Save player IPs in server logs</p>
+  <select name="logPlayerIPs" class="misc-select"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+</div>
+  </div>
+  </div>
+</div>
+                <div class="pelican-panel">
+  <div class="pelican-panel-head"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>Dimensions</div>
+  <div class="pelican-panel-body">
+    <p class="pelican-stat-desc" style="margin-bottom:.875rem">Toggle which dimensions are loaded.</p>
+    <div class="misc-grid-2" style="max-width:32rem">
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Allow Nether</p>
+  <p class="pelican-stat-desc">Load the Nether dimension</p>
+  <select name="allowNether" class="misc-select"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+</div>
+    <div class="pelican-stat-card">
+  <p class="pelican-stat-label"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Allow The End</p>
+  <p class="pelican-stat-desc">Load The End dimension. Paper and Purpur also mirror this into bukkit.yml.</p>
+  <select name="allowEnd" class="misc-select"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+</div>
+  </div>
+  </div>
+</div>
+                <div class="pelican-panel">
+  <div class="pelican-panel-head"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v14a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Autosave Status</div>
+  <div class="pelican-panel-body">
+    <p class="pelican-stat-desc" style="margin-bottom:.875rem">Everything here saves automatically to Releu and the real server.properties file.</p>
+    <div class="misc-apply-row">
+    <p class="misc-apply-hint" data-misc-autosave-status>Changes save automatically. Releu also checks server.properties for outside edits every second.</p>
+    <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" disabled>Saved Automatically</button>
+  </div>
+  </div>
+</div>
+                    </form>
                   </div>
-                </section>
-
-                <section class="misc-panel misc-section">
-                  <div class="misc-panel-head">
-                    <h2>World Rules</h2>
-                    <p>Combat and survival behavior for the active world.</p>
-                  </div>
-                  <div class="misc-panel-body">
-                    <div class="misc-fields-grid">
-                      <div class="misc-field misc-card">
-                        <label class="misc-label" for="misc-pvp">
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><path d="M13 19l6-6"/><path d="M16 16l4 4"/><path d="M19 21l2-2"/><path d="M3 21l7-7"/><path d="M6 4l4 4"/></svg>
-                          PvP
-                        </label>
-                        <div class="misc-select-wrap">
-                          <select id="misc-pvp" name="pvp" class="misc-select fi-input">
-                            <option value="false">Disabled</option>
-                            <option value="true">Enabled</option>
-                          </select>
-                          <svg class="arr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                        </div>
-                      </div>
-
-                      <div class="misc-field misc-card">
-                        <label class="misc-label" for="misc-flight">
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21 4 19 4c-2 0-4 1-4 1L11 6.2"/><path d="M16.5 11.5l-9.1 1.4L4 16l4 1 1 4 3.1-3.4 1.4-9.1"/><line x1="2" y1="2" x2="7" y2="7"/></svg>
-                          Allow Flight
-                        </label>
-                        <div class="misc-select-wrap">
-                          <select id="misc-flight" name="allowFlight" class="misc-select fi-input">
-                            <option value="false">Disabled</option>
-                            <option value="true">Enabled</option>
-                          </select>
-                          <svg class="arr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                        </div>
-                      </div>
-
-                      <div class="misc-field misc-card">
-                        <label class="misc-label" for="misc-keepinv">
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
-                          Keep Inventory
-                        </label>
-                        <div class="misc-select-wrap">
-                          <select id="misc-keepinv" name="keepInventory" class="misc-select fi-input">
-                            <option value="false">Disabled</option>
-                            <option value="true">Enabled</option>
-                          </select>
-                          <svg class="arr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                        </div>
-                      </div>
-
-                      <div class="misc-field misc-card">
-                        <label class="misc-label" for="misc-shared-health">
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-                          Shared Health
-                        </label>
-                        <div class="misc-select-wrap">
-                          <select id="misc-shared-health" name="sharedHealth" class="misc-select fi-input">
-                            <option value="false">Disabled</option>
-                            <option value="true">Enabled</option>
-                          </select>
-                          <svg class="arr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-
-                <section class="misc-panel">
-                  <div class="misc-panel-head">
-                    <h2>Apply Changes</h2>
-                    <p>Save these misc rules back into Releu and the server.</p>
-                  </div>
-                  <div class="misc-panel-body">
-                    <div style="display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; align-items: center;">
-                      <div class="text-sm text-slate-400">Cracked support, whitelist, PvP, and command blocks save to the server. Keep inventory is applied when the server is running.</div>
-                      <button type="submit" class="fi-btn fi-size-md fi-ac-btn-action" data-busy-label="Saving...">Save Misc Settings</button>
-                    </div>
-                  </div>
-                </section>
-              </form>
+                </div>
+              </section>
             </div>
           </div>
         </main>

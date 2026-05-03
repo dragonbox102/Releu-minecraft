@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld("desktop", {
   pickDirectory() {
     return ipcRenderer.invoke("desktop:pick-directory");
   },
+  applySettings(settings) {
+    return ipcRenderer.invoke("desktop:update-settings", settings);
+  },
   installAppUpdate(stagedPath) {
     return ipcRenderer.invoke("desktop:install-app-update", stagedPath);
   },

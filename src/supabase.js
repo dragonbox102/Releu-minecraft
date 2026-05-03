@@ -7,9 +7,19 @@ function normalizeCloudBackupConfig(config = {}) {
     ...defaultConfig.cloudBackup,
     ...(config ?? {}),
   };
+  const rawProvider =
+    String(merged.provider ?? defaultConfig.cloudBackup.provider).trim().toLowerCase() ||
+    defaultConfig.cloudBackup.provider;
+  const tailscaleHost = String(merged.tailscaleHost ?? "").trim();
+  const tailscaleUser = String(merged.tailscaleUser ?? "").trim();
+  const tailscaleRemoteDir = String(merged.tailscaleRemoteDir ?? "").trim();
+  const hasTailscaleConfig = Boolean(tailscaleHost && tailscaleUser && tailscaleRemoteDir);
   return {
     enabled: Boolean(merged.enabled),
-    provider: String(merged.provider ?? "supabase").trim().toLowerCase() || "supabase",
+    provider:
+      rawProvider === "tailscale-ssh" || (rawProvider === "supabase" && hasTailscaleConfig)
+        ? "tailscale-ssh"
+        : rawProvider,
     functionName: String(merged.functionName ?? "releu-cloud-backup").trim() || "releu-cloud-backup",
     bucket: String(merged.bucket ?? "releu-backups").trim() || "releu-backups",
     uploadLimitMb: Math.max(1, Number(merged.uploadLimitMb ?? 50) || 50),
@@ -17,10 +27,13 @@ function normalizeCloudBackupConfig(config = {}) {
     publishableKey: String(merged.publishableKey ?? "").trim(),
     serviceKey: String(merged.serviceKey ?? "").trim(),
     restoreKey: String(merged.restoreKey ?? "").trim(),
+    targetRestoreKey: String(merged.targetRestoreKey ?? "").trim(),
     deviceLabel: String(merged.deviceLabel ?? "").trim(),
-    tailscaleHost: String(merged.tailscaleHost ?? "").trim(),
-    tailscaleUser: String(merged.tailscaleUser ?? "").trim(),
-    tailscaleRemoteDir: String(merged.tailscaleRemoteDir ?? "").trim(),
+    accountUsername: String(merged.accountUsername ?? "").trim().toLowerCase(),
+    sessionToken: String(merged.sessionToken ?? "").trim(),
+    tailscaleHost,
+    tailscaleUser,
+    tailscaleRemoteDir,
   };
 }
 
@@ -44,7 +57,9 @@ export function getPublicCloudBackupConfig(config = null) {
     projectUrl: cloud.projectUrl,
     publishableKey: cloud.publishableKey,
     restoreKey: cloud.restoreKey,
+    targetRestoreKey: cloud.targetRestoreKey,
     deviceLabel: cloud.deviceLabel,
+    accountUsername: cloud.accountUsername,
     functionUrl: getSupabaseFunctionUrl(cloud),
   };
 }
