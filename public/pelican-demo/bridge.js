@@ -5,6 +5,7 @@ const SERVER_PAGES = new Set([
   "players.html",
   "files.html",
   "backups.html",
+  "cloud-backup.html",
   "worlds.html",
   "addons-mods.html",
   "software.html",
@@ -32,7 +33,17 @@ const APP_STATE = {
   miscSaveState: { message: "", tone: "neutral" },
   profileSaveTimer: null,
   profileSaveState: { message: "", tone: "neutral" },
-  cloudBackup: { status: null, loading: false, lastFetchedAt: 0 },
+  cloudBackup: {
+    status: null,
+    loading: false,
+    lastFetchedAt: 0,
+    draft: {
+      deviceLabel: "",
+      accountUsername: "",
+      accountPassword: "",
+      targetRestoreKey: "",
+    },
+  },
   playerInventoryModal: null,
   filesBrowser: {
     path: "",
@@ -44,6 +55,16 @@ const APP_STATE = {
     open: false,
     draft: "",
     bindingReady: false,
+  },
+  playersPage: {
+    serverId: "",
+    search: "",
+  },
+  backupsPage: {
+    serverId: "",
+    autoBackups: null,
+    backupIntervalMinutes: null,
+    maxBackupStorageGb: null,
   },
   consoleDraft: "",
   consoleHelpOpen: false,
@@ -219,6 +240,37 @@ function ensureServersSidebarLink() {
   list.prepend(item);
 }
 
+function ensureBackupsSidebarLink() {
+  if (PAGE === "servers.html") return;
+  const list = document.querySelector(".fi-sidebar-group-items");
+  if (!list) return;
+  const existing = [...list.querySelectorAll(".fi-sidebar-item-label")].find(
+    (node) => node.textContent?.trim().toLowerCase() === "backups",
+  );
+  if (existing) return;
+  const item = document.createElement("li");
+  item.className = `fi-sidebar-item fi-sidebar-item-has-url${PAGE === "backups.html" ? " fi-active" : ""}`;
+  item.innerHTML = `<a href="${escapeHtml(buildLocalPageHref("backups.html"))}" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Backups</span></a>`;
+  const cloudItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "cloud backup",
+  );
+  const miscItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "misc",
+  );
+  const settingsItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "settings",
+  );
+  if (cloudItem?.parentNode) {
+    cloudItem.parentNode.insertBefore(item, cloudItem);
+  } else if (miscItem?.parentNode) {
+    miscItem.parentNode.insertBefore(item, miscItem);
+  } else if (settingsItem?.parentNode) {
+    settingsItem.parentNode.insertBefore(item, settingsItem);
+  } else {
+    list.append(item);
+  }
+}
+
 function ensureMiscSidebarLink() {
   if (PAGE === "servers.html") return;
   const list = document.querySelector(".fi-sidebar-group-items");
@@ -234,6 +286,32 @@ function ensureMiscSidebarLink() {
     node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "settings",
   );
   if (settingsItem?.parentNode) {
+    settingsItem.parentNode.insertBefore(item, settingsItem);
+  } else {
+    list.append(item);
+  }
+}
+
+function ensureCloudBackupSidebarLink() {
+  if (PAGE === "servers.html") return;
+  const list = document.querySelector(".fi-sidebar-group-items");
+  if (!list) return;
+  const existing = [...list.querySelectorAll(".fi-sidebar-item-label")].find(
+    (node) => node.textContent?.trim().toLowerCase() === "cloud backup",
+  );
+  if (existing) return;
+  const item = document.createElement("li");
+  item.className = `fi-sidebar-item fi-sidebar-item-has-url${PAGE === "cloud-backup.html" ? " fi-active" : ""}`;
+  item.innerHTML = `<a href="${escapeHtml(buildLocalPageHref("cloud-backup.html"))}" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Cloud Backup</span></a>`;
+  const miscItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "misc",
+  );
+  const settingsItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "settings",
+  );
+  if (miscItem?.parentNode) {
+    miscItem.parentNode.insertBefore(item, miscItem);
+  } else if (settingsItem?.parentNode) {
     settingsItem.parentNode.insertBefore(item, settingsItem);
   } else {
     list.append(item);
@@ -510,6 +588,7 @@ function normalizeSavedServerRoute(rawHref, serverIdFallback = activeServerId())
     : section === "console" ? "console.html"
     : section === "files" ? "files.html"
     : section === "backups" ? "backups.html"
+    : section === "cloud" || section === "cloud-backup" || section === "cloudbackup" ? "cloud-backup.html"
     : section === "misc" ? "misc.html"
     : section === "settings" ? "settings.html"
     : section === "players" ? "players.html"
@@ -594,6 +673,8 @@ function updateChrome(state) {
   });
   updateLocalLinks();
   ensureServersSidebarLink();
+  ensureBackupsSidebarLink();
+  ensureCloudBackupSidebarLink();
   ensureMiscSidebarLink();
   stripReleaseBranding();
   stripUnusedTopbarChrome();
@@ -746,6 +827,14 @@ async function syncDesktopIntegration() {
   }
 }
 
+async function openDesktopQuickConsoleWindow(serverId = activeServerId()) {
+  if (isDesktopApp() && window.desktop?.openQuickConsole) {
+    await window.desktop.openQuickConsole(serverId);
+    return;
+  }
+  navigateToPage("console.html");
+}
+
 function normalizeShortcutKey(value) {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (!normalized) return "";
@@ -797,20 +886,20 @@ function injectQuickConsoleStyles() {
   style.id = "releu-quick-console-style";
   style.textContent = `
     #releu-quick-console{position:fixed;right:1rem;bottom:1rem;z-index:10020}
-    #releu-quick-console .rqc-shell{width:min(720px,calc(100vw - 2rem));border:1px solid #2b3642;border-radius:14px;overflow:hidden;background:#0f141b;box-shadow:0 24px 60px rgba(0,0,0,.45)}
-    #releu-quick-console .rqc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;padding:1rem 1rem .8rem;border-bottom:1px solid #2b3642;background:#141922}
+    #releu-quick-console .rqc-shell{width:min(720px,calc(100vw - 2rem));border:1px solid #2b3642;border-radius:14px;overflow:hidden;background:rgb(var(--gray-900,17 24 32));box-shadow:0 24px 60px rgba(0,0,0,.45)}
+    #releu-quick-console .rqc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;padding:1rem 1rem .8rem;border-bottom:1px solid #2b3642;background:rgb(var(--gray-900,17 24 32))}
     #releu-quick-console .rqc-kicker{font-size:.66rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#94a3b8}
     #releu-quick-console .rqc-title{margin-top:.2rem;font-size:1.05rem;font-weight:700;color:#f8fafc}
     #releu-quick-console .rqc-copy{margin-top:.25rem;font-size:.76rem;line-height:1.45;color:#94a3b8}
     #releu-quick-console .rqc-actions{display:flex;gap:.5rem;flex-wrap:wrap}
-    #releu-quick-console .rqc-btn{border:1px solid #2b3642;border-radius:10px;background:#0f141b;padding:.55rem .8rem;font-size:.72rem;font-weight:700;color:#e2e8f0}
+    #releu-quick-console .rqc-btn{border:1px solid #2b3642;border-radius:10px;background:rgb(var(--gray-950,15 20 27));padding:.55rem .8rem;font-size:.72rem;font-weight:700;color:#e2e8f0}
     #releu-quick-console .rqc-btn:hover{border-color:#475569}
     #releu-quick-console .rqc-btn[disabled]{opacity:.6;cursor:not-allowed}
     #releu-quick-console .rqc-body{padding:1rem;display:grid;gap:.75rem}
-    #releu-quick-console .rqc-status{border:1px solid #2b3642;border-radius:10px;background:#141922;padding:.7rem .8rem;font-size:.75rem;color:#94a3b8}
-    #releu-quick-console .rqc-log{max-height:260px;overflow:auto;border:1px solid #2b3642;border-radius:10px;background:rgba(19,26,32,.92);padding:.85rem 1rem;white-space:pre-wrap;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:#e2e8f0}
+    #releu-quick-console .rqc-status{border:1px solid #2b3642;border-radius:10px;background:rgb(var(--gray-950,15 20 27));padding:.7rem .8rem;font-size:.75rem;color:#94a3b8}
+    #releu-quick-console .rqc-log{max-height:260px;overflow:auto;border:1px solid #2b3642;border-radius:10px;background:rgb(var(--gray-950,15 20 27));padding:.85rem 1rem;white-space:pre-wrap;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:#e2e8f0}
     #releu-quick-console .rqc-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.65rem}
-    #releu-quick-console .rqc-input{width:100%;border:1px solid #2b3642;border-radius:10px;background:#0f141b;padding:.75rem .9rem;font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;color:#f8fafc;outline:none}
+    #releu-quick-console .rqc-input{width:100%;border:1px solid #2b3642;border-radius:10px;background:rgb(var(--gray-950,15 20 27));padding:.75rem .9rem;font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;color:#f8fafc;outline:none}
     #releu-quick-console .rqc-input:focus{border-color:#64748b}
     #releu-quick-console .rqc-hint{font-size:.72rem;color:#64748b}
     @media (max-width:680px){#releu-quick-console{left:.75rem;right:.75rem;bottom:.75rem}#releu-quick-console .rqc-row{grid-template-columns:1fr}}
@@ -924,8 +1013,11 @@ function ensureQuickConsoleBinding() {
       return;
     }
     event.preventDefault();
-    APP_STATE.quickConsole.open = !APP_STATE.quickConsole.open;
-    renderQuickConsoleOverlay();
+    try {
+      await openDesktopQuickConsoleWindow(activeServerId());
+    } catch (error) {
+      showError(error);
+    }
   });
 }
 
@@ -966,7 +1058,6 @@ async function refreshState(serverId = getRequestedServerId()) {
   }
   updateChrome(payload.state);
   await syncDesktopIntegration();
-  renderQuickConsoleOverlay();
   return payload.state;
 }
 
@@ -975,7 +1066,6 @@ async function refreshLogs() {
   const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
   const payload = await api(`/api/logs${query}`);
   APP_STATE.logs = payload.entries ?? [];
-  renderQuickConsoleOverlay();
   return APP_STATE.logs;
 }
 
@@ -1012,12 +1102,17 @@ function formatOperationLabel(server) {
 function setButtonBusy(button, busy, label = null) {
   if (!button) return;
   if (busy) {
+    button.dataset.releuOriginalHtml = button.innerHTML;
     button.dataset.releuOriginalText = button.textContent.trim();
     button.disabled = true;
     button.textContent = label ?? "Loading...";
   } else {
     button.disabled = false;
-    if (button.dataset.releuOriginalText) {
+    if (button.dataset.releuOriginalHtml) {
+      button.innerHTML = button.dataset.releuOriginalHtml;
+      delete button.dataset.releuOriginalHtml;
+      delete button.dataset.releuOriginalText;
+    } else if (button.dataset.releuOriginalText) {
       button.textContent = button.dataset.releuOriginalText;
       delete button.dataset.releuOriginalText;
     }
@@ -1223,6 +1318,7 @@ function patchServersPage() {
                   ["Players", "players.html"],
                   ["Files", "files.html"],
                   ["Backups", "backups.html"],
+                  ["Cloud Backup", "cloud-backup.html"],
                   ["Worlds", "worlds.html"],
                   ["Add-ons / Mods", "addons-mods.html"],
                   ["Software", "software.html"],
@@ -1403,6 +1499,7 @@ function patchServersPage() {
                       ["Players", "players.html"],
                       ["Files", "files.html"],
                       ["Backups", "backups.html"],
+                      ["Cloud Backup", "cloud-backup.html"],
                       ["Worlds", "worlds.html"],
                       ["Add-ons / Mods", "addons-mods.html"],
                       ["Software", "software.html"],
@@ -2690,8 +2787,8 @@ function renderInventoryModalContent(modal) {
         : "rvm-status-neutral";
   const playerInfo = inventory?.player ?? null;
   return `<style id="releu-player-inventory-modal-style">
-    #releu-player-inventory-modal .rvm-overlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;overflow:auto;background:rgba(2,6,23,.97)}
-    #releu-player-inventory-modal .rvm-shell{position:relative;isolation:isolate;width:min(1400px,100%);max-height:calc(100vh - 2rem);overflow:auto;border-radius:18px;border:1px solid rgba(255,255,255,.08);background:#111318;color:#e2e4e9;box-shadow:0 28px 90px rgba(0,0,0,.55)}
+    #releu-player-inventory-modal .rvm-overlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;overflow:auto;background:rgba(15,20,27,.96)}
+    #releu-player-inventory-modal .rvm-shell{position:relative;isolation:isolate;width:min(1400px,100%);max-height:calc(100vh - 2rem);overflow:auto;border-radius:18px;border:1px solid #2b3642;background:rgb(var(--gray-900,17 24 32));color:#e2e4e9;box-shadow:0 28px 90px rgba(0,0,0,.55)}
     #releu-player-inventory-modal .rvm-shell::-webkit-scrollbar{width:8px}
     #releu-player-inventory-modal .rvm-shell::-webkit-scrollbar-thumb{background:rgba(148,163,184,.28);border-radius:999px}
     #releu-player-inventory-modal .rvm-header{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;padding:1.25rem 1.5rem;border-bottom:1px solid rgba(255,255,255,.08)}
@@ -2700,29 +2797,29 @@ function renderInventoryModalContent(modal) {
     #releu-player-inventory-modal .rvm-title{margin-top:.25rem;font-size:clamp(1.05rem,3.4vw,1.45rem);font-weight:700;line-height:1.08;color:#fff;overflow-wrap:anywhere}
     #releu-player-inventory-modal .rvm-header-copy{margin-top:.35rem;max-width:100%;font-size:.84rem;line-height:1.45;color:#8f96a3;overflow-wrap:anywhere}
     #releu-player-inventory-modal .rvm-header-actions{display:flex;gap:.5rem;flex-wrap:wrap}
-    #releu-player-inventory-modal .rvm-btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:#20242d;padding:.5rem .8rem;font-size:.8rem;font-weight:600;color:#e2e4e9;transition:border-color .12s ease,background .12s ease,color .12s ease}
-    #releu-player-inventory-modal .rvm-btn:hover:not([disabled]){border-color:rgba(255,255,255,.22);background:#252931;color:#fff}
+    #releu-player-inventory-modal .rvm-btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border-radius:8px;border:1px solid #2b3642;background:rgb(var(--gray-950,15 20 27));padding:.5rem .8rem;font-size:.8rem;font-weight:600;color:#e2e4e9;transition:border-color .12s ease,background .12s ease,color .12s ease}
+    #releu-player-inventory-modal .rvm-btn:hover:not([disabled]){border-color:#475569;background:#1a2330;color:#fff}
     #releu-player-inventory-modal .rvm-btn[disabled]{cursor:default;opacity:.55}
     #releu-player-inventory-modal .rvm-btn-danger{background:rgba(240,106,106,.12);border-color:rgba(240,106,106,.24);color:#f4b1b1}
     #releu-player-inventory-modal .rvm-btn-danger:hover:not([disabled]){background:rgba(240,106,106,.2);border-color:rgba(240,106,106,.4);color:#fff}
-    #releu-player-inventory-modal .rvm-btn-accent{background:rgba(148,163,184,.12);border-color:rgba(148,163,184,.28);color:#e5e7eb}
+    #releu-player-inventory-modal .rvm-btn-accent{background:rgb(var(--gray-950,15 20 27));border-color:#2b3642;color:#e5e7eb}
     #releu-player-inventory-modal .rvm-grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:1rem;padding:1.25rem 1.5rem}
     #releu-player-inventory-modal .rvm-main{display:flex;flex-direction:column;gap:.875rem}
-    #releu-player-inventory-modal .rvm-playerbar{display:flex;align-items:center;gap:.9rem;min-width:0;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:#1a1d24;padding:.9rem 1rem}
-    #releu-player-inventory-modal .rvm-avatar{width:42px;height:42px;border-radius:8px;background:#20242d;border:1px solid rgba(255,255,255,.08);overflow:hidden;flex-shrink:0}
+    #releu-player-inventory-modal .rvm-playerbar{display:flex;align-items:center;gap:.9rem;min-width:0;border:1px solid #2b3642;border-radius:14px;background:rgb(var(--gray-950,15 20 27));padding:.9rem 1rem}
+    #releu-player-inventory-modal .rvm-avatar{width:42px;height:42px;border-radius:8px;background:rgb(var(--gray-950,15 20 27));border:1px solid #2b3642;overflow:hidden;flex-shrink:0}
     #releu-player-inventory-modal .rvm-avatar img{width:100%;height:100%;display:block;image-rendering:pixelated}
     #releu-player-inventory-modal .rvm-player-meta{min-width:0;flex:1}
     #releu-player-inventory-modal .rvm-player-name{font-size:.98rem;font-weight:700;line-height:1.15;color:#fff;overflow-wrap:anywhere}
     #releu-player-inventory-modal .rvm-player-uuid{margin-top:.15rem;max-width:100%;font-size:.7rem;color:#7a7f8e;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.4;overflow-wrap:anywhere;word-break:break-word}
     #releu-player-inventory-modal .rvm-tags{display:flex;gap:.4rem;min-width:0;flex-wrap:wrap}
-    #releu-player-inventory-modal .rvm-tag{display:inline-flex;align-items:center;gap:.35rem;padding:.24rem .5rem;border-radius:999px;border:1px solid rgba(255,255,255,.08);background:#20242d;font-size:.62rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#d4d8de}
+    #releu-player-inventory-modal .rvm-tag{display:inline-flex;align-items:center;gap:.35rem;padding:.24rem .5rem;border-radius:999px;border:1px solid #2b3642;background:rgb(var(--gray-950,15 20 27));font-size:.62rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#d4d8de}
     #releu-player-inventory-modal .rvm-tag-dot{width:6px;height:6px;border-radius:999px;background:currentColor}
     #releu-player-inventory-modal .rvm-tag-online{color:#4ade80;border-color:rgba(74,222,128,.22);background:rgba(74,222,128,.1)}
     #releu-player-inventory-modal .rvm-tag-neutral{color:#cbd5e1}
     #releu-player-inventory-modal .rvm-stat{min-width:88px;text-align:right;flex-shrink:0}
     #releu-player-inventory-modal .rvm-stat-label{font-size:.63rem;letter-spacing:.08em;text-transform:uppercase;color:#7a7f8e}
     #releu-player-inventory-modal .rvm-stat-value{margin-top:.15rem;font-size:.9rem;font-weight:700;color:#fff}
-    #releu-player-inventory-modal .rvm-board{border:1px solid rgba(255,255,255,.08);border-radius:14px;background:#1a1d24;padding:1rem}
+    #releu-player-inventory-modal .rvm-board{border:1px solid #2b3642;border-radius:14px;background:rgb(var(--gray-900,17 24 32));padding:1rem}
     #releu-player-inventory-modal .rvm-board-meta{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.9rem;font-size:.76rem;color:#8f96a3}
     #releu-player-inventory-modal .rvm-board-meta strong{color:#fff}
     #releu-player-inventory-modal .rvm-shell-grid{display:grid;grid-template-columns:84px minmax(0,1fr) 84px;gap:.8rem;align-items:start}
@@ -2731,10 +2828,10 @@ function renderInventoryModalContent(modal) {
     #releu-player-inventory-modal .rvm-slot-stack{display:flex;flex-direction:column;gap:.55rem}
     #releu-player-inventory-modal .rvm-slot-grid{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:.35rem}
     #releu-player-inventory-modal .rvm-divider{height:1px;background:rgba(255,255,255,.08);margin:.15rem 0}
-    #releu-player-inventory-modal .rvm-slot{display:flex;flex-direction:column;gap:.28rem;min-height:72px;padding:.38rem;border-radius:10px;border:1px solid #2b3642;background:#0f141b;transition:border-color .12s ease,background .12s ease}
+    #releu-player-inventory-modal .rvm-slot{display:flex;flex-direction:column;gap:.28rem;min-height:72px;padding:.38rem;border-radius:10px;border:1px solid #2b3642;background:rgb(var(--gray-950,15 20 27));transition:border-color .12s ease,background .12s ease}
     #releu-player-inventory-modal .rvm-slot-armor,#releu-player-inventory-modal .rvm-slot-offhand{min-height:78px}
     #releu-player-inventory-modal .rvm-slot.has-item:hover{border-color:rgba(255,255,255,.2)}
-    #releu-player-inventory-modal .rvm-slot.is-selected{border-color:#64748b;background:#1f2937;box-shadow:0 0 0 1px rgba(148,163,184,.14)}
+    #releu-player-inventory-modal .rvm-slot.is-selected{border-color:#64748b;background:#1a2330;box-shadow:0 0 0 1px rgba(148,163,184,.14)}
     #releu-player-inventory-modal .rvm-slot-top{display:flex;align-items:flex-start;justify-content:space-between;gap:.3rem}
     #releu-player-inventory-modal .rvm-slot-tag{font-size:.56rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#667085}
     #releu-player-inventory-modal .rvm-slot-clear{border:1px solid rgba(240,106,106,.28);background:rgba(240,106,106,.1);border-radius:4px;padding:.08rem .3rem;font-size:.52rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#f4b1b1}
@@ -2742,35 +2839,35 @@ function renderInventoryModalContent(modal) {
     #releu-player-inventory-modal .rvm-slot-center{position:relative;display:flex;align-items:center;justify-content:center;min-height:32px}
     #releu-player-inventory-modal .rvm-slot-icon{position:relative;display:grid;place-items:center;width:30px;height:30px}
     #releu-player-inventory-modal .rvm-slot-icon-empty{opacity:.4}
-    #releu-player-inventory-modal .rvm-slot-icon-fallback{display:grid;place-items:center;width:100%;height:100%;border-radius:6px;background:#20242d;color:#9aa3b2;font-size:.62rem;font-weight:700;letter-spacing:.06em}
+    #releu-player-inventory-modal .rvm-slot-icon-fallback{display:grid;place-items:center;width:100%;height:100%;border-radius:6px;background:rgb(var(--gray-950,15 20 27));color:#9aa3b2;font-size:.62rem;font-weight:700;letter-spacing:.06em}
     #releu-player-inventory-modal .rvm-slot-icon-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;image-rendering:pixelated}
     #releu-player-inventory-modal .rvm-slot-count{position:absolute;right:-2px;bottom:-2px;color:#facc15;font-size:.62rem;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,.85)}
     #releu-player-inventory-modal .rvm-slot-name{font-size:.63rem;font-weight:700;color:#fff;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
     #releu-player-inventory-modal .rvm-slot-name.is-empty{color:#667085;font-weight:500;font-style:italic}
     #releu-player-inventory-modal .rvm-slot-meta{font-size:.55rem;color:#7a7f8e;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
     #releu-player-inventory-modal .rvm-side{display:flex;flex-direction:column;gap:.875rem}
-    #releu-player-inventory-modal .rvm-card{border:1px solid rgba(255,255,255,.08);border-radius:14px;background:#1a1d24;padding:.95rem 1rem}
+    #releu-player-inventory-modal .rvm-card{border:1px solid #2b3642;border-radius:14px;background:rgb(var(--gray-900,17 24 32));padding:.95rem 1rem}
     #releu-player-inventory-modal .rvm-card-title{font-size:.62rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#7a7f8e}
     #releu-player-inventory-modal .rvm-status{margin-top:.75rem;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:.7rem .8rem;font-size:.8rem;line-height:1.5}
-    #releu-player-inventory-modal .rvm-status-neutral{background:#151a21;color:#cbd5e1}
+    #releu-player-inventory-modal .rvm-status-neutral{background:rgb(var(--gray-950,15 20 27));color:#cbd5e1}
     #releu-player-inventory-modal .rvm-status-success{background:#16261f;border-color:rgba(62,207,142,.22);color:#d1fae5}
     #releu-player-inventory-modal .rvm-status-error{background:#2a1719;border-color:rgba(240,106,106,.22);color:#ffe4e6}
     #releu-player-inventory-modal .rvm-action-row{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.75rem}
     #releu-player-inventory-modal .rvm-field-label{display:block;margin-bottom:.32rem;font-size:.6rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#7a7f8e}
-    #releu-player-inventory-modal .rvm-input{width:100%;border:1px solid #2b3642;border-radius:8px;background:#20242d;padding:.55rem .75rem;font-size:.82rem;color:#f8fafc;outline:none}
+    #releu-player-inventory-modal .rvm-input{width:100%;border:1px solid #2b3642;border-radius:8px;background:rgb(var(--gray-950,15 20 27));padding:.55rem .75rem;font-size:.82rem;color:#f8fafc;outline:none}
     #releu-player-inventory-modal .rvm-input::placeholder{color:#667085}
     #releu-player-inventory-modal .rvm-input:focus{border-color:#64748b}
     #releu-player-inventory-modal .rvm-search-row{display:flex;gap:.5rem;margin-top:.75rem}
     #releu-player-inventory-modal .rvm-search-row .rvm-input{flex:1}
     #releu-player-inventory-modal .rvm-add-row{display:grid;grid-template-columns:1fr auto;gap:.5rem;align-items:end;margin-top:.75rem}
-    #releu-player-inventory-modal .rvm-selected{display:flex;align-items:center;gap:.55rem;margin-top:.75rem;padding:.65rem .75rem;border:1px solid rgba(148,163,184,.2);border-radius:10px;background:#1d2430;color:#e5e7eb;font-size:.76rem}
+    #releu-player-inventory-modal .rvm-selected{display:flex;align-items:center;gap:.55rem;margin-top:.75rem;padding:.65rem .75rem;border:1px solid rgba(148,163,184,.2);border-radius:10px;background:rgb(var(--gray-950,15 20 27));color:#e5e7eb;font-size:.76rem}
     #releu-player-inventory-modal .rvm-selected-dot{width:6px;height:6px;border-radius:999px;background:#94a3b8;flex-shrink:0}
     #releu-player-inventory-modal .rvm-catalog{display:flex;flex-direction:column;gap:.35rem;max-height:420px;overflow:auto;margin-top:.75rem;padding-right:.1rem}
     #releu-player-inventory-modal .rvm-catalog::-webkit-scrollbar{width:6px}
     #releu-player-inventory-modal .rvm-catalog::-webkit-scrollbar-thumb{background:rgba(148,163,184,.24);border-radius:999px}
-    #releu-player-inventory-modal .rvm-catalog-item{display:flex;align-items:center;gap:.75rem;width:100%;padding:.65rem .75rem;border-radius:10px;border:1px solid rgba(255,255,255,.08);background:#20242d;text-align:left;transition:border-color .12s ease,background .12s ease}
-    #releu-player-inventory-modal .rvm-catalog-item:hover{border-color:rgba(255,255,255,.18);background:#252931}
-    #releu-player-inventory-modal .rvm-catalog-item.is-selected{border-color:#64748b;background:rgba(148,163,184,.12)}
+    #releu-player-inventory-modal .rvm-catalog-item{display:flex;align-items:center;gap:.75rem;width:100%;padding:.65rem .75rem;border-radius:10px;border:1px solid #2b3642;background:rgb(var(--gray-950,15 20 27));text-align:left;transition:border-color .12s ease,background .12s ease}
+    #releu-player-inventory-modal .rvm-catalog-item:hover{border-color:#475569;background:#1a2330}
+    #releu-player-inventory-modal .rvm-catalog-item.is-selected{border-color:#64748b;background:#1a2330}
     #releu-player-inventory-modal .rvm-catalog-copy{min-width:0;flex:1}
     #releu-player-inventory-modal .rvm-catalog-name{font-size:.8rem;font-weight:700;color:#fff;line-height:1.25}
     #releu-player-inventory-modal .rvm-catalog-meta{margin-top:.15rem;font-size:.67rem;color:#7a7f8e;line-height:1.35}
@@ -2895,29 +2992,53 @@ function renderPlayerRow(player) {
     player.banned ? `<span class="ppl-flag ppl-flag-banned">Banned</span>` : "",
   ].filter(Boolean).join("");
   const toggleBan = player.banned ? ["pardon", "Pardon"] : ["ban", "Ban"];
-  return `<tr data-player-name="${escapeHtml(player.name)}"><td><span class="ppl-dot"><svg viewBox="0 0 8 8" fill="${player.online ? "rgb(34,197,94)" : "rgb(100,116,139)"}" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg></span></td><td><div class="ppl-player-cell"><div class="ppl-avatar"><img src="${playerAvatar(player)}" alt="${escapeHtml(player.name)}" width="32" height="32" style="border-radius:6px"></div><div><div class="ppl-player-name">${escapeHtml(player.name)}</div><div class="ppl-player-uuid">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td><div class="ppl-flags">${flags || `<span class="ppl-flag">Seen</span>`}</div></td><td><span class="ppl-lastseen">${escapeHtml(formatDate(player.lastSeenAt))}</span></td><td><div class="ppl-actions"><input type="text" class="ppl-action-input" placeholder="Reason"><select class="ppl-select">${["survival", "creative", "adventure", "spectator"].map((mode) => `<option value="${mode}" ${player.gamemode === mode ? "selected" : ""}>${mode}</option>`).join("")}</select><button class="ppl-action-btn" type="button" data-player-inventory>Inventory</button><button class="ppl-action-btn" type="button" data-player-action="gamemode">Gamemode</button><button class="ppl-action-btn" type="button" data-player-action="kick">Kick</button><button class="ppl-action-btn danger" type="button" data-player-action="${toggleBan[0]}">${toggleBan[1]}</button><button class="ppl-action-btn" type="button" data-player-action="${player.whitelisted ? "whitelist-remove" : "whitelist-add"}">${player.whitelisted ? "Unwhitelist" : "Whitelist"}</button><button class="ppl-action-btn" type="button" data-player-action="${player.op ? "deop" : "op"}">${player.op ? "Deop" : "OP"}</button></div></td></tr>`;
+  return `<tr data-player-name="${escapeHtml(player.name)}"><td><span class="ppl-dot"><svg viewBox="0 0 8 8" fill="${player.online ? "rgb(34,197,94)" : "rgb(100,116,139)"}" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg></span></td><td><div class="ppl-player-cell"><div class="ppl-avatar"><img src="${playerAvatar(player)}" alt="${escapeHtml(player.name)}" width="32" height="32" style="border-radius:6px"></div><div><div class="ppl-player-name">${escapeHtml(player.name)}</div><div class="ppl-player-uuid">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td><div class="ppl-flags">${flags || `<span class="ppl-flag">Seen</span>`}</div></td><td><span class="ppl-lastseen">${escapeHtml(formatDate(player.lastSeenAt))}</span></td><td><div class="ppl-actions"><input type="text" class="ppl-action-input" placeholder="Reason shown to player"><select class="ppl-select">${["survival", "creative", "adventure", "spectator"].map((mode) => `<option value="${mode}" ${player.gamemode === mode ? "selected" : ""}>${mode}</option>`).join("")}</select><button class="ppl-action-btn" type="button" data-player-inventory>Inventory</button><button class="ppl-action-btn" type="button" data-player-action="gamemode">Gamemode</button><button class="ppl-action-btn" type="button" data-player-action="kick">Kick</button><button class="ppl-action-btn danger" type="button" data-player-action="${toggleBan[0]}">${toggleBan[1]}</button><button class="ppl-action-btn" type="button" data-player-action="${player.whitelisted ? "whitelist-remove" : "whitelist-add"}">${player.whitelisted ? "Unwhitelist" : "Whitelist"}</button><button class="ppl-action-btn" type="button" data-player-action="${player.op ? "deop" : "op"}">${player.op ? "Deop" : "OP"}</button></div></td></tr>`;
 }
 
 function patchPlayersPage() {
   const server = activeServer();
   if (!server) return;
+  const serverId = activeServerId();
+  if (APP_STATE.playersPage.serverId !== serverId) {
+    APP_STATE.playersPage.serverId = serverId;
+    APP_STATE.playersPage.search = "";
+  }
   const tbody = document.querySelector(".ppl-tbody");
-  if (tbody) tbody.innerHTML = (server.players ?? []).map(renderPlayerRow).join("") || `<tr><td colspan="5" class="p-4 text-sm text-slate-400">No players tracked yet.</td></tr>`;
-  const addInputs = [...document.querySelectorAll(".ppl-toolbar .ppl-input")];
-  const addButton = [...document.querySelectorAll(".ppl-toolbar .fi-btn")].find((button) => /add player/i.test(button.textContent));
-  addButton?.addEventListener("click", async () => {
-    try {
-      setButtonBusy(addButton, true, "Adding...");
-      await api(`/api/servers/${encodeURIComponent(activeServerId())}/players/register`, { method: "POST", body: { name: addInputs[0]?.value ?? "", uuid: addInputs[1]?.value ?? "" } });
-      addInputs.forEach((input) => { input.value = ""; });
-      await refreshState(activeServerId());
-      patchPlayersPage();
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(addButton, false);
+  const searchInput = document.querySelector("[data-player-search-input]");
+  const renderRows = () => {
+    if (!tbody) return;
+    const normalizedQuery = String(APP_STATE.playersPage.search ?? "").trim().toLowerCase();
+    const filteredPlayers = (server.players ?? []).filter((player) => {
+      if (!normalizedQuery) return true;
+      const name = String(player?.name ?? "").toLowerCase();
+      const uuid = String(player?.uuid ?? "").toLowerCase();
+      return name.includes(normalizedQuery) || uuid.includes(normalizedQuery);
+    });
+    tbody.innerHTML = filteredPlayers.length
+      ? filteredPlayers.map(renderPlayerRow).join("")
+      : `<tr><td colspan="5" class="p-4 text-sm text-slate-400">${normalizedQuery ? "No players matched that search." : "No players tracked yet."}</td></tr>`;
+  };
+
+  if (searchInput) {
+    if (searchInput.value !== APP_STATE.playersPage.search) {
+      searchInput.value = APP_STATE.playersPage.search;
     }
-  });
+    if (!searchInput.dataset.releuBound) {
+      searchInput.dataset.releuBound = "true";
+      searchInput.addEventListener("input", () => {
+        APP_STATE.playersPage.search = searchInput.value;
+        renderRows();
+        patchPlayersPage();
+      });
+      searchInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+        }
+      });
+    }
+  }
+
+  renderRows();
   tbody?.querySelectorAll("[data-player-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       const row = button.closest("tr");
@@ -3015,8 +3136,7 @@ function patchWorldsPage() {
         <div class="pw-card-body">
           <div class="pw-hint">Choose a world archive and import it as a server world.</div>
           <input type="file" accept=".zip,.mcworld" data-world-archive-file style="width:100%;font-size:.78rem;color:#cbd5e1;">
-          <input type="text" class="pw-input" placeholder="survival-archive" data-world-archive-name>
-          <div class="pw-desc">If you leave the world name blank, Releu uses the archive name automatically.</div>
+          <div class="pw-desc">Releu uses the selected archive name automatically. Just choose a `.zip` or `.mcworld` file and upload it.</div>
           <button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-upload>Upload World Archive</button>
         </div>
       </div>
@@ -3045,7 +3165,6 @@ function patchWorldsPage() {
   const worldSelect = section.querySelector("#releu-world-select");
   const worldSeedInput = section.querySelector("#releu-world-seed");
   const archiveFileInput = section.querySelector("[data-world-archive-file]");
-  const archiveNameInput = section.querySelector("[data-world-archive-name]");
   const folderPathInput = section.querySelector("[data-world-folder-path]");
   const folderNameInput = section.querySelector("[data-world-folder-name]");
   const useActiveButton = section.querySelector("[data-world-use-active]");
@@ -3106,13 +3225,8 @@ function patchWorldsPage() {
     }
     try {
       setButtonBusy(uploadButton, true, "Uploading...");
-      const params = new URLSearchParams();
-      const worldName = String(archiveNameInput?.value ?? "").trim();
-      if (worldName) {
-        params.set("worldName", worldName);
-      }
       await apiBinary(
-        `/api/servers/${encodeURIComponent(activeServerId())}/worlds/upload-archive?${params.toString()}`,
+        `/api/servers/${encodeURIComponent(activeServerId())}/worlds/upload-archive`,
         await file.arrayBuffer(),
         {
           "Content-Type": "application/octet-stream",
@@ -3124,7 +3238,6 @@ function patchWorldsPage() {
         },
       );
       if (archiveFileInput) archiveFileInput.value = "";
-      if (archiveNameInput) archiveNameInput.value = "";
       await refreshState(activeServerId());
       await refreshLogs();
       showStatus(`Imported world archive "${file.name}".`, "success");
@@ -4327,33 +4440,802 @@ async function patchAddonsPage() {
   }), clearRp.dataset.releuBound = "true";
 }
 
+function injectBackupsPageStyles() {
+  if (document.getElementById("releu-backups-style")) return;
+  const style = document.createElement("style");
+  style.id = "releu-backups-style";
+  style.textContent = `
+    .releu-backups-shell {
+      display: grid;
+      gap: 1.25rem;
+    }
+    .releu-backups-grid {
+      display: grid;
+      gap: 1.25rem;
+      grid-template-columns: minmax(20rem, 26rem) minmax(0, 1fr);
+      align-items: start;
+    }
+    @media (max-width: 1100px) {
+      .releu-backups-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .releu-backups-shell .fi-section {
+      border: 1px solid oklch(0.274 0.006 286.033 / 60%);
+      border-radius: 1rem;
+      background: oklch(0.21 0.006 285.885);
+      overflow: hidden;
+    }
+    .releu-backups-shell .fi-section-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid oklch(0.274 0.006 286.033 / 60%);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+    .releu-backups-shell .fi-section-heading {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: oklch(0.985 0 0);
+      line-height: 1.3;
+    }
+    .releu-backups-shell .fi-section-description {
+      font-size: 0.8rem;
+      color: oklch(0.705 0.015 286.067);
+      margin-top: 0.2rem;
+      line-height: 1.55;
+    }
+    .releu-backups-shell .fi-section-body {
+      padding: 1.25rem;
+      display: grid;
+      gap: 1rem;
+    }
+    .releu-backups-shell .fi-field {
+      display: grid;
+      gap: 0.4rem;
+    }
+    .releu-backups-shell .fi-label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: oklch(0.985 0 0);
+    }
+    .releu-backups-shell .fi-input {
+      width: 100%;
+      background: oklch(0.21 0.006 285.885);
+      border: 1px solid oklch(0.274 0.006 286.033 / 60%);
+      border-radius: 0.5rem;
+      color: oklch(0.985 0 0);
+      padding: 0.55rem 0.75rem;
+      font: inherit;
+      font-size: 0.875rem;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .releu-backups-shell .fi-input:focus {
+      border-color: oklch(0.546 0.245 262.881);
+      box-shadow: 0 0 0 2px oklch(0.546 0.245 262.881 / 25%);
+    }
+    .releu-backups-shell .fi-checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      background: oklch(0.21 0.006 285.885);
+      border: 1px solid oklch(0.274 0.006 286.033 / 60%);
+      border-radius: 0.5rem;
+      padding: 0.7rem 0.85rem;
+      font-size: 0.875rem;
+      color: oklch(0.92 0.004 286.32);
+      cursor: default;
+    }
+    .releu-backups-shell .fi-checkbox-row input {
+      width: 1rem;
+      height: 1rem;
+      accent-color: oklch(0.546 0.245 262.881);
+      flex-shrink: 0;
+    }
+    .releu-backups-shell .fi-stats {
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .releu-backups-shell .fi-stat {
+      background: oklch(0.21 0.006 285.885);
+      border: 1px solid oklch(0.274 0.006 286.033 / 60%);
+      border-radius: 0.5rem;
+      padding: 0.85rem 0.9rem;
+    }
+    .releu-backups-shell .fi-stat-label,
+    .releu-backups-shell .fi-progress-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: oklch(0.705 0.015 286.067);
+    }
+    .releu-backups-shell .fi-stat-value {
+      margin-top: 0.2rem;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: oklch(0.985 0 0);
+    }
+    .releu-backups-shell .fi-progress {
+      display: grid;
+      gap: 0.45rem;
+    }
+    .releu-backups-shell .fi-progress-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .releu-backups-shell .fi-progress-val {
+      font-size: 0.8rem;
+      color: oklch(0.871 0.006 286.286);
+    }
+    .releu-backups-shell .fi-progress-track {
+      width: 100%;
+      height: 0.45rem;
+      border-radius: 999px;
+      overflow: hidden;
+      background: oklch(0.274 0.006 286.033);
+    }
+    .releu-backups-shell .fi-progress-fill {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, oklch(0.769 0.188 70.08), oklch(0.828 0.189 84.429));
+      width: var(--releu-backups-usage, 0%);
+    }
+    .releu-backups-shell .fi-callout {
+      background: oklch(0.769 0.188 70.08 / 8%);
+      border: 1px solid oklch(0.769 0.188 70.08 / 25%);
+      border-radius: 0.5rem;
+      padding: 0.8rem 0.9rem;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      color: oklch(0.879 0.169 91.605);
+      display: flex;
+      gap: 0.65rem;
+    }
+    .releu-backups-shell .fi-callout svg {
+      flex-shrink: 0;
+      margin-top: 0.1rem;
+      width: 1rem;
+      height: 1rem;
+    }
+    .releu-backups-shell .fi-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+    }
+    .releu-backups-shell .fi-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      border-radius: 0.5rem;
+      padding: 0.5rem 0.875rem;
+      font: inherit;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .releu-backups-shell .fi-btn svg {
+      width: 0.9rem;
+      height: 0.9rem;
+    }
+    .releu-backups-shell .fi-btn-primary {
+      background: oklch(0.546 0.245 262.881);
+      color: #fff;
+      border-color: oklch(0.546 0.245 262.881);
+    }
+    .releu-backups-shell .fi-btn-secondary {
+      background: transparent;
+      color: oklch(0.92 0.004 286.32);
+      border-color: oklch(0.274 0.006 286.033 / 60%);
+    }
+    .releu-backups-shell .fi-btn-secondary:hover {
+      background: oklch(0.274 0.006 286.033 / 35%);
+    }
+    .releu-backups-shell .fi-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      border-radius: 999px;
+      padding: 0.2rem 0.6rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      background: oklch(0.274 0.006 286.033 / 45%);
+      border: 1px solid oklch(0.274 0.006 286.033 / 60%);
+      color: oklch(0.705 0.015 286.067);
+    }
+    .releu-backups-shell .fi-badge svg {
+      width: 0.7rem;
+      height: 0.7rem;
+    }
+    .releu-backups-shell .fi-table-wrap {
+      overflow: auto;
+      border-top: 1px solid oklch(0.274 0.006 286.033 / 60%);
+      max-height: 72vh;
+    }
+    .releu-backups-shell .fi-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    .releu-backups-shell .fi-table thead tr {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .releu-backups-shell .fi-table th {
+      padding: 0.65rem 1rem;
+      background: oklch(0.21 0.006 285.885);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: oklch(0.705 0.015 286.067);
+      white-space: nowrap;
+    }
+    .releu-backups-shell .fi-table td {
+      padding: 0.75rem 1rem;
+      text-align: left;
+      vertical-align: middle;
+      border-bottom: 1px solid oklch(0.274 0.006 286.033 / 40%);
+      color: oklch(0.871 0.006 286.286);
+    }
+    .releu-backups-shell .fi-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+    .releu-backups-shell .fi-table tbody tr:hover td {
+      background: oklch(0.21 0.006 285.885 / 60%);
+    }
+    .releu-backups-shell .fi-backup-name {
+      font-family: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: oklch(0.985 0 0);
+      word-break: break-all;
+      line-height: 1.4;
+    }
+    .releu-backups-shell .fi-backup-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      margin-top: 0.3rem;
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: oklch(0.705 0.015 286.067);
+      font-family: Inter, system-ui, sans-serif;
+    }
+    .releu-backups-shell .fi-backup-tag.newest {
+      color: oklch(0.792 0.209 151.711);
+    }
+    .releu-backups-shell .fi-backup-tag svg {
+      width: 0.7rem;
+      height: 0.7rem;
+    }
+    .releu-backups-shell .fi-row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.4rem;
+    }
+    .releu-backups-shell .fi-size-cell {
+      color: oklch(0.705 0.015 286.067);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .releu-backups-shell .fi-date-cell {
+      color: oklch(0.705 0.015 286.067);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .releu-backups-shell .fi-empty {
+      padding: 1.35rem 1rem;
+      text-align: center;
+      color: oklch(0.705 0.015 286.067);
+      font-size: 0.92rem;
+    }
+  `;
+  document.head.append(style);
+}
+
 function patchBackupsPage() {
   const server = activeServer();
   if (!server) return;
-  const recent = server.backups?.recent ?? [];
-  const table = document.querySelector(".fi-ta-table");
-  const emptyState = document.querySelector(".fi-ta-empty-state");
-  if (table) {
-    const tbody = document.createElement("tbody");
-    tbody.innerHTML = recent.map((entry) => `<tr class="fi-ta-row"><td class="fi-ta-cell">${escapeHtml(entry.name)}</td><td class="fi-ta-cell">Folder</td><td class="fi-ta-cell">${escapeHtml(formatDate(entry.createdAt))}</td><td class="fi-ta-cell">Ready</td><td class="fi-ta-cell">Unlocked</td></tr>`).join("");
-    table.querySelector("tbody")?.remove();
-    table.append(tbody);
-  }
-  if (emptyState) emptyState.style.display = recent.length ? "none" : "";
-  const createButton = document.querySelector(".fi-ac-icon-btn-action");
-  if (createButton && !createButton.dataset.releuBound) createButton.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
+  injectBackupsPageStyles();
+  const mount = document.querySelector(".fi-page-content");
+  if (!mount) return;
+  const backups = Array.isArray(server.backups?.recent) ? server.backups.recent : [];
+  const totalBytes = Math.max(0, Number(server.backups?.totalBytes ?? 0) || 0);
+  const maxStorageGb = Math.max(1, Number(server.backups?.maxStorageGb ?? 10) || 10);
+  const maxStorageBytes = Math.max(
+    totalBytes,
+    Number(server.backups?.maxStorageBytes ?? Math.round(maxStorageGb * 1024 ** 3)) || Math.round(maxStorageGb * 1024 ** 3),
+  );
+  const usagePercent = maxStorageBytes > 0 ? Math.min(100, (totalBytes / maxStorageBytes) * 100) : 0;
+  const nextBackupAt = server.backups?.nextBackupAt ? formatDate(server.backups.nextBackupAt) : "Disabled";
+  const backupRows = backups.length
+    ? backups.map((entry, index) => `
+        <tr>
+          <td>
+            <div class="fi-backup-name">${escapeHtml(entry.name)}</div>
+            <div class="fi-backup-tag${index === 0 ? " newest" : ""}">
+              ${index === 0 ? `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              ` : ""}
+              ${escapeHtml(index === 0 ? "Newest backup" : "Local snapshot")}
+            </div>
+          </td>
+          <td class="fi-size-cell">${escapeHtml(formatBytes(entry.bytes ?? 0))}</td>
+          <td class="fi-date-cell">${escapeHtml(formatDate(entry.createdAt))}</td>
+          <td>
+            <div class="fi-row-actions">
+              <button type="button" class="fi-btn fi-btn-secondary fi-size-sm fi-ac-btn-action" data-releu-backup-revert="${escapeHtml(entry.name)}">Revert</button>
+              ${isDesktopApp() ? `<button type="button" class="fi-btn fi-btn-secondary fi-size-sm fi-ac-btn-action" data-releu-backup-open-path="${escapeHtml(entry.path)}">Open Folder</button>` : ""}
+            </div>
+          </td>
+        </tr>`)
+        .join("")
+    : `<tr><td colspan="4" class="fi-empty">No local backups have been created yet.</td></tr>`;
+
+  mount.innerHTML = `
+    <div class="releu-backups-shell">
+      <div class="releu-backups-grid">
+        <section class="fi-section">
+          <div class="fi-section-header">
+            <div>
+              <div class="fi-section-heading">Local Backup Settings</div>
+              <div class="fi-section-description">Set a total storage cap for local backups. Releu deletes the oldest backups first when the folder hits the limit.</div>
+            </div>
+          </div>
+          <div class="fi-section-body">
+            <form data-releu-backup-settings-form class="fi-section-body" style="padding:0;">
+              <div class="fi-field">
+                <label class="fi-label" for="releu-backups-enabled">Automatic Local Backups</label>
+                <label class="fi-checkbox-row" for="releu-backups-enabled">
+                  <input id="releu-backups-enabled" name="autoBackups" type="checkbox" ${server.backups?.enabled ? "checked" : ""}>
+                  <span>${server.backups?.enabled ? "Enabled" : "Disabled"} — Releu creates scheduled local backups for this server.</span>
+                </label>
+              </div>
+              <div class="fi-field">
+                <label class="fi-label" for="releu-backup-interval">Backup Interval (minutes)</label>
+                <input id="releu-backup-interval" name="backupIntervalMinutes" type="number" min="5" step="5" value="${escapeHtml(server.backups?.intervalMinutes ?? 60)}" class="fi-input">
+              </div>
+              <div class="fi-field">
+                <label class="fi-label" for="releu-backup-max-storage">Max Total Backup Storage (GB)</label>
+                <input id="releu-backup-max-storage" name="maxBackupStorageGb" type="number" min="1" step="1" value="${escapeHtml(maxStorageGb)}" class="fi-input">
+              </div>
+              <div class="fi-stats">
+                <div class="fi-stat">
+                  <div class="fi-stat-label">Current Usage</div>
+                  <div class="fi-stat-value">${escapeHtml(formatBytes(totalBytes))}</div>
+                </div>
+                <div class="fi-stat">
+                  <div class="fi-stat-label">Next Backup</div>
+                  <div class="fi-stat-value">${escapeHtml(nextBackupAt)}</div>
+                </div>
+              </div>
+              <div class="fi-progress">
+                <div class="fi-progress-head">
+                  <span class="fi-progress-label">Storage Usage</span>
+                  <span class="fi-progress-val">${escapeHtml(formatBytes(totalBytes))} / ${escapeHtml(`${maxStorageGb} GB`)}</span>
+                </div>
+                <div class="fi-progress-track">
+                  <div class="fi-progress-fill" style="--releu-backups-usage:${usagePercent}%;"></div>
+                </div>
+              </div>
+              <div class="fi-callout">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <span>When you revert to a backup, Releu first creates a safety backup of the current state. The server must stay stopped during a revert.</span>
+              </div>
+              <div class="fi-actions">
+                <button type="submit" class="fi-btn fi-btn-primary fi-size-md" data-releu-backup-save>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  Save Backup Settings
+                </button>
+                <button type="button" class="fi-btn fi-btn-secondary fi-size-md fi-ac-btn-action" data-releu-backup-create>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  Create Backup Now
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
+        <section class="fi-section">
+          <div class="fi-section-header">
+            <div>
+              <div class="fi-section-heading">Backup History</div>
+              <div class="fi-section-description">Revert replaces the current server files with the selected backup after three confirmations.</div>
+            </div>
+            <div class="fi-badge">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              ${escapeHtml(`${backups.length} backup${backups.length === 1 ? "" : "s"}`)}
+            </div>
+          </div>
+          <div class="fi-table-wrap">
+            <table class="fi-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Size</th>
+                  <th>Created</th>
+                  <th style="text-align:right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody>${backupRows}</tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>`;
+
+  const runCreateBackup = async (button) => {
     try {
-      setButtonBusy(button, true);
-      await api(`/api/servers/${encodeURIComponent(activeServerId())}/server/backup`, { method: "POST" });
-      await refreshState(activeServerId());
+      setButtonBusy(button, true, "Creating...");
+      const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/server/backup`, {
+        method: "POST",
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      await refreshLogs();
       patchBackupsPage();
     } catch (error) {
       showError(error);
     } finally {
       setButtonBusy(button, false);
     }
-  }), createButton && (createButton.dataset.releuBound = "true");
+  };
+
+  mount.querySelector("[data-releu-backup-settings-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const saveButton = form.querySelector("[data-releu-backup-save]");
+    try {
+      setButtonBusy(saveButton, true, "Saving...");
+      const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/settings/backups`, {
+        method: "POST",
+        body: {
+          autoBackups: Boolean(form.elements.autoBackups?.checked),
+          backupIntervalMinutes: Number(form.elements.backupIntervalMinutes?.value) || 60,
+          maxBackupStorageGb: Number(form.elements.maxBackupStorageGb?.value) || maxStorageGb,
+        },
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      patchBackupsPage();
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(saveButton, false);
+    }
+  });
+
+  mount.querySelector("[data-releu-backup-create]")?.addEventListener("click", async (event) => {
+    await runCreateBackup(event.currentTarget);
+  });
+
+  mount.querySelectorAll("[data-releu-backup-open-path]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await openLocalPath(button.dataset.releuBackupOpenPath);
+    });
+  });
+
+  mount.querySelectorAll("[data-releu-backup-revert]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const backupName = String(button.dataset.releuBackupRevert ?? "").trim();
+      if (!backupName) return;
+      if (!window.confirm(`Revert the current server to "${backupName}"?\n\nThis overwrites the live server files and worlds with the selected backup.`)) {
+        return;
+      }
+      if (!window.confirm("This can permanently replace newer progress if you choose the wrong backup.\n\nAre you sure you want to continue?")) {
+        return;
+      }
+      if (!window.confirm(`Final warning: Releu will create one safety backup, then revert this server to "${backupName}".\n\nProceed with the revert?`)) {
+        return;
+      }
+      try {
+        setButtonBusy(button, true, "Reverting...");
+        const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/backups/revert`, {
+          method: "POST",
+          body: {
+            backupName,
+          },
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        await refreshLogs();
+        patchBackupsPage();
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+
+  const headerCreateButton = document.querySelector(".fi-ac-icon-btn-action");
+  if (headerCreateButton && !headerCreateButton.dataset.releuBackupsBound) {
+    headerCreateButton.addEventListener("click", async (event) => {
+      await runCreateBackup(event.currentTarget);
+    });
+    headerCreateButton.dataset.releuBackupsBound = "true";
+  }
+}
+
+function patchBackupsPageLive() {
+  const server = activeServer();
+  if (!server) return;
+  injectBackupsPageStyles();
+  const mount = document.querySelector(".fi-page-content");
+  if (!mount) return;
+
+  if (APP_STATE.backupsPage.serverId !== server.id) {
+    APP_STATE.backupsPage.serverId = server.id;
+    APP_STATE.backupsPage.autoBackups = Boolean(server.backups?.enabled);
+    APP_STATE.backupsPage.backupIntervalMinutes = Math.max(5, Number(server.backups?.intervalMinutes ?? 60) || 60);
+    APP_STATE.backupsPage.maxBackupStorageGb = Math.max(1, Number(server.backups?.maxStorageGb ?? 10) || 10);
+  }
+
+  const backups = Array.isArray(server.backups?.recent) ? server.backups.recent : [];
+  const totalBytes = Math.max(0, Number(server.backups?.totalBytes ?? 0) || 0);
+
+  const getDraftState = () => {
+    const autoBackups = Boolean(APP_STATE.backupsPage.autoBackups);
+    const intervalMinutes = Math.max(
+      5,
+      Number(APP_STATE.backupsPage.backupIntervalMinutes ?? server.backups?.intervalMinutes ?? 60) || 60,
+    );
+    const maxStorageGb = Math.max(
+      1,
+      Number(APP_STATE.backupsPage.maxBackupStorageGb ?? server.backups?.maxStorageGb ?? 10) || 10,
+    );
+    const maxStorageBytes = Math.max(
+      totalBytes,
+      Number(server.backups?.maxStorageBytes ?? Math.round(maxStorageGb * 1024 ** 3)) || Math.round(maxStorageGb * 1024 ** 3),
+    );
+    const usagePercent = maxStorageBytes > 0 ? Math.min(100, (totalBytes / maxStorageBytes) * 100) : 0;
+    const nextBackupAt = (() => {
+      if (!autoBackups) return "Disabled";
+      const anchor = Date.parse(server.backups?.lastBackupAt ?? server.createdAt ?? "");
+      if (Number.isFinite(anchor)) {
+        return formatDate(new Date(anchor + intervalMinutes * 60_000).toISOString());
+      }
+      return server.backups?.nextBackupAt ? formatDate(server.backups.nextBackupAt) : "Unknown";
+    })();
+    return { autoBackups, intervalMinutes, maxStorageGb, usagePercent, nextBackupAt };
+  };
+
+  const draft = getDraftState();
+  const backupRows = backups.length
+    ? backups
+        .map((entry, index) => {
+          const badgeLabel = index === 0 ? "Newest backup" : "Local snapshot";
+          const badgeIcon = index === 0
+            ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`
+            : "";
+          const openFolderButton = isDesktopApp()
+            ? `<button type="button" class="fi-btn fi-btn-secondary fi-size-sm fi-ac-btn-action" data-releu-backup-open-path="${escapeHtml(entry.path)}">Open Folder</button>`
+            : "";
+          return `
+        <tr>
+          <td>
+            <div class="fi-backup-name">${escapeHtml(entry.name)}</div>
+            <div class="fi-backup-tag${index === 0 ? " newest" : ""}">
+              ${badgeIcon}
+              ${escapeHtml(badgeLabel)}
+            </div>
+          </td>
+          <td class="fi-size-cell">${escapeHtml(formatBytes(entry.bytes ?? 0))}</td>
+          <td class="fi-date-cell">${escapeHtml(formatDate(entry.createdAt))}</td>
+          <td>
+            <div class="fi-row-actions">
+              <button type="button" class="fi-btn fi-btn-secondary fi-size-sm fi-ac-btn-action" data-releu-backup-revert="${escapeHtml(entry.name)}">Revert</button>
+              ${openFolderButton}
+            </div>
+          </td>
+        </tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="4" class="fi-empty">No local backups have been created yet.</td></tr>`;
+
+  mount.innerHTML = `
+    <div class="releu-backups-shell">
+      <div class="releu-backups-grid">
+        <section class="fi-section">
+          <div class="fi-section-header">
+            <div>
+              <div class="fi-section-heading">Local Backup Settings</div>
+              <div class="fi-section-description">Set a total storage cap for local backups. Releu deletes the oldest backups first when the folder hits the limit.</div>
+            </div>
+          </div>
+          <div class="fi-section-body">
+            <form data-releu-backup-settings-form class="fi-section-body" style="padding:0;">
+              <div class="fi-field">
+                <label class="fi-label" for="releu-backups-enabled">Automatic Local Backups</label>
+                <label class="fi-checkbox-row" for="releu-backups-enabled">
+                  <input id="releu-backups-enabled" name="autoBackups" type="checkbox" ${draft.autoBackups ? "checked" : ""}>
+                  <span data-releu-backup-enabled-label>${draft.autoBackups ? "Enabled" : "Disabled"} - Releu creates scheduled local backups for this server.</span>
+                </label>
+              </div>
+              <div class="fi-field">
+                <label class="fi-label" for="releu-backup-interval">Backup Interval (minutes)</label>
+                <input id="releu-backup-interval" name="backupIntervalMinutes" type="number" min="5" step="5" value="${escapeHtml(draft.intervalMinutes)}" class="fi-input">
+              </div>
+              <div class="fi-field">
+                <label class="fi-label" for="releu-backup-max-storage">Max Total Backup Storage (GB)</label>
+                <input id="releu-backup-max-storage" name="maxBackupStorageGb" type="number" min="1" step="1" value="${escapeHtml(draft.maxStorageGb)}" class="fi-input">
+              </div>
+              <div class="fi-stats">
+                <div class="fi-stat">
+                  <div class="fi-stat-label">Current Usage</div>
+                  <div class="fi-stat-value">${escapeHtml(formatBytes(totalBytes))}</div>
+                </div>
+                <div class="fi-stat">
+                  <div class="fi-stat-label">Next Backup</div>
+                  <div class="fi-stat-value" data-releu-backup-next-value>${escapeHtml(draft.nextBackupAt)}</div>
+                </div>
+              </div>
+              <div class="fi-progress">
+                <div class="fi-progress-head">
+                  <span class="fi-progress-label">Storage Usage</span>
+                  <span class="fi-progress-val" data-releu-backup-usage-value>${escapeHtml(formatBytes(totalBytes))} / ${escapeHtml(`${draft.maxStorageGb} GB`)}</span>
+                </div>
+                <div class="fi-progress-track">
+                  <div class="fi-progress-fill" data-releu-backup-usage-fill style="--releu-backups-usage:${draft.usagePercent}%;"></div>
+                </div>
+              </div>
+              <div class="fi-callout">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <span>When you revert to a backup, Releu first creates a safety backup of the current state. The server must stay stopped during a revert.</span>
+              </div>
+              <div class="fi-actions">
+                <button type="submit" class="fi-btn fi-btn-primary fi-size-md" data-releu-backup-save>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  Save Backup Settings
+                </button>
+                <button type="button" class="fi-btn fi-btn-secondary fi-size-md fi-ac-btn-action" data-releu-backup-create>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  Create Backup Now
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
+        <section class="fi-section">
+          <div class="fi-section-header">
+            <div>
+              <div class="fi-section-heading">Backup History</div>
+              <div class="fi-section-description">Revert replaces the current server files with the selected backup after three confirmations.</div>
+            </div>
+            <div class="fi-badge">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              ${escapeHtml(`${backups.length} backup${backups.length === 1 ? "" : "s"}`)}
+            </div>
+          </div>
+          <div class="fi-table-wrap">
+            <table class="fi-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Size</th>
+                  <th>Created</th>
+                  <th style="text-align:right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody>${backupRows}</tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>`;
+
+  const settingsForm = mount.querySelector("[data-releu-backup-settings-form]");
+  const runCreateBackup = async (button) => {
+    try {
+      setButtonBusy(button, true, "Creating...");
+      const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/server/backup`, {
+        method: "POST",
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.backupsPage.serverId = "";
+      await refreshLogs();
+      patchBackupsPageLive();
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(button, false);
+    }
+  };
+
+  const updateBackupDraftPreview = () => {
+    if (!settingsForm) return;
+    APP_STATE.backupsPage.autoBackups = Boolean(settingsForm.elements.autoBackups?.checked);
+    APP_STATE.backupsPage.backupIntervalMinutes = Math.max(5, Number(settingsForm.elements.backupIntervalMinutes?.value) || draft.intervalMinutes);
+    APP_STATE.backupsPage.maxBackupStorageGb = Math.max(1, Number(settingsForm.elements.maxBackupStorageGb?.value) || draft.maxStorageGb);
+    const nextDraft = getDraftState();
+
+    const enabledLabel = mount.querySelector("[data-releu-backup-enabled-label]");
+    if (enabledLabel) {
+      enabledLabel.textContent = `${nextDraft.autoBackups ? "Enabled" : "Disabled"} - Releu creates scheduled local backups for this server.`;
+    }
+    const nextValue = mount.querySelector("[data-releu-backup-next-value]");
+    if (nextValue) nextValue.textContent = nextDraft.nextBackupAt;
+    const usageValue = mount.querySelector("[data-releu-backup-usage-value]");
+    if (usageValue) usageValue.textContent = `${formatBytes(totalBytes)} / ${nextDraft.maxStorageGb} GB`;
+    const usageFill = mount.querySelector("[data-releu-backup-usage-fill]");
+    if (usageFill) usageFill.style.setProperty("--releu-backups-usage", `${nextDraft.usagePercent}%`);
+  };
+
+  settingsForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const saveButton = form.querySelector("[data-releu-backup-save]");
+    try {
+      setButtonBusy(saveButton, true, "Saving...");
+      const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/settings/backups`, {
+        method: "POST",
+        body: {
+          autoBackups: Boolean(form.elements.autoBackups?.checked),
+          backupIntervalMinutes: Number(form.elements.backupIntervalMinutes?.value) || 60,
+          maxBackupStorageGb: Number(form.elements.maxBackupStorageGb?.value) || draft.maxStorageGb,
+        },
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.backupsPage.serverId = "";
+      patchBackupsPageLive();
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(saveButton, false);
+    }
+  });
+
+  settingsForm?.elements.autoBackups?.addEventListener("change", updateBackupDraftPreview);
+  settingsForm?.elements.backupIntervalMinutes?.addEventListener("input", updateBackupDraftPreview);
+  settingsForm?.elements.maxBackupStorageGb?.addEventListener("input", updateBackupDraftPreview);
+
+  mount.querySelector("[data-releu-backup-create]")?.addEventListener("click", async (event) => {
+    await runCreateBackup(event.currentTarget);
+  });
+
+  mount.querySelectorAll("[data-releu-backup-open-path]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await openLocalPath(button.dataset.releuBackupOpenPath);
+    });
+  });
+
+  mount.querySelectorAll("[data-releu-backup-revert]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const backupName = String(button.dataset.releuBackupRevert ?? "").trim();
+      if (!backupName) return;
+      if (!window.confirm(`Revert the current server to "${backupName}"?\n\nThis overwrites the live server files and worlds with the selected backup.`)) return;
+      if (!window.confirm("This can permanently replace newer progress if you choose the wrong backup.\n\nAre you sure you want to continue?")) return;
+      if (!window.confirm(`Final warning: Releu will create one safety backup, then revert this server to "${backupName}".\n\nProceed with the revert?`)) return;
+      try {
+        setButtonBusy(button, true, "Reverting...");
+        const payload = await api(`/api/servers/${encodeURIComponent(activeServerId())}/backups/revert`, {
+          method: "POST",
+          body: { backupName },
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.backupsPage.serverId = "";
+        await refreshLogs();
+        patchBackupsPageLive();
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+
+  const headerCreateButton = document.querySelector(".fi-ac-icon-btn-action");
+  if (headerCreateButton && !headerCreateButton.dataset.releuBackupsBound) {
+    headerCreateButton.addEventListener("click", async (event) => {
+      await runCreateBackup(event.currentTarget);
+    });
+    headerCreateButton.dataset.releuBackupsBound = "true";
+  }
 }
 
 function injectFilesPageStyles() {
@@ -4407,7 +5289,7 @@ function injectFilesPageStyles() {
       overflow: hidden;
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 1rem;
-      background: rgba(15, 20, 27, 0.92);
+      background: rgb(var(--gray-900,17 24 32));
     }
     .releu-files-table {
       width: 100%;
@@ -4462,7 +5344,7 @@ function injectFilesPageStyles() {
       height: 2.25rem;
       border-radius: 0.75rem;
       border: 1px solid rgba(255,255,255,0.08);
-      background: rgba(255,255,255,0.03);
+      background: rgb(var(--gray-950,15 20 27));
       color: #cbd5e1;
       flex-shrink: 0;
     }
@@ -4486,7 +5368,7 @@ function injectFilesPageStyles() {
       align-items: center;
       justify-content: center;
       padding: 1.5rem;
-      background: rgba(2, 6, 23, 0.78);
+      background: rgba(15, 20, 27, 0.82);
       backdrop-filter: blur(8px);
     }
     .releu-files-editor {
@@ -4497,7 +5379,7 @@ function injectFilesPageStyles() {
       overflow: hidden;
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 1.25rem;
-      background: #0f141b;
+      background: rgb(var(--gray-900,17 24 32));
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
     }
     .releu-files-editor-head {
@@ -4536,7 +5418,7 @@ function injectFilesPageStyles() {
       resize: vertical;
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 1rem;
-      background: #091018;
+      background: rgb(var(--gray-950,15 20 27));
       padding: 1rem;
       color: #e2e8f0;
       font: 400 0.92rem/1.55 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
@@ -4720,6 +5602,15 @@ function renderFilesBrowserContent(listing) {
       </table>
     </div>
   </div>${renderFilesEditorModal()}`;
+}
+
+async function closeFilesEditor() {
+  if (APP_STATE.filesBrowser.editor?.dirty && !window.confirm("Discard unsaved file changes?")) {
+    return false;
+  }
+  APP_STATE.filesBrowser.editor = null;
+  await patchFilesPage();
+  return true;
 }
 
 async function patchFilesPage() {
@@ -4929,11 +5820,7 @@ async function patchFilesPage() {
 
       const closeEditorButton = event.target.closest("[data-files-close-editor]");
       if (closeEditorButton) {
-        if (APP_STATE.filesBrowser.editor?.dirty && !window.confirm("Discard unsaved file changes?")) {
-          return;
-        }
-        APP_STATE.filesBrowser.editor = null;
-        await patchFilesPage();
+        await closeFilesEditor();
       }
     });
 
@@ -4987,9 +5874,10 @@ async function patchFilesPage() {
     tableContainer.dataset.releuFilesBound = "true";
   }
 
+  const editorHasFocus = document.activeElement?.matches?.("[data-files-editor-textarea]");
   const activelyEditing =
-    APP_STATE.filesBrowser.editor?.dirty &&
-    document.activeElement?.matches?.("[data-files-editor-textarea]");
+    Boolean(APP_STATE.filesBrowser.editor) &&
+    (Boolean(APP_STATE.filesBrowser.editor?.dirty) || editorHasFocus);
   if (!activelyEditing) {
     await loadFilesListing(APP_STATE.filesBrowser.path, APP_STATE.filesBrowser.search);
   }
@@ -4999,7 +5887,21 @@ async function patchFilesPage() {
     parentPath: null,
     entries: [],
   };
+  if (editorHasFocus && APP_STATE.filesBrowser.editor && tableContainer.querySelector(".releu-files-editor")) {
+    return;
+  }
   tableContainer.innerHTML = renderFilesBrowserContent(listing);
+  const backdrop = tableContainer.querySelector(".releu-files-editor-backdrop");
+  backdrop?.addEventListener("click", async (event) => {
+    if (event.target !== backdrop) return;
+    await closeFilesEditor();
+  });
+  tableContainer.querySelectorAll(".releu-files-editor [data-files-close-editor]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      await closeFilesEditor();
+    });
+  });
 }
 
 function patchMiscPage() {
@@ -5102,11 +6004,26 @@ function patchMiscPage() {
     if (form.dataset.releuSaving === "true") return;
 
     try {
+      const currentAllowCrackedClients =
+        String(activeServer()?.server?.properties?.["online-mode"] ?? "true").toLowerCase() !== "true";
+      const nextAllowCrackedClients = form.elements.allowCrackedClients.value === "true";
+      if (currentAllowCrackedClients !== nextAllowCrackedClients) {
+        const proceed = window.confirm(
+          "Warning: changing Allow Cracked Clients switches players to a different save slot / UUID, so their inventory can look missing in this mode.\n\nIf you switch it back later, the original save usually comes back.\n\nDo you want to continue?",
+        );
+        if (!proceed) {
+          form.elements.allowCrackedClients.value = currentAllowCrackedClients ? "true" : "false";
+          form.elements.allowCrackedClients.dataset.releuDirty = "false";
+          paintStatus("Allow Cracked Clients change cancelled.", "neutral");
+          return;
+        }
+      }
+
       const currentKeepInventory = Boolean(activeServer()?.misc?.keepInventory);
       const nextKeepInventory = form.elements.keepInventory.value === "true";
       if (currentKeepInventory !== nextKeepInventory) {
         const proceed = window.confirm(
-          "Warning: changing Keep Inventory can immediately affect what players are wearing or holding in their inventory. Do you want to continue?",
+          "Warning: changing Keep Inventory can sometimes make every user's inventory look missing or get lost, and sometimes nothing happens.\n\nThis usually depends on when player data gets saved, deaths, and world state.\n\nDo you want to continue?",
         );
         if (!proceed) {
           form.elements.keepInventory.value = currentKeepInventory ? "true" : "false";
@@ -5162,6 +6079,1366 @@ function patchMiscPage() {
   });
 }
 
+const CLOUD_AUTH_FOCUS_SELECTOR =
+  "[data-releu-cloud-device-label], [data-releu-cloud-account-username], [data-releu-cloud-account-password], [data-releu-cloud-target-restore-key]";
+
+function readCloudDraftNodeValue(root, selector) {
+  const node = root.querySelector?.(selector);
+  if (!node) return undefined;
+  if (node.dataset?.releuPlaceholderVisible === "true") return "";
+  if ("value" in node) return node.value;
+  return node.textContent ?? undefined;
+}
+
+function preserveCloudBackupDraft(root = document) {
+  APP_STATE.cloudBackup.draft = {
+    ...APP_STATE.cloudBackup.draft,
+    deviceLabel:
+      readCloudDraftNodeValue(root, "[data-releu-cloud-device-label]") ??
+      APP_STATE.cloudBackup.draft.deviceLabel,
+    accountUsername:
+      readCloudDraftNodeValue(root, "[data-releu-cloud-account-username]") ??
+      APP_STATE.cloudBackup.draft.accountUsername,
+    accountPassword:
+      readCloudDraftNodeValue(root, "[data-releu-cloud-account-password]") ??
+      APP_STATE.cloudBackup.draft.accountPassword,
+    targetRestoreKey:
+      readCloudDraftNodeValue(root, "[data-releu-cloud-target-restore-key]") ??
+      APP_STATE.cloudBackup.draft.targetRestoreKey,
+  };
+}
+
+function maybeRefreshCloudBackupStatus(rerender) {
+  const cloudAuthFocused = Boolean(document.activeElement?.matches?.(CLOUD_AUTH_FOCUS_SELECTOR));
+  if (
+    !cloudAuthFocused &&
+    !APP_STATE.cloudBackup.loading &&
+    (!APP_STATE.cloudBackup.status || Date.now() - APP_STATE.cloudBackup.lastFetchedAt > 15000)
+  ) {
+    refreshCloudBackupStatus()
+      .then(() => rerender?.())
+      .catch(() => {});
+  }
+}
+
+function renderCloudBackupSection({ mount = document.querySelector(".fi-page-content"), state, serverId, rerender }) {
+  if (!mount) return;
+  preserveCloudBackupDraft(mount);
+  let cloudSection = mount.querySelector("[data-releu-cloud-section]");
+  if (!cloudSection) {
+    cloudSection = document.createElement("section");
+    cloudSection.className = "fi-section mt-6";
+    cloudSection.dataset.releuCloudSection = "true";
+    mount.append(cloudSection);
+  }
+  const rerenderPage = typeof rerender === "function" ? rerender : () => {};
+  const cloud = APP_STATE.cloudBackup.status ?? {};
+  const cloudProvider = cloud.provider ?? state.cloudBackupSettings?.provider ?? "website";
+  const cloudAuthScreen = APP_STATE.cloudBackup.authScreen === "signup" ? "signup" : "login";
+  const currentCloudPanel = APP_STATE.cloudBackup.currentPanel === "dashboard" ? "dashboard" : "auth";
+  const cloudDraft = {
+    deviceLabel:
+      String(APP_STATE.cloudBackup.draft.deviceLabel ?? "").trim() ||
+      String(cloud.deviceLabel ?? state.cloudBackupSettings?.deviceLabel ?? "").trim(),
+    accountUsername:
+      String(APP_STATE.cloudBackup.draft.accountUsername ?? "").trim() ||
+      String(cloud.accountUsername ?? state.cloudBackupSettings?.accountUsername ?? "").trim(),
+    accountPassword: String(APP_STATE.cloudBackup.draft.accountPassword ?? ""),
+    targetRestoreKey:
+      String(APP_STATE.cloudBackup.draft.targetRestoreKey ?? "").trim() ||
+      String(cloud.targetRestoreKey ?? state.cloudBackupSettings?.targetRestoreKey ?? "").trim(),
+  };
+  const uploadLimitBytes =
+    Number(cloud.uploadLimitBytes ?? (state.cloudBackupSettings?.uploadLimitMb ?? 50) * 1024 * 1024) ||
+    0;
+  const uploadLimitLabel = usingTailscaleCloud
+    ? (cloud.uploadLimitLabel ?? "Remote server disk")
+    : formatBytes(uploadLimitBytes);
+  const cloudActivityPolicyText = usingTailscaleCloud
+    ? "Rolling cloud backups are deleted automatically after 7 days with no upload, download, or restore activity."
+    : "";
+  cloudSection.innerHTML = `
+    <header class="fi-section-header">
+      <div>
+        <h2 class="fi-section-header-heading">
+          <span class="releu-panel-title">
+            <svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+            <span>Cloud Backup</span>
+          </span>
+        </h2>
+        <p class="fi-section-header-description">${usingTailscaleCloud ? (cloudNeedsAuthGate ? "Page 1 of 2. Sign up or log in first. Releu hides every backup control until authentication succeeds." : "Page 2 of 2. You are signed in, so the cloud dashboard is unlocked.") : "Upload full server backups without exposing private cloud credentials in the public app."}</p>
+      </div>
+    </header>
+    <div class="fi-section-content" style="display:grid;gap:1rem;">
+      ${usingTailscaleCloud && cloudNeedsAuthGate ? `
+        <div class="cb-auth-tabs">
+          <button type="button" class="cb-auth-tab${cloudAuthScreen === "login" ? " is-active" : ""}" data-releu-cloud-auth-screen="login">Log In</button>
+          <button type="button" class="cb-auth-tab${cloudAuthScreen === "signup" ? " is-active" : ""}" data-releu-cloud-auth-screen="signup">Sign Up</button>
+        </div>
+        <div class="cb-grid-2">
+          <div style="display:grid;gap:1rem;">
+            <label class="cb-field">
+              <span class="cb-field-label">Device Label</span>
+              <input class="cb-plain-input" data-releu-cloud-device-label type="text" value="${escapeHtml(cloudDraft.deviceLabel)}" placeholder="My desktop PC">
+            </label>
+            <label class="cb-field">
+              <span class="cb-field-label">Cloud Username</span>
+              <input class="cb-plain-input" data-releu-cloud-account-username type="text" value="${escapeHtml(cloudDraft.accountUsername)}" placeholder="alex">
+            </label>
+            <label class="cb-field">
+              <span class="cb-field-label">Cloud Password</span>
+              <input class="cb-plain-input" data-releu-cloud-account-password type="password" value="${escapeHtml(cloudDraft.accountPassword)}" placeholder="Log in to backup">
+            </label>
+          </div>
+          <div style="display:grid;gap:1rem;align-content:start;">
+            <div class="cb-status">
+              ${cloudAuthScreen === "signup" ? "Create a cloud backup account first. Releu unlocks the actual backup dashboard only after sign-up succeeds." : "Log in first. Releu hides backup keys, upload, restore, and history until authentication succeeds."}
+            </div>
+            <div class="cb-chips">
+              <div class="cb-chip">Connection: ${escapeHtml(cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready")}</div>
+              <div class="cb-chip">${escapeHtml(cloudActivityPolicyText)}</div>
+            </div>
+            ${cloud.authError ? `<div class="cb-status" style="color:#fecaca;">${escapeHtml(cloud.authError)}</div>` : ""}
+            ${cloud.functionError ? `<div class="cb-status" style="color:#fecaca;">${escapeHtml(cloud.functionError)}</div>` : ""}
+            <div class="cb-actions">
+              ${cloudAuthScreen === "signup"
+                ? `<button type="button" class="cb-btn is-primary" data-releu-cloud-register>Create Account</button>`
+                : `<button type="button" class="cb-btn is-primary" data-releu-cloud-login>Log In</button>`}
+              <button type="button" class="cb-btn" data-releu-cloud-refresh>Refresh Status</button>
+            </div>
+          </div>
+        </div>`
+      : `
+        <section class="fi-section fi-section-has-header">
+          <header class="fi-section-header">
+            <div class="fi-section-header-text-ctn">
+              <h2 class="fi-section-header-heading">
+                <span class="releu-panel-title">
+                  <svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.51-7.11"/><path d="M21 3v6h-6"/></svg>
+                  <span>Cloud Controls</span>
+                </span>
+              </h2>
+            </div>
+          </header>
+          <div class="fi-section-content">
+            <div class="cb-grid-2">
+              <div style="display:grid;gap:1rem;">
+                <label style="display:flex;align-items:center;gap:.75rem;">
+                  <input type="checkbox" data-releu-cloud-enabled ${state.cloudBackupSettings?.enabled ? "checked" : ""}>
+                  <span>Enable cloud backup for this Releu install</span>
+                </label>
+                <label class="cb-field">
+                  <span class="cb-field-label">Device Label</span>
+                  <input class="cb-plain-input" data-releu-cloud-device-label type="text" value="${escapeHtml(cloudDraft.deviceLabel)}" placeholder="My desktop PC">
+                </label>
+                <div class="cb-input-wrp">
+                  <div class="cb-input-prefix">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                    <span class="cb-input-prefix-label">My Backup Key</span>
+                  </div>
+                  <div class="cb-input-value" style="font-family:ui-monospace,monospace;font-size:.82rem;">${escapeHtml(cloud.restoreKey ?? "") || "Register or log in first"}</div>
+                </div>
+                <label class="cb-field">
+                  <span class="cb-field-label">Shared Backup Key (Optional)</span>
+                  <input class="cb-plain-input" data-releu-cloud-target-restore-key type="text" value="${escapeHtml(cloudDraft.targetRestoreKey)}" placeholder="Enter another user's key to upload or restore their backup space">
+                </label>
+              </div>
+              <div style="display:grid;gap:1rem;align-content:start;">
+                <div class="cb-chips">
+                  <div class="cb-chip">Connection: ${escapeHtml(cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready")}</div>
+                  <div class="cb-chip">Login: ${escapeHtml(cloud.loggedIn ? cloud.accountUsername || "account" : "Not logged in")}</div>
+                  <div class="cb-chip">Upload limit: ${escapeHtml(uploadLimitLabel)}</div>
+                  <div class="cb-chip">Cloud used: ${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</div>
+                  <div class="cb-chip">Saved backups: ${escapeHtml(String(cloud.backupsCount ?? 0))}</div>
+                  ${usingTailscaleCloud && cloud.usingSharedRestoreKey ? `<div class="cb-chip">Target key: Shared backup space</div>` : ""}
+                </div>
+                <div class="cb-status">
+                  ${escapeHtml(cloudActivityPolicyText || "Cloud backup is ready. Upload, download, and restore actions are available now.")}
+                  ${cloud.functionError ? `<div style="margin-top:.5rem;color:#fecaca;">${escapeHtml(cloud.functionError)}</div>` : ""}
+                  ${cloud.authError ? `<div style="margin-top:.5rem;color:#fecaca;">${escapeHtml(cloud.authError)}</div>` : ""}
+                  ${!cloud.functionError ? `<div style="margin-top:.5rem;">Latest backup: <span style="color:oklch(0.967 0.001 286.375);">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>` : ""}
+                </div>
+                <div class="cb-actions">
+                  <button type="button" class="cb-btn" data-releu-cloud-save>Save Settings</button>
+                  ${cloud.loggedIn ? `<button type="button" class="cb-btn" data-releu-cloud-logout>Log Out</button>` : ""}
+                  ${cloud.loggedIn ? `<button type="button" class="cb-btn" data-releu-cloud-rotate>Rotate Key</button>` : ""}
+                  <button type="button" class="cb-btn is-primary" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled || !cloud.loggedIn ? "disabled" : ""}>Backup To Cloud Now</button>
+                  <button type="button" class="cb-btn" data-releu-cloud-refresh>Refresh Status</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="fi-section fi-section-has-header">
+          <header class="fi-section-header">
+            <div class="fi-section-header-text-ctn">
+              <h2 class="fi-section-header-heading">
+                <span class="releu-panel-title">
+                  <svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="12 8 12 12 14 14"/><path d="M3.05 11a9 9 0 1 1 .5 4"/><polyline points="3 16 3 11 8 11"/></svg>
+                  <span>Backup History</span>
+                </span>
+              </h2>
+            </div>
+          </header>
+          <div class="fi-section-content">
+            ${cloud.backups?.length
+              ? cloud.backups.map((entry) => `
+                <div class="cb-backup-row">
+                  <div>
+                    <div class="cb-backup-name">${escapeHtml(entry.backup_name ?? "Backup")}</div>
+                    <div class="cb-backup-meta">${escapeHtml(formatDate(entry.created_at ?? entry.updated_at))} • ${escapeHtml(formatBytes(entry.size_bytes ?? 0))}</div>
+                  </div>
+                  <div class="cb-actions">
+                    <button type="button" class="cb-btn" data-releu-cloud-download="${escapeHtml(entry.id)}">Download</button>
+                    <button type="button" class="cb-btn" data-releu-cloud-restore="${escapeHtml(entry.id)}">Restore</button>
+                  </div>
+                </div>`).join("")
+              : `<div class="cb-status">No cloud backups uploaded yet.</div>`}
+          </div>
+        </section>`}
+    </div>`;
+  const cloudEnabled = cloudSection.querySelector("[data-releu-cloud-enabled]");
+  const cloudDeviceLabel = cloudSection.querySelector("[data-releu-cloud-device-label]");
+  const cloudAccountUsername = cloudSection.querySelector("[data-releu-cloud-account-username]");
+  const cloudAccountPassword = cloudSection.querySelector("[data-releu-cloud-account-password]");
+  const cloudTargetRestoreKey = cloudSection.querySelector("[data-releu-cloud-target-restore-key]");
+  const saveCloudButton = cloudSection.querySelector("[data-releu-cloud-save]");
+  const registerCloudButton = cloudSection.querySelector("[data-releu-cloud-register]");
+  const loginCloudButton = cloudSection.querySelector("[data-releu-cloud-login]");
+  const logoutCloudButton = cloudSection.querySelector("[data-releu-cloud-logout]");
+  const issueCloudButton = cloudSection.querySelector("[data-releu-cloud-issue]");
+  const rotateCloudButton = cloudSection.querySelector("[data-releu-cloud-rotate]");
+  const uploadCloudButton = cloudSection.querySelector("[data-releu-cloud-upload]");
+  const refreshCloudButton = cloudSection.querySelector("[data-releu-cloud-refresh]");
+  cloudSection.querySelectorAll("[data-releu-cloud-auth-screen]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", () => {
+      APP_STATE.cloudBackup.authScreen = button.dataset.releuCloudAuthScreen === "signup" ? "signup" : "login";
+      rerenderPage();
+    });
+  });
+  if (saveCloudButton && !saveCloudButton.dataset.releuBound) saveCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(saveCloudButton, true, "Saving...");
+      const payload = await api("/api/cloud-backup/settings", {
+        method: "POST",
+        body: {
+          enabled: Boolean(cloudEnabled?.checked),
+          provider: cloudProvider,
+          deviceLabel: cloudDeviceLabel?.value ?? "",
+          targetRestoreKey: cloudTargetRestoreKey?.value ?? "",
+        },
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.status ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      APP_STATE.cloudBackup.draft.deviceLabel = cloudDeviceLabel?.value ?? APP_STATE.cloudBackup.draft.deviceLabel;
+      APP_STATE.cloudBackup.draft.targetRestoreKey = cloudTargetRestoreKey?.value ?? "";
+      rerenderPage();
+      showStatus("Cloud backup settings saved.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(saveCloudButton, false);
+    }
+  }), saveCloudButton.dataset.releuBound = "true";
+  if (registerCloudButton && !registerCloudButton.dataset.releuBound) registerCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(registerCloudButton, true, "Registering...");
+      const payload = await api("/api/cloud-backup/register", {
+        method: "POST",
+        body: {
+          username: cloudAccountUsername?.value ?? "",
+          password: cloudAccountPassword?.value ?? "",
+          deviceLabel: cloudDeviceLabel?.value ?? "",
+        },
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      APP_STATE.cloudBackup.draft.accountUsername = cloudAccountUsername?.value ?? "";
+      APP_STATE.cloudBackup.draft.accountPassword = "";
+      rerenderPage();
+      showStatus("Cloud backup account created.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(registerCloudButton, false);
+    }
+  }), registerCloudButton.dataset.releuBound = "true";
+  if (loginCloudButton && !loginCloudButton.dataset.releuBound) loginCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(loginCloudButton, true, "Logging In...");
+      const payload = await api("/api/cloud-backup/login", {
+        method: "POST",
+        body: {
+          username: cloudAccountUsername?.value ?? "",
+          password: cloudAccountPassword?.value ?? "",
+          deviceLabel: cloudDeviceLabel?.value ?? "",
+        },
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      APP_STATE.cloudBackup.draft.accountUsername = cloudAccountUsername?.value ?? "";
+      APP_STATE.cloudBackup.draft.accountPassword = "";
+      rerenderPage();
+      showStatus("Cloud backup login saved.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(loginCloudButton, false);
+    }
+  }), loginCloudButton.dataset.releuBound = "true";
+  if (logoutCloudButton && !logoutCloudButton.dataset.releuBound) logoutCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(logoutCloudButton, true, "Logging Out...");
+      const payload = await api("/api/cloud-backup/logout", { method: "POST" });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      APP_STATE.cloudBackup.draft.accountPassword = "";
+      rerenderPage();
+      showStatus("Cloud backup login removed.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(logoutCloudButton, false);
+    }
+  }), logoutCloudButton.dataset.releuBound = "true";
+  if (issueCloudButton && !issueCloudButton.dataset.releuBound) issueCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(issueCloudButton, true, "Generating...");
+      const payload = await api("/api/cloud-backup/issue-key", {
+        method: "POST",
+        body: {
+          deviceLabel: cloudDeviceLabel?.value ?? "",
+        },
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      rerenderPage();
+      showStatus("Cloud backup key ready.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(issueCloudButton, false);
+    }
+  }), issueCloudButton.dataset.releuBound = "true";
+  if (rotateCloudButton && !rotateCloudButton.dataset.releuBound) rotateCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(rotateCloudButton, true, "Rotating...");
+      const payload = await api("/api/cloud-backup/rotate-key", { method: "POST" });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      rerenderPage();
+      showStatus("Cloud backup key rotated.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(rotateCloudButton, false);
+    }
+  }), rotateCloudButton.dataset.releuBound = "true";
+  if (uploadCloudButton && !uploadCloudButton.dataset.releuBound) uploadCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(uploadCloudButton, true, "Uploading...");
+      showStatus("Creating and uploading a full cloud backup...");
+      const payload = await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/upload`, {
+        method: "POST",
+      });
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      APP_STATE.cloudBackup.status = payload.upload?.cloudBackup ?? APP_STATE.cloudBackup.status;
+      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+      rerenderPage();
+      showStatus("Cloud backup uploaded.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(uploadCloudButton, false);
+    }
+  }), uploadCloudButton.dataset.releuBound = "true";
+  if (refreshCloudButton && !refreshCloudButton.dataset.releuBound) refreshCloudButton.addEventListener("click", async () => {
+    try {
+      setButtonBusy(refreshCloudButton, true, "Refreshing...");
+      await refreshCloudBackupStatus(true);
+      rerenderPage();
+      showStatus("Cloud backup status refreshed.", "success");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setButtonBusy(refreshCloudButton, false);
+    }
+  }), refreshCloudButton.dataset.releuBound = "true";
+  cloudSection.querySelectorAll("[data-releu-cloud-download]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async () => {
+      try {
+        setButtonBusy(button, true, "Downloading...");
+        await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/download`, {
+          method: "POST",
+          body: {
+            backupId: button.dataset.releuCloudDownload,
+          },
+        });
+        showStatus("Cloud backup downloaded to the local Releu data folder.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+  cloudSection.querySelectorAll("[data-releu-cloud-restore]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async () => {
+      if (!window.confirm("Restore this cloud backup onto the current server? The server must stay stopped during the restore.")) {
+        return;
+      }
+      try {
+        setButtonBusy(button, true, "Restoring...");
+        await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/restore`, {
+          method: "POST",
+          body: {
+            backupId: button.dataset.releuCloudRestore,
+          },
+        });
+        await refreshState(serverId);
+        await refreshCloudBackupStatus(true);
+        rerenderPage();
+        showStatus("Cloud backup restored.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+}
+
+function patchCloudBackupPageLegacy() {
+  const state = APP_STATE.state;
+  const server = activeServer();
+  if (!server) return;
+  const serverId = activeServerId();
+  preserveCloudBackupDraft(document);
+  const mount = document.querySelector(".fi-page-content");
+  if (!mount) return;
+  const cloud = APP_STATE.cloudBackup.status ?? {};
+  const cloudProvider = cloud.provider ?? state.cloudBackupSettings?.provider ?? "website";
+  const cloudAuthScreen = APP_STATE.cloudBackup.authScreen === "signup" ? "signup" : "login";
+  const currentCloudPanel = APP_STATE.cloudBackup.currentPanel === "dashboard" ? "dashboard" : "auth";
+  const cloudDraft = {
+    deviceLabel:
+      String(APP_STATE.cloudBackup.draft.deviceLabel ?? "").trim() ||
+      String(cloud.deviceLabel ?? state.cloudBackupSettings?.deviceLabel ?? "").trim(),
+    accountUsername:
+      String(APP_STATE.cloudBackup.draft.accountUsername ?? "").trim() ||
+      String(cloud.accountUsername ?? state.cloudBackupSettings?.accountUsername ?? "").trim(),
+    accountPassword: String(APP_STATE.cloudBackup.draft.accountPassword ?? ""),
+    targetRestoreKey:
+      String(APP_STATE.cloudBackup.draft.targetRestoreKey ?? "").trim() ||
+      String(cloud.targetRestoreKey ?? state.cloudBackupSettings?.targetRestoreKey ?? "").trim(),
+  };
+  const uploadLimitBytes =
+    Number(cloud.uploadLimitBytes ?? (state.cloudBackupSettings?.uploadLimitMb ?? 50) * 1024 * 1024) || 0;
+  const uploadLimitLabel = usingTailscaleCloud
+    ? (cloud.uploadLimitLabel ?? "Remote server disk")
+    : formatBytes(uploadLimitBytes);
+  const cloudActivityPolicyText = usingTailscaleCloud
+    ? "Rolling cloud backups are deleted automatically after 7 days with no upload, download, or restore activity."
+    : "";
+
+  const pageMap = {
+    Servers: "servers.html",
+    Overview: "overview.html",
+    Console: "console.html",
+    Players: "players.html",
+    Files: "files.html",
+    Backups: "backups.html",
+    "Cloud Backup": "cloud-backup.html",
+    Worlds: "worlds.html",
+    "Add-ons / Mods": "addons-mods.html",
+    Software: "software.html",
+    Misc: "misc.html",
+    Settings: "settings.html",
+  };
+  document.querySelector(".fi-sidebar-header-logo-ctn a")?.setAttribute("href", buildLocalPageHref("servers.html", serverId));
+  document.querySelectorAll(".fi-sidebar-item").forEach((item) => {
+    const labelNode = item.querySelector(".fi-sidebar-item-label");
+    const label = labelNode?.textContent?.trim();
+    const anchor = item.querySelector("a.fi-sidebar-item-btn");
+    const pageName = label ? pageMap[label] : null;
+    if (!anchor || !pageName) return;
+    anchor.setAttribute("href", buildLocalPageHref(pageName, serverId));
+    item.classList.toggle("fi-active", PAGE === pageName);
+  });
+
+  const authPanel = mount.querySelector("#panel-auth");
+  const dashboardPanel = mount.querySelector("#panel-dashboard");
+  if (!authPanel || !dashboardPanel) return;
+  authPanel.style.display = currentCloudPanel === "auth" ? "block" : "none";
+  dashboardPanel.style.display = currentCloudPanel === "dashboard" ? "grid" : "none";
+
+  const findWrap = (root, label) =>
+    [...root.querySelectorAll(".cb-input-wrp")].find(
+      (node) => node.querySelector(".cb-input-prefix-label")?.textContent?.trim().toLowerCase() === label.toLowerCase(),
+    );
+  const setFieldInput = (wrap, config) => {
+    if (!wrap) return null;
+    let input = wrap.querySelector("input[data-releu-cloud-field]");
+    if (!input) {
+      wrap.querySelector(".cb-input-value")?.remove();
+      input = document.createElement("input");
+      input.className = "cb-plain-input";
+      input.dataset.releuCloudField = "true";
+      wrap.append(input);
+    }
+    input.type = config.type ?? "text";
+    input.value = config.value ?? "";
+    input.placeholder = config.placeholder ?? "";
+    input.readOnly = Boolean(config.readOnly);
+    input.disabled = Boolean(config.disabled);
+    if (config.mono) {
+      input.style.fontFamily = "ui-monospace, monospace";
+      input.style.fontSize = ".82rem";
+    } else {
+      input.style.fontFamily = "";
+      input.style.fontSize = "";
+    }
+    Object.entries(config.dataset ?? {}).forEach(([key, value]) => {
+      input.dataset[key] = value;
+    });
+    return input;
+  };
+  const setFieldText = (wrap, text, muted = false, mono = false) => {
+    if (!wrap) return null;
+    let value = wrap.querySelector(".cb-input-value");
+    if (!value) {
+      wrap.querySelector("input[data-releu-cloud-field]")?.remove();
+      value = document.createElement("div");
+      value.className = "cb-input-value";
+      wrap.append(value);
+    }
+    value.textContent = text;
+    value.style.color = muted ? "oklch(0.442 0.017 285.786)" : "";
+    value.style.fontWeight = muted ? "400" : "";
+    value.style.fontFamily = mono ? "ui-monospace, monospace" : "";
+    value.style.fontSize = mono ? ".82rem" : "";
+    return value;
+  };
+  const saveCloudSettings = async () => {
+    const payload = await api("/api/cloud-backup/settings", {
+      method: "POST",
+      body: {
+        enabled: Boolean(state.cloudBackupSettings?.enabled),
+        provider: cloudProvider,
+        deviceLabel: String(APP_STATE.cloudBackup.draft.deviceLabel ?? "").trim(),
+        targetRestoreKey: String(APP_STATE.cloudBackup.draft.targetRestoreKey ?? "").trim(),
+      },
+    });
+    APP_STATE.state = payload.state ?? APP_STATE.state;
+    APP_STATE.cloudBackup.status = payload.status ?? APP_STATE.cloudBackup.status;
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+  };
+
+  const authTabs = authPanel.querySelectorAll("[data-auth-tab]");
+  authTabs.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.authTab === cloudAuthScreen);
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", () => {
+      APP_STATE.cloudBackup.authScreen = button.dataset.authTab === "signup" ? "signup" : "login";
+      patchCloudBackupPage();
+    });
+  });
+  setFieldInput(findWrap(authPanel, "Device Label"), {
+    value: cloudDraft.deviceLabel,
+    placeholder: "My desktop PC",
+    dataset: { releuCloudDeviceLabel: "true" },
+  });
+  setFieldInput(findWrap(authPanel, "Cloud Username"), {
+    value: cloudDraft.accountUsername,
+    placeholder: "alex",
+    dataset: { releuCloudAccountUsername: "true" },
+  });
+  setFieldInput(findWrap(authPanel, "Cloud Password"), {
+    type: "password",
+    value: cloudDraft.accountPassword,
+    placeholder: "Log in to backup",
+    dataset: { releuCloudAccountPassword: "true" },
+  });
+  const authStatus = authPanel.querySelector(".cb-status");
+  if (authStatus) {
+    authStatus.innerHTML = `<strong style="color:oklch(0.871 0.006 286.286);">Connection:</strong> ${escapeHtml(cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready")}<br>${escapeHtml(cloudAuthScreen === "signup" ? "Create a cloud account first. Releu keeps backup keys, upload, restore, and history hidden until sign-up succeeds." : "Before log in, Releu keeps backup key, shared key, upload, download, restore, and backup history hidden.")}${cloud.functionError ? `<br><span style="color:#fecaca;">${escapeHtml(cloud.functionError)}</span>` : ""}${cloud.authError ? `<br><span style="color:#fecaca;">${escapeHtml(cloud.authError)}</span>` : ""}`;
+  }
+  const authButtons = authPanel.querySelectorAll(".cb-actions .cb-btn");
+  const signupAuthButton = authButtons[0];
+  const loginAuthButton = authButtons[1];
+  const refreshAuthButton = authButtons[2];
+  const bindAuthAction = (button, mode) => {
+    if (!button) return;
+    button.textContent = mode === "signup" ? "Create Account" : "Log In";
+    delete button.dataset.go;
+    button.dataset.releuCloudAction = mode;
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async () => {
+      const deviceInput = authPanel.querySelector("[data-releu-cloud-device-label]");
+      const userInput = authPanel.querySelector("[data-releu-cloud-account-username]");
+      const passInput = authPanel.querySelector("[data-releu-cloud-account-password]");
+      APP_STATE.cloudBackup.draft.deviceLabel = deviceInput?.value ?? "";
+      APP_STATE.cloudBackup.draft.accountUsername = userInput?.value ?? "";
+      APP_STATE.cloudBackup.draft.accountPassword = passInput?.value ?? "";
+      try {
+        setButtonBusy(button, true, mode === "signup" ? "Registering..." : "Logging In...");
+        const payload = await api(mode === "signup" ? "/api/cloud-backup/register" : "/api/cloud-backup/login", {
+          method: "POST",
+          body: {
+            username: userInput?.value ?? "",
+            password: passInput?.value ?? "",
+            deviceLabel: deviceInput?.value ?? "",
+          },
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+        APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+        APP_STATE.cloudBackup.draft.accountPassword = "";
+        APP_STATE.cloudBackup.authScreen = mode === "signup" ? "signup" : "login";
+        APP_STATE.cloudBackup.currentPanel = "dashboard";
+        if (typeof window.goTo === "function") window.goTo("dashboard");
+        patchCloudBackupPage();
+        showStatus(mode === "signup" ? "Cloud backup account created." : "Cloud backup login saved.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  };
+  bindAuthAction(signupAuthButton, "signup");
+  bindAuthAction(loginAuthButton, "login");
+  if (refreshAuthButton && refreshAuthButton.dataset.releuBound !== "true") {
+    refreshAuthButton.dataset.releuBound = "true";
+    refreshAuthButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(refreshAuthButton, true, "Refreshing...");
+        await refreshCloudBackupStatus(true);
+        patchCloudBackupPage();
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(refreshAuthButton, false);
+      }
+    });
+  }
+  authPanel.querySelectorAll("[data-releu-cloud-device-label],[data-releu-cloud-account-username],[data-releu-cloud-account-password]").forEach((input) => {
+    if (input.dataset.releuDraftBound === "true") return;
+    input.dataset.releuDraftBound = "true";
+    input.addEventListener("input", () => {
+      if (input.hasAttribute("data-releu-cloud-device-label")) APP_STATE.cloudBackup.draft.deviceLabel = input.value;
+      if (input.hasAttribute("data-releu-cloud-account-username")) APP_STATE.cloudBackup.draft.accountUsername = input.value;
+      if (input.hasAttribute("data-releu-cloud-account-password")) APP_STATE.cloudBackup.draft.accountPassword = input.value;
+    });
+  });
+
+  setFieldInput(findWrap(dashboardPanel, "Device Label"), {
+    value: cloudDraft.deviceLabel,
+    placeholder: "My desktop PC",
+    dataset: { releuCloudDeviceLabel: "true" },
+  });
+  setFieldText(findWrap(dashboardPanel, "My Backup Key"), cloud.restoreKey || "Not available", false, true);
+  setFieldInput(findWrap(dashboardPanel, "Shared Backup Key (Optional)"), {
+    value: cloudDraft.targetRestoreKey,
+    placeholder: "Enter another user's key to upload or restore their backup space",
+    dataset: { releuCloudTargetRestoreKey: "true" },
+  });
+  dashboardPanel.querySelectorAll("[data-releu-cloud-device-label],[data-releu-cloud-target-restore-key]").forEach((input) => {
+    if (input.dataset.releuDraftBound === "true") return;
+    input.dataset.releuDraftBound = "true";
+    input.addEventListener("input", () => {
+      if (input.hasAttribute("data-releu-cloud-device-label")) APP_STATE.cloudBackup.draft.deviceLabel = input.value;
+      if (input.hasAttribute("data-releu-cloud-target-restore-key")) APP_STATE.cloudBackup.draft.targetRestoreKey = input.value;
+    });
+    input.addEventListener("blur", async () => {
+      try {
+        await saveCloudSettings();
+      } catch (error) {
+        showError(error);
+      }
+    });
+  });
+  const chips = dashboardPanel.querySelectorAll(".cb-chip");
+  if (chips[0]) chips[0].textContent = `Connection: ${cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready"}`;
+  if (chips[1]) chips[1].textContent = `Log In: ${cloud.loggedIn ? cloud.accountUsername || "account" : "Not logged in"}`;
+  if (chips[2]) chips[2].textContent = `Upload limit: ${uploadLimitLabel}`;
+  if (chips[3]) chips[3].textContent = `Cloud used: ${formatBytes(cloud.usedBytes ?? 0)}`;
+  if (chips[4]) chips[4].textContent = `Saved backups: ${String(cloud.backupsCount ?? 0)}`;
+  const dashboardStatus = dashboardPanel.querySelector(".cb-status");
+  if (dashboardStatus) {
+    dashboardStatus.innerHTML = `${escapeHtml(cloudActivityPolicyText || "Cloud backup is ready.")}${cloud.functionError ? `<div style="margin-top:.5rem;color:#fecaca;">${escapeHtml(cloud.functionError)}</div>` : ""}${cloud.authError ? `<div style="margin-top:.5rem;color:#fecaca;">${escapeHtml(cloud.authError)}</div>` : ""}${!cloud.functionError ? `<div style="margin-top:.5rem;">Latest backup: <span style="color:oklch(0.967 0.001 286.375);">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>` : ""}`;
+  }
+  const dashboardButtons = dashboardPanel.querySelectorAll(".cb-actions .cb-btn");
+  const uploadButton = dashboardButtons[0];
+  const rotateButton = dashboardButtons[1];
+  const logoutButton = dashboardButtons[2];
+  if (uploadButton && uploadButton.dataset.releuBound !== "true") {
+    uploadButton.dataset.releuBound = "true";
+    uploadButton.addEventListener("click", async () => {
+      try {
+        APP_STATE.cloudBackup.draft.deviceLabel = dashboardPanel.querySelector("[data-releu-cloud-device-label]")?.value ?? APP_STATE.cloudBackup.draft.deviceLabel;
+        APP_STATE.cloudBackup.draft.targetRestoreKey = dashboardPanel.querySelector("[data-releu-cloud-target-restore-key]")?.value ?? APP_STATE.cloudBackup.draft.targetRestoreKey;
+        setButtonBusy(uploadButton, true, state.cloudBackupSettings?.enabled ? "Uploading..." : "Enabling...");
+        if (!APP_STATE.state?.cloudBackupSettings?.enabled) {
+          const settingsPayload = await api("/api/cloud-backup/settings", {
+            method: "POST",
+            body: {
+              enabled: true,
+              provider: cloudProvider,
+              deviceLabel: APP_STATE.cloudBackup.draft.deviceLabel,
+              targetRestoreKey: APP_STATE.cloudBackup.draft.targetRestoreKey,
+            },
+          });
+          APP_STATE.state = settingsPayload.state ?? APP_STATE.state;
+          APP_STATE.cloudBackup.status = settingsPayload.status ?? APP_STATE.cloudBackup.status;
+        } else {
+          await saveCloudSettings();
+        }
+        showStatus("Creating and uploading a full cloud backup...");
+        const payload = await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/upload`, {
+          method: "POST",
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.cloudBackup.status = payload.upload?.cloudBackup ?? APP_STATE.cloudBackup.status;
+        APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+        patchCloudBackupPage();
+        showStatus("Cloud backup uploaded.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(uploadButton, false);
+      }
+    });
+  }
+  if (rotateButton && rotateButton.dataset.releuBound !== "true") {
+    rotateButton.dataset.releuBound = "true";
+    rotateButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(rotateButton, true, "Rotating...");
+        const payload = await api("/api/cloud-backup/rotate-key", { method: "POST" });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+        APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+        patchCloudBackupPage();
+        showStatus("Cloud backup key rotated.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(rotateButton, false);
+      }
+    });
+  }
+  if (logoutButton && logoutButton.dataset.releuBound !== "true") {
+    logoutButton.dataset.releuBound = "true";
+    logoutButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(logoutButton, true, "Logging Out...");
+        const payload = await api("/api/cloud-backup/logout", { method: "POST" });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+        APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+        APP_STATE.cloudBackup.draft.accountPassword = "";
+        APP_STATE.cloudBackup.authScreen = "login";
+        APP_STATE.cloudBackup.currentPanel = "auth";
+        if (typeof window.goTo === "function") window.goTo("auth");
+        patchCloudBackupPage();
+        showStatus("Cloud backup login removed.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(logoutButton, false);
+      }
+    });
+  }
+  const historyContent = [...dashboardPanel.querySelectorAll(".fi-section-content")][1];
+  if (historyContent) {
+    historyContent.innerHTML = cloud.backups?.length
+      ? cloud.backups
+          .map(
+            (entry) => `
+          <div class="cb-backup-row">
+            <div>
+              <div class="cb-backup-name">${escapeHtml(entry.backup_name ?? "Backup")}</div>
+              <div class="cb-backup-meta">${escapeHtml(formatDate(entry.created_at ?? entry.updated_at))} • ${escapeHtml(formatBytes(entry.size_bytes ?? 0))}</div>
+            </div>
+            <div class="cb-actions">
+              <button type="button" class="cb-btn" data-releu-cloud-download="${escapeHtml(entry.id)}">Download</button>
+              <button type="button" class="cb-btn" data-releu-cloud-restore="${escapeHtml(entry.id)}">Restore</button>
+            </div>
+          </div>`,
+          )
+          .join("")
+      : `<div class="cb-status">No cloud backups uploaded yet.</div>`;
+  }
+  dashboardPanel.querySelectorAll("[data-releu-cloud-download]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async () => {
+      try {
+        setButtonBusy(button, true, "Downloading...");
+        await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/download`, {
+          method: "POST",
+          body: { backupId: button.dataset.releuCloudDownload },
+        });
+        showStatus("Cloud backup downloaded to the local Releu data folder.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+  dashboardPanel.querySelectorAll("[data-releu-cloud-restore]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async () => {
+      if (!window.confirm("Restore this cloud backup onto the current server? The server must stay stopped during the restore.")) return;
+      try {
+        setButtonBusy(button, true, "Restoring...");
+        await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/restore`, {
+          method: "POST",
+          body: { backupId: button.dataset.releuCloudRestore },
+        });
+        await refreshState(serverId);
+        await refreshCloudBackupStatus(true);
+        patchCloudBackupPage();
+        showStatus("Cloud backup restored.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+}
+
+function patchCloudBackupPage() {
+  const state = APP_STATE.state;
+  const server = activeServer();
+  if (!server) return;
+  const serverId = activeServerId();
+  preserveCloudBackupDraft(document);
+  maybeRefreshCloudBackupStatus(patchCloudBackupPage);
+  const mount = document.querySelector(".fi-page-content");
+  if (!mount) return;
+  const cloud = APP_STATE.cloudBackup.status ?? {};
+  const cloudProvider = cloud.provider ?? state.cloudBackupSettings?.provider ?? "website";
+  const cloudAuthScreen = APP_STATE.cloudBackup.authScreen === "signup" ? "signup" : "login";
+  const cloudDraft = {
+    deviceLabel:
+      String(APP_STATE.cloudBackup.draft.deviceLabel ?? "").trim() ||
+      String(cloud.deviceLabel ?? state.cloudBackupSettings?.deviceLabel ?? "").trim(),
+    accountUsername:
+      String(APP_STATE.cloudBackup.draft.accountUsername ?? "").trim() ||
+      String(cloud.accountUsername ?? state.cloudBackupSettings?.accountUsername ?? "").trim(),
+    accountPassword: String(APP_STATE.cloudBackup.draft.accountPassword ?? ""),
+    targetRestoreKey:
+      String(APP_STATE.cloudBackup.draft.targetRestoreKey ?? "").trim() ||
+      String(cloud.targetRestoreKey ?? state.cloudBackupSettings?.targetRestoreKey ?? "").trim(),
+  };
+  const uploadLimitBytes =
+    Number(cloud.uploadLimitBytes ?? (state.cloudBackupSettings?.uploadLimitMb ?? 50) * 1024 * 1024) || 0;
+  const uploadLimitLabel = cloud.uploadLimitLabel ?? formatBytes(uploadLimitBytes);
+  const cloudActivityPolicyText = "Cloud backup is ready.";
+  const pageMap = {
+    Servers: "servers.html",
+    Overview: "overview.html",
+    Console: "console.html",
+    Players: "players.html",
+    Files: "files.html",
+    Backups: "backups.html",
+    "Cloud Backup": "cloud-backup.html",
+    Worlds: "worlds.html",
+    "Add-ons / Mods": "addons-mods.html",
+    Software: "software.html",
+    Misc: "misc.html",
+    Settings: "settings.html",
+  };
+  document.querySelector(".fi-sidebar-header-logo-ctn a")?.setAttribute("href", buildLocalPageHref("servers.html", serverId));
+  document.querySelectorAll(".fi-sidebar-item").forEach((item) => {
+    const labelNode = item.querySelector(".fi-sidebar-item-label");
+    const label = labelNode?.textContent?.trim();
+    const anchor = item.querySelector("a.fi-sidebar-item-btn");
+    const pageName = label ? pageMap[label] : null;
+    if (!anchor || !pageName) return;
+    anchor.setAttribute("href", buildLocalPageHref(pageName, serverId));
+    item.classList.toggle("fi-active", PAGE === pageName);
+  });
+
+  const authPanel = mount.querySelector("#panel-auth");
+  const dashboardPanel = mount.querySelector("#panel-dashboard");
+  if (!authPanel || !dashboardPanel) return;
+  APP_STATE.cloudBackup.currentPanel = "auth";
+  authPanel.style.display = "block";
+  dashboardPanel.style.display = "none";
+
+  mount.style.position = "relative";
+  mount.querySelectorAll(".cb-demo-panel, .fi-section").forEach((node) => {
+    node.style.opacity = "0.42";
+    node.style.filter = "grayscale(0.45)";
+  });
+  mount.querySelectorAll("button").forEach((button) => {
+    button.disabled = true;
+    button.style.pointerEvents = "none";
+    button.removeAttribute("data-go");
+  });
+  mount.querySelectorAll("[contenteditable], .cb-auth-tab").forEach((node) => {
+    node.removeAttribute("contenteditable");
+    node.removeAttribute("role");
+    node.removeAttribute("tabindex");
+    node.style.pointerEvents = "none";
+  });
+
+  let underDevelopmentNotice = mount.querySelector("[data-releu-cloud-under-development]");
+  if (!underDevelopmentNotice) {
+    underDevelopmentNotice = document.createElement("div");
+    underDevelopmentNotice.dataset.releuCloudUnderDevelopment = "true";
+    underDevelopmentNotice.style.position = "absolute";
+    underDevelopmentNotice.style.inset = "1.5rem";
+    underDevelopmentNotice.style.display = "flex";
+    underDevelopmentNotice.style.alignItems = "center";
+    underDevelopmentNotice.style.justifyContent = "center";
+    underDevelopmentNotice.style.pointerEvents = "none";
+    underDevelopmentNotice.style.zIndex = "20";
+    underDevelopmentNotice.innerHTML = `
+      <div style="max-width:34rem;width:100%;border:1px solid oklch(0.274 0.006 286.033);border-radius:1rem;background:rgba(11,13,16,.92);backdrop-filter:blur(10px);padding:1.25rem 1.4rem;box-shadow:0 16px 40px rgba(0,0,0,.35);text-align:center;">
+        <div style="font-size:.74rem;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:oklch(0.552 0.016 285.938);">Under Development</div>
+        <div style="margin-top:.55rem;font-size:1.2rem;font-weight:700;color:oklch(0.967 0.001 286.375);">Cloud Backup is temporarily disabled.</div>
+        <div style="margin-top:.55rem;font-size:.92rem;line-height:1.6;color:oklch(0.708 0.01 286.286);">This section is being rebuilt for Windows, Linux, and macOS releases. The current Cloud UI is intentionally greyed out until that work is finished.</div>
+      </div>`;
+    mount.append(underDevelopmentNotice);
+  }
+  return;
+
+  const findWrap = (root, label) =>
+    [...root.querySelectorAll(".cb-input-wrp")].find(
+      (node) => node.querySelector(".cb-input-prefix-label")?.textContent?.trim().toLowerCase() === label.toLowerCase(),
+    );
+  const normalizeCloudEditableText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+  const setFieldText = (wrap, text, muted = false, mono = false) => {
+    const value = wrap?.querySelector(".cb-input-value");
+    if (!value) return null;
+    value.textContent = text;
+    value.style.color = muted ? "oklch(0.442 0.017 285.786)" : "";
+    value.style.fontWeight = muted ? "400" : "";
+    value.style.fontFamily = mono ? "ui-monospace, monospace" : "";
+    value.style.fontSize = mono ? ".82rem" : "";
+    value.removeAttribute("contenteditable");
+    value.removeAttribute("role");
+    value.removeAttribute("tabindex");
+    return value;
+  };
+  const saveCloudSettings = async () => {
+    const payload = await api("/api/cloud-backup/settings", {
+      method: "POST",
+      body: {
+        enabled: Boolean(APP_STATE.state?.cloudBackupSettings?.enabled),
+        provider: cloudProvider,
+        deviceLabel: String(APP_STATE.cloudBackup.draft.deviceLabel ?? "").trim(),
+        targetRestoreKey: String(APP_STATE.cloudBackup.draft.targetRestoreKey ?? "").trim(),
+      },
+    });
+    APP_STATE.state = payload.state ?? APP_STATE.state;
+    APP_STATE.cloudBackup.status = payload.status ?? APP_STATE.cloudBackup.status;
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+  };
+  const setEditableFieldText = (wrap, config) => {
+    const value = wrap?.querySelector(".cb-input-value");
+    if (!value) return null;
+    const currentValue = normalizeCloudEditableText(config.value);
+    const placeholder = String(config.placeholder ?? "");
+    const isFocused = document.activeElement === value;
+    const shouldMask = Boolean(config.mask);
+    Object.entries(config.dataset ?? {}).forEach(([key, datasetValue]) => {
+      value.dataset[key] = datasetValue;
+    });
+    value.dataset.releuCloudEditable = "true";
+    value.dataset.releuPlaceholder = placeholder;
+    value.contentEditable = "plaintext-only";
+    value.setAttribute("role", "textbox");
+    value.setAttribute("tabindex", "0");
+    value.spellcheck = false;
+    if (!isFocused) {
+      value.textContent = currentValue || placeholder;
+      value.dataset.releuPlaceholderVisible = currentValue ? "false" : "true";
+    }
+    value.style.color = currentValue ? "" : "oklch(0.442 0.017 285.786)";
+    value.style.fontWeight = currentValue ? "600" : "400";
+    value.style.fontFamily = config.mono ? "ui-monospace, monospace" : "";
+    value.style.fontSize = config.mono ? ".82rem" : "";
+    value.style.webkitTextSecurity = shouldMask && currentValue ? "disc" : "";
+    if (value.dataset.releuEditableBound === "true") return value;
+    value.dataset.releuEditableBound = "true";
+    value.addEventListener("focus", () => {
+      if (value.dataset.releuPlaceholderVisible === "true") {
+        value.textContent = "";
+        value.dataset.releuPlaceholderVisible = "false";
+      }
+      value.style.webkitTextSecurity = shouldMask ? "disc" : "";
+    });
+    value.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        value.blur();
+      }
+    });
+    value.addEventListener("input", () => {
+      const nextValue = normalizeCloudEditableText(value.textContent);
+      value.dataset.releuPlaceholderVisible = nextValue ? "false" : "true";
+      value.style.color = nextValue ? "" : "oklch(0.442 0.017 285.786)";
+      value.style.fontWeight = nextValue ? "600" : "400";
+      value.style.webkitTextSecurity = shouldMask && nextValue ? "disc" : "";
+      if (value.hasAttribute("data-releu-cloud-device-label")) APP_STATE.cloudBackup.draft.deviceLabel = nextValue;
+      if (value.hasAttribute("data-releu-cloud-account-username")) APP_STATE.cloudBackup.draft.accountUsername = nextValue;
+      if (value.hasAttribute("data-releu-cloud-account-password")) APP_STATE.cloudBackup.draft.accountPassword = nextValue;
+      if (value.hasAttribute("data-releu-cloud-target-restore-key")) APP_STATE.cloudBackup.draft.targetRestoreKey = nextValue;
+    });
+    value.addEventListener("blur", async () => {
+      const nextValue = normalizeCloudEditableText(value.textContent);
+      if (value.hasAttribute("data-releu-cloud-device-label")) APP_STATE.cloudBackup.draft.deviceLabel = nextValue;
+      if (value.hasAttribute("data-releu-cloud-account-username")) APP_STATE.cloudBackup.draft.accountUsername = nextValue;
+      if (value.hasAttribute("data-releu-cloud-account-password")) APP_STATE.cloudBackup.draft.accountPassword = nextValue;
+      if (value.hasAttribute("data-releu-cloud-target-restore-key")) APP_STATE.cloudBackup.draft.targetRestoreKey = nextValue;
+      value.textContent = nextValue || placeholder;
+      value.dataset.releuPlaceholderVisible = nextValue ? "false" : "true";
+      value.style.color = nextValue ? "" : "oklch(0.442 0.017 285.786)";
+      value.style.fontWeight = nextValue ? "600" : "400";
+      value.style.webkitTextSecurity = shouldMask && nextValue ? "disc" : "";
+      try {
+        await saveCloudSettings();
+      } catch (error) {
+        showError(error);
+      }
+    });
+    return value;
+  };
+
+  const authTabs = authPanel.querySelectorAll("[data-auth-tab]");
+  authTabs.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.authTab === cloudAuthScreen);
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", () => {
+      APP_STATE.cloudBackup.authScreen = button.dataset.authTab === "signup" ? "signup" : "login";
+      patchCloudBackupPage();
+    });
+  });
+  setEditableFieldText(findWrap(authPanel, "Device Label"), {
+    value: cloudDraft.deviceLabel,
+    placeholder: "My desktop PC",
+    dataset: { releuCloudDeviceLabel: "true" },
+  });
+  setEditableFieldText(findWrap(authPanel, "Cloud Username"), {
+    value: cloudDraft.accountUsername,
+    placeholder: "alex",
+    dataset: { releuCloudAccountUsername: "true" },
+  });
+  setEditableFieldText(findWrap(authPanel, "Cloud Password"), {
+    value: cloudDraft.accountPassword,
+    placeholder: "Log in to backup",
+    mask: true,
+    dataset: { releuCloudAccountPassword: "true" },
+  });
+  const authStatus = authPanel.querySelector(".cb-status");
+  if (authStatus) {
+    authStatus.innerHTML =
+      `<strong style="color:oklch(0.871 0.006 286.286);">Connection:</strong> ${escapeHtml(cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready")}` +
+      `<br>${escapeHtml(cloudAuthScreen === "signup" ? "Create a cloud account first. Releu keeps backup key, shared key, upload, download, restore, and backup history hidden until sign-up succeeds." : "Before log in, Releu keeps backup key, shared key, upload, download, restore, and backup history hidden.")}` +
+      `${cloud.functionError ? `<br><span style="color:#fecaca;">${escapeHtml(cloud.functionError)}</span>` : ""}` +
+      `${cloud.authError ? `<br><span style="color:#fecaca;">${escapeHtml(cloud.authError)}</span>` : ""}`;
+  }
+  const authButtons = authPanel.querySelectorAll(".cb-actions .cb-btn");
+  const signupAuthButton = authButtons[0];
+  const loginAuthButton = authButtons[1];
+  const refreshAuthButton = authButtons[2];
+  const bindAuthAction = (button, mode) => {
+    if (!button) return;
+    delete button.dataset.go;
+    button.removeAttribute("data-go");
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async () => {
+      const deviceValue =
+        normalizeCloudEditableText(authPanel.querySelector("[data-releu-cloud-device-label]")?.textContent) ||
+        "";
+      const usernameValue =
+        normalizeCloudEditableText(authPanel.querySelector("[data-releu-cloud-account-username]")?.textContent) ||
+        "";
+      const passwordValue =
+        normalizeCloudEditableText(authPanel.querySelector("[data-releu-cloud-account-password]")?.textContent) ||
+        "";
+      APP_STATE.cloudBackup.draft.deviceLabel = deviceValue;
+      APP_STATE.cloudBackup.draft.accountUsername = usernameValue;
+      APP_STATE.cloudBackup.draft.accountPassword = passwordValue;
+      try {
+        setButtonBusy(button, true, mode === "signup" ? "Registering..." : "Logging In...");
+        const payload = await api(mode === "signup" ? "/api/cloud-backup/register" : "/api/cloud-backup/login", {
+          method: "POST",
+          body: {
+            username: usernameValue,
+            password: passwordValue,
+            deviceLabel: deviceValue,
+          },
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+        APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+        APP_STATE.cloudBackup.draft.accountPassword = "";
+        APP_STATE.cloudBackup.authScreen = mode;
+        APP_STATE.cloudBackup.currentPanel = "dashboard";
+        if (typeof window.goTo === "function") window.goTo("dashboard");
+        patchCloudBackupPage();
+        showStatus(mode === "signup" ? "Cloud backup account created." : "Cloud backup login saved.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  };
+  bindAuthAction(signupAuthButton, "signup");
+  bindAuthAction(loginAuthButton, "login");
+  if (refreshAuthButton) {
+    delete refreshAuthButton.dataset.go;
+    refreshAuthButton.removeAttribute("data-go");
+  }
+  if (refreshAuthButton && refreshAuthButton.dataset.releuBound !== "true") {
+    refreshAuthButton.dataset.releuBound = "true";
+    refreshAuthButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(refreshAuthButton, true, "Refreshing...");
+        await refreshCloudBackupStatus(true);
+        patchCloudBackupPage();
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(refreshAuthButton, false);
+      }
+    });
+  }
+
+  setEditableFieldText(findWrap(dashboardPanel, "Device Label"), {
+    value: cloudDraft.deviceLabel,
+    placeholder: "My desktop PC",
+    dataset: { releuCloudDeviceLabel: "true" },
+  });
+  setFieldText(findWrap(dashboardPanel, "My Backup Key"), cloud.restoreKey || "Not available yet", !cloud.restoreKey, true);
+  setEditableFieldText(findWrap(dashboardPanel, "Shared Backup Key (Optional)"), {
+    value: cloudDraft.targetRestoreKey,
+    placeholder: "Enter another user's key to upload or restore their backup space",
+    dataset: { releuCloudTargetRestoreKey: "true" },
+  });
+
+  const chips = dashboardPanel.querySelectorAll(".cb-chip");
+  if (chips[0]) chips[0].textContent = `Connection: ${cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready"}`;
+  if (chips[1]) chips[1].textContent = `Log In: ${cloud.loggedIn ? cloud.accountUsername || "account" : "Not logged in"}`;
+  if (chips[2]) chips[2].textContent = `Upload limit: ${uploadLimitLabel}`;
+  if (chips[3]) chips[3].textContent = `Cloud used: ${formatBytes(cloud.usedBytes ?? 0)}`;
+  if (chips[4]) chips[4].textContent = `Saved backups: ${String(cloud.backupsCount ?? 0)}`;
+
+  const dashboardStatus = dashboardPanel.querySelector(".cb-status");
+  if (dashboardStatus) {
+    dashboardStatus.innerHTML =
+      `${escapeHtml(cloudActivityPolicyText)}` +
+      `${cloud.functionError ? `<div style="margin-top:.5rem;color:#fecaca;">${escapeHtml(cloud.functionError)}</div>` : ""}` +
+      `${cloud.authError ? `<div style="margin-top:.5rem;color:#fecaca;">${escapeHtml(cloud.authError)}</div>` : ""}` +
+      `${!cloud.functionError ? `<div style="margin-top:.5rem;">Latest backup: <span style="color:oklch(0.967 0.001 286.375);">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>` : ""}`;
+  }
+
+  const primaryActionRow = dashboardPanel.querySelector(".fi-section .cb-actions");
+  const dashboardButtons = primaryActionRow ? [...primaryActionRow.querySelectorAll(".cb-btn")] : [];
+  const uploadButton = dashboardButtons[0];
+  const rotateButton = dashboardButtons[1];
+  const logoutButton = dashboardButtons[2];
+
+  if (uploadButton && uploadButton.dataset.releuBound !== "true") {
+    uploadButton.dataset.releuBound = "true";
+    uploadButton.addEventListener("click", async () => {
+      try {
+        APP_STATE.cloudBackup.draft.deviceLabel =
+          normalizeCloudEditableText(dashboardPanel.querySelector("[data-releu-cloud-device-label]")?.textContent) ||
+          APP_STATE.cloudBackup.draft.deviceLabel;
+        APP_STATE.cloudBackup.draft.targetRestoreKey =
+          normalizeCloudEditableText(dashboardPanel.querySelector("[data-releu-cloud-target-restore-key]")?.textContent) ||
+          "";
+        setButtonBusy(uploadButton, true, APP_STATE.state?.cloudBackupSettings?.enabled ? "Uploading..." : "Enabling...");
+        if (!APP_STATE.state?.cloudBackupSettings?.enabled) {
+          const settingsPayload = await api("/api/cloud-backup/settings", {
+            method: "POST",
+            body: {
+              enabled: true,
+              provider: cloudProvider,
+              deviceLabel: APP_STATE.cloudBackup.draft.deviceLabel,
+              targetRestoreKey: APP_STATE.cloudBackup.draft.targetRestoreKey,
+            },
+          });
+          APP_STATE.state = settingsPayload.state ?? APP_STATE.state;
+          APP_STATE.cloudBackup.status = settingsPayload.status ?? APP_STATE.cloudBackup.status;
+        } else {
+          await saveCloudSettings();
+        }
+        showStatus("Creating and uploading a full cloud backup...");
+        const payload = await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/upload`, {
+          method: "POST",
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.cloudBackup.status = payload.upload?.cloudBackup ?? APP_STATE.cloudBackup.status;
+        APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+        patchCloudBackupPage();
+        showStatus("Cloud backup uploaded.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(uploadButton, false);
+      }
+    });
+  }
+
+  if (rotateButton && rotateButton.dataset.releuBound !== "true") {
+    rotateButton.dataset.releuBound = "true";
+    rotateButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(rotateButton, true, cloud.restoreKey ? "Rotating..." : "Generating...");
+        const payload = await api(cloud.restoreKey ? "/api/cloud-backup/rotate-key" : "/api/cloud-backup/issue-key", {
+          method: "POST",
+          body: cloud.restoreKey
+            ? undefined
+            : {
+                deviceLabel:
+                  normalizeCloudEditableText(dashboardPanel.querySelector("[data-releu-cloud-device-label]")?.textContent) ||
+                  APP_STATE.cloudBackup.draft.deviceLabel,
+              },
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+        APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+        patchCloudBackupPage();
+        showStatus(cloud.restoreKey ? "Cloud backup key rotated." : "Cloud backup key generated.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(rotateButton, false);
+      }
+    });
+  }
+
+  if (logoutButton) {
+    delete logoutButton.dataset.go;
+    logoutButton.removeAttribute("data-go");
+  }
+  if (logoutButton && logoutButton.dataset.releuBound !== "true") {
+    logoutButton.dataset.releuBound = "true";
+    logoutButton.addEventListener("click", async () => {
+      if (!cloud.loggedIn) {
+        try {
+          setButtonBusy(logoutButton, true, "Refreshing...");
+          await refreshCloudBackupStatus(true);
+          patchCloudBackupPage();
+          showStatus("Cloud backup status refreshed.", "success");
+        } catch (error) {
+          showError(error);
+        } finally {
+          setButtonBusy(logoutButton, false);
+        }
+        return;
+      }
+      try {
+        setButtonBusy(logoutButton, true, "Logging Out...");
+        const payload = await api("/api/cloud-backup/logout", { method: "POST" });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
+        APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+        APP_STATE.cloudBackup.draft.accountPassword = "";
+        APP_STATE.cloudBackup.authScreen = "login";
+        APP_STATE.cloudBackup.currentPanel = "auth";
+        if (typeof window.goTo === "function") window.goTo("auth");
+        patchCloudBackupPage();
+        showStatus("Cloud backup login removed.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(logoutButton, false);
+      }
+    });
+  }
+
+  const historyContent = [...dashboardPanel.querySelectorAll(".fi-section-content")][1];
+  if (historyContent) {
+    historyContent.innerHTML = cloud.backups?.length
+      ? cloud.backups
+          .map(
+            (entry) => `
+          <div class="cb-backup-row">
+            <div>
+              <div class="cb-backup-name">${escapeHtml(entry.backup_name ?? "Backup")}</div>
+              <div class="cb-backup-meta">${escapeHtml(formatDate(entry.created_at ?? entry.updated_at))} - ${escapeHtml(formatBytes(entry.size_bytes ?? 0))}</div>
+            </div>
+            <div class="cb-actions">
+              <button type="button" class="cb-btn" data-releu-cloud-download="${escapeHtml(entry.id)}">Download</button>
+              <button type="button" class="cb-btn" data-releu-cloud-restore="${escapeHtml(entry.id)}">Restore</button>
+            </div>
+          </div>`,
+          )
+          .join("")
+      : `<div class="cb-status">No cloud backups uploaded yet.</div>`;
+  }
+
+  dashboardPanel.querySelectorAll("[data-releu-cloud-download]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async () => {
+      try {
+        setButtonBusy(button, true, "Downloading...");
+        await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/download`, {
+          method: "POST",
+          body: { backupId: button.dataset.releuCloudDownload },
+        });
+        showStatus("Cloud backup downloaded to the local Releu data folder.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+  dashboardPanel.querySelectorAll("[data-releu-cloud-restore]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async () => {
+      if (!window.confirm("Restore this cloud backup onto the current server? The server must stay stopped during the restore.")) return;
+      try {
+        setButtonBusy(button, true, "Restoring...");
+        await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/restore`, {
+          method: "POST",
+          body: { backupId: button.dataset.releuCloudRestore },
+        });
+        await refreshState(serverId);
+        await refreshCloudBackupStatus(true);
+        patchCloudBackupPage();
+        showStatus("Cloud backup restored.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  });
+}
+
 function patchSettingsPage() {
   const state = APP_STATE.state;
   const server = activeServer();
@@ -5169,14 +7446,6 @@ function patchSettingsPage() {
   const serverId = activeServerId();
   const properties = server.server?.properties ?? {};
   const boolProp = (key, fallback = false) => String(properties[key] ?? String(fallback)).toLowerCase() === "true";
-  if (
-    !APP_STATE.cloudBackup.loading &&
-    (!APP_STATE.cloudBackup.status || Date.now() - APP_STATE.cloudBackup.lastFetchedAt > 15000)
-  ) {
-    refreshCloudBackupStatus()
-      .then(() => patchSettingsPage())
-      .catch(() => {});
-  }
   document
     .querySelector("#form\\.uuid")
     ?.closest(".fi-grid-col")
@@ -5286,12 +7555,36 @@ function patchSettingsPage() {
     });
   });
 
-  [...document.querySelectorAll(".rounded-lg.border.border-\\[\\#2b3642\\]")].forEach((card) => {
+  const setPlayitBadge = (valueNode, text, tone) => {
+    if (!valueNode) return;
+    const safeText = escapeHtml(text);
+    if (tone === "green") {
+      valueNode.innerHTML = `<span class="playit-badge playit-badge-green">● ${safeText}</span>`;
+      return;
+    }
+    if (tone === "blue") {
+      valueNode.innerHTML = `<span class="playit-badge playit-badge-blue">● ${safeText}</span>`;
+      return;
+    }
+    valueNode.innerHTML =
+      `<span class="playit-badge" style="color:#fca5a5;background:rgba(239,68,68,0.14);">● ${safeText}</span>`;
+  };
+
+  [
+    ...document.querySelectorAll(".rounded-lg.border.border-\\[\\#2b3642\\]"),
+    ...document.querySelectorAll(".playit-stat-card"),
+  ].forEach((card) => {
     const label = card.querySelector("dt")?.textContent?.trim()?.toLowerCase();
     const value = card.querySelector("dd");
     if (!label || !value) return;
-    if (label === "agent status") value.textContent = state.playit?.running ? "Connected" : state.playit?.secretConfigured ? "Linked" : "Not Linked";
-    if (label === "auto-start") value.textContent = state.playitSettings?.autoStart ? "Enabled" : "Disabled";
+    if (label === "agent status") {
+      setPlayitBadge(value, state.playit?.running ? "Connected" : "No", state.playit?.running ? "green" : "red");
+      return;
+    }
+    if (label === "auto-start") {
+      setPlayitBadge(value, state.playitSettings?.autoStart ? "Enabled" : "Disabled", "blue");
+      return;
+    }
     if (label === "public address") value.textContent = getPublicAddress(state, server) ?? "Run Server To Get Address";
     if (label === "tunnel target") value.textContent = state.playit?.recommendedTunnelTarget ?? `127.0.0.1:${server.server?.properties?.["server-port"] ?? 25565}`;
   });
@@ -5401,368 +7694,28 @@ function patchSettingsPage() {
       setButtonBusy(button, false);
     }
   }), resetButton && (resetButton.dataset.releuBound = "true");
-  let cloudSection = document.querySelector("[data-releu-cloud-section]");
-  if (!cloudSection) {
-    cloudSection = document.createElement("section");
-    cloudSection.className = "fi-section mt-6";
-    cloudSection.dataset.releuCloudSection = "true";
-    document.querySelector(".fi-page-content")?.append(cloudSection);
-  }
-  const cloud = APP_STATE.cloudBackup.status ?? {};
-  const cloudProvider = cloud.provider ?? state.cloudBackupSettings?.provider ?? "tailscale-ssh";
-  const usingTailscaleCloud = cloudProvider === "tailscale-ssh";
-  const uploadLimitBytes =
-    Number(cloud.uploadLimitBytes ?? (state.cloudBackupSettings?.uploadLimitMb ?? 50) * 1024 * 1024) ||
-    0;
-  const uploadLimitLabel = usingTailscaleCloud
-    ? (cloud.uploadLimitLabel ?? "Remote server disk")
-    : formatBytes(uploadLimitBytes);
-  cloudSection.innerHTML = `
-    <header class="fi-section-header">
-      <div>
-        <h2 class="fi-section-header-heading">Cloud Backup</h2>
-        <p class="fi-section-header-description">${usingTailscaleCloud ? "Store one rolling full-server backup on your Linux machine over Tailscale SSH." : "Upload full server backups to Supabase without exposing the private admin key in the public app."}</p>
-      </div>
-    </header>
-    <div class="fi-section-content-ctn">
-      <div class="fi-section-content" style="display:grid;gap:1rem;">
-        <div class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4 text-sm text-slate-300" style="display:grid;gap:1rem;">
-          <label style="display:flex;align-items:center;gap:.75rem;">
-            <input type="checkbox" data-releu-cloud-enabled ${state.cloudBackupSettings?.enabled ? "checked" : ""}>
-            <span>Enable cloud backup for this Releu install</span>
-          </label>
-          <label style="display:grid;gap:.5rem;">
-            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Device Label</span>
-            <input class="fi-input" data-releu-cloud-device-label type="text" value="${escapeHtml(cloud.deviceLabel ?? state.cloudBackupSettings?.deviceLabel ?? "")}" placeholder="My desktop PC">
-          </label>
-          ${usingTailscaleCloud ? `
-            <label style="display:grid;gap:.5rem;">
-              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Cloud Username</span>
-              <input class="fi-input" data-releu-cloud-account-username type="text" value="${escapeHtml(cloud.accountUsername ?? state.cloudBackupSettings?.accountUsername ?? "")}" placeholder="alex">
-            </label>
-            <label style="display:grid;gap:.5rem;">
-              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Cloud Password</span>
-              <input class="fi-input" data-releu-cloud-account-password type="password" value="" placeholder="Log in to backup">
-            </label>
-            <label style="display:grid;gap:.5rem;">
-              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">My Backup Key</span>
-              <input class="fi-input" type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Register or log in first">
-            </label>
-            <label style="display:grid;gap:.5rem;">
-              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Shared Backup Key (Optional)</span>
-              <input class="fi-input" data-releu-cloud-target-restore-key type="text" value="${escapeHtml(cloud.targetRestoreKey ?? state.cloudBackupSettings?.targetRestoreKey ?? "")}" placeholder="Enter another user's key to upload or restore their backup space">
-            </label>`
-            : `
-            <label style="display:grid;gap:.5rem;">
-              <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Restore Key</span>
-              <input class="fi-input" type="text" readonly value="${escapeHtml(cloud.restoreKey ?? "")}" placeholder="Generate a restore key first">
-            </label>`}
-          <div style="display:grid;gap:.65rem;" class="text-xs text-slate-400">
-            <div>${usingTailscaleCloud ? "Connection" : "Function"}: <span class="text-slate-200">${cloud.functionReady ? "Ready" : APP_STATE.cloudBackup.loading ? "Checking..." : "Not Ready"}</span></div>
-            ${usingTailscaleCloud ? `<div>Login: <span class="text-slate-200">${escapeHtml(cloud.loggedIn ? `Logged in as ${cloud.accountUsername || "account"}` : "Not logged in")}</span></div>` : ""}
-            <div>Upload limit: <span class="text-slate-200">${escapeHtml(uploadLimitLabel)}</span></div>
-            <div>Cloud used: <span class="text-slate-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
-            <div>Saved backups: <span class="text-slate-200">${escapeHtml(String(cloud.backupsCount ?? 0))}</span></div>
-            ${usingTailscaleCloud && cloud.usingSharedRestoreKey ? `<div>Target key: <span class="text-slate-200">Shared backup space</span></div>` : ""}
-            ${cloud.authError ? `<div style="color:#fca5a5;">${escapeHtml(cloud.authError)}</div>` : ""}
-            ${cloud.functionError ? `<div style="color:#fca5a5;">${escapeHtml(cloud.functionError)}</div>` : `<div>Latest backup: <span class="text-slate-200">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>`}
-          </div>
-          <div style="display:flex;flex-wrap:wrap;gap:.65rem;">
-            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-save>Save Settings</button>
-            ${usingTailscaleCloud
-              ? `
-                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-register>Register</button>
-                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-login>Log In</button>
-                ${cloud.loggedIn ? `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-logout>Log Out</button>` : ""}
-                ${cloud.loggedIn ? `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>` : ""}
-                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled || !cloud.loggedIn ? "disabled" : ""}>Backup To Cloud Now</button>`
-              : `
-                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-issue>${cloud.restoreKeyPresent ? "Regenerate Key" : "Generate Key"}</button>
-                ${!cloud.restoreKeyPresent ? "" : `<button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-rotate>Rotate Key</button>`}
-                <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-upload ${!state.cloudBackupSettings?.enabled || !cloud.restoreKeyPresent ? "disabled" : ""}>Backup To Cloud Now</button>`}
-            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-cloud-refresh>Refresh Status</button>
-          </div>
-        </div>
-        <div class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4 text-sm text-slate-300" style="display:grid;gap:.75rem;">
-          <div class="font-semibold text-slate-100">${usingTailscaleCloud ? "Rolling Cloud Backup" : "Cloud Backups"}</div>
-          ${
-            cloud.backups?.length
-              ? cloud.backups
-                  .map(
-                    (entry) => `
-              <div class="rounded-lg border border-[#2b3642] bg-black/30 px-4 py-4" style="display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;flex-wrap:wrap;">
-                <div style="display:grid;gap:.35rem;">
-                  <div class="font-medium text-slate-100">${escapeHtml(entry.backup_name ?? "Backup")}</div>
-                  <div class="text-xs text-slate-400">${escapeHtml(formatDate(entry.created_at ?? entry.updated_at))}</div>
-                  <div class="text-xs text-slate-500">${escapeHtml(formatBytes(entry.size_bytes ?? 0))}</div>
-                </div>
-                <div style="display:flex;gap:.55rem;flex-wrap:wrap;">
-                  <button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-releu-cloud-download="${escapeHtml(entry.id)}">Download</button>
-                  <button type="button" class="fi-btn fi-size-sm fi-ac-btn-action" data-releu-cloud-restore="${escapeHtml(entry.id)}">Restore</button>
-                </div>
-              </div>`,
-                  )
-                  .join("")
-              : `<div class="text-xs text-slate-400">No cloud backups uploaded yet.</div>`
-          }
-        </div>
-      </div>
-    </div>`; 
-  const cloudEnabled = cloudSection.querySelector("[data-releu-cloud-enabled]");
-  const cloudDeviceLabel = cloudSection.querySelector("[data-releu-cloud-device-label]");
-  const cloudAccountUsername = cloudSection.querySelector("[data-releu-cloud-account-username]");
-  const cloudAccountPassword = cloudSection.querySelector("[data-releu-cloud-account-password]");
-  const cloudTargetRestoreKey = cloudSection.querySelector("[data-releu-cloud-target-restore-key]");
-  const saveCloudButton = cloudSection.querySelector("[data-releu-cloud-save]");
-  const registerCloudButton = cloudSection.querySelector("[data-releu-cloud-register]");
-  const loginCloudButton = cloudSection.querySelector("[data-releu-cloud-login]");
-  const logoutCloudButton = cloudSection.querySelector("[data-releu-cloud-logout]");
-  const issueCloudButton = cloudSection.querySelector("[data-releu-cloud-issue]");
-  const rotateCloudButton = cloudSection.querySelector("[data-releu-cloud-rotate]");
-  const uploadCloudButton = cloudSection.querySelector("[data-releu-cloud-upload]");
-  const refreshCloudButton = cloudSection.querySelector("[data-releu-cloud-refresh]");
-  if (saveCloudButton && !saveCloudButton.dataset.releuBound) saveCloudButton.addEventListener("click", async () => {
-    try {
-      setButtonBusy(saveCloudButton, true, "Saving...");
-      const payload = await api("/api/cloud-backup/settings", {
-        method: "POST",
-        body: {
-          enabled: Boolean(cloudEnabled?.checked),
-          provider: cloudProvider,
-          deviceLabel: cloudDeviceLabel?.value ?? "",
-          targetRestoreKey: cloudTargetRestoreKey?.value ?? "",
-        },
-      });
-      APP_STATE.state = payload.state ?? APP_STATE.state;
-      APP_STATE.cloudBackup.status = payload.status ?? APP_STATE.cloudBackup.status;
-      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
-      patchSettingsPage();
-      showStatus("Cloud backup settings saved.", "success");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(saveCloudButton, false);
-    }
-  }), saveCloudButton.dataset.releuBound = "true";
-  if (registerCloudButton && !registerCloudButton.dataset.releuBound) registerCloudButton.addEventListener("click", async () => {
-    try {
-      setButtonBusy(registerCloudButton, true, "Registering...");
-      const payload = await api("/api/cloud-backup/register", {
-        method: "POST",
-        body: {
-          username: cloudAccountUsername?.value ?? "",
-          password: cloudAccountPassword?.value ?? "",
-          deviceLabel: cloudDeviceLabel?.value ?? "",
-        },
-      });
-      APP_STATE.state = payload.state ?? APP_STATE.state;
-      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
-      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
-      if (cloudAccountPassword) cloudAccountPassword.value = "";
-      patchSettingsPage();
-      showStatus("Cloud backup account created.", "success");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(registerCloudButton, false);
-    }
-  }), registerCloudButton.dataset.releuBound = "true";
-  if (loginCloudButton && !loginCloudButton.dataset.releuBound) loginCloudButton.addEventListener("click", async () => {
-    try {
-      setButtonBusy(loginCloudButton, true, "Logging In...");
-      const payload = await api("/api/cloud-backup/login", {
-        method: "POST",
-        body: {
-          username: cloudAccountUsername?.value ?? "",
-          password: cloudAccountPassword?.value ?? "",
-          deviceLabel: cloudDeviceLabel?.value ?? "",
-        },
-      });
-      APP_STATE.state = payload.state ?? APP_STATE.state;
-      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
-      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
-      if (cloudAccountPassword) cloudAccountPassword.value = "";
-      patchSettingsPage();
-      showStatus("Cloud backup login saved.", "success");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(loginCloudButton, false);
-    }
-  }), loginCloudButton.dataset.releuBound = "true";
-  if (logoutCloudButton && !logoutCloudButton.dataset.releuBound) logoutCloudButton.addEventListener("click", async () => {
-    try {
-      setButtonBusy(logoutCloudButton, true, "Logging Out...");
-      const payload = await api("/api/cloud-backup/logout", { method: "POST" });
-      APP_STATE.state = payload.state ?? APP_STATE.state;
-      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
-      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
-      if (cloudAccountPassword) cloudAccountPassword.value = "";
-      patchSettingsPage();
-      showStatus("Cloud backup login removed.", "success");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(logoutCloudButton, false);
-    }
-  }), logoutCloudButton.dataset.releuBound = "true";
-  if (issueCloudButton && !issueCloudButton.dataset.releuBound) issueCloudButton.addEventListener("click", async () => {
-    try {
-      setButtonBusy(issueCloudButton, true, "Generating...");
-      const payload = await api("/api/cloud-backup/issue-key", {
-        method: "POST",
-        body: {
-          deviceLabel: cloudDeviceLabel?.value ?? "",
-        },
-      });
-      APP_STATE.state = payload.state ?? APP_STATE.state;
-      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
-      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
-      patchSettingsPage();
-      showStatus("Cloud backup key ready.", "success");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(issueCloudButton, false);
-    }
-  }), issueCloudButton.dataset.releuBound = "true";
-  if (rotateCloudButton && !rotateCloudButton.dataset.releuBound) rotateCloudButton.addEventListener("click", async () => {
-    try {
-      setButtonBusy(rotateCloudButton, true, "Rotating...");
-      const payload = await api("/api/cloud-backup/rotate-key", { method: "POST" });
-      APP_STATE.state = payload.state ?? APP_STATE.state;
-      APP_STATE.cloudBackup.status = payload.cloudBackup ?? APP_STATE.cloudBackup.status;
-      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
-      patchSettingsPage();
-      showStatus("Cloud backup key rotated.", "success");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(rotateCloudButton, false);
-    }
-  }), rotateCloudButton.dataset.releuBound = "true";
-  if (uploadCloudButton && !uploadCloudButton.dataset.releuBound) uploadCloudButton.addEventListener("click", async () => {
-    try {
-      setButtonBusy(uploadCloudButton, true, "Uploading...");
-      showStatus("Creating and uploading a full cloud backup...");
-      const payload = await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/upload`, {
-        method: "POST",
-      });
-      APP_STATE.state = payload.state ?? APP_STATE.state;
-      APP_STATE.cloudBackup.status = payload.upload?.cloudBackup ?? APP_STATE.cloudBackup.status;
-      APP_STATE.cloudBackup.lastFetchedAt = Date.now();
-      patchSettingsPage();
-      showStatus("Cloud backup uploaded.", "success");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(uploadCloudButton, false);
-    }
-  }), uploadCloudButton.dataset.releuBound = "true";
-  if (refreshCloudButton && !refreshCloudButton.dataset.releuBound) refreshCloudButton.addEventListener("click", async () => {
-    try {
-      setButtonBusy(refreshCloudButton, true, "Refreshing...");
-      await refreshCloudBackupStatus(true);
-      patchSettingsPage();
-      showStatus("Cloud backup status refreshed.", "success");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setButtonBusy(refreshCloudButton, false);
-    }
-  }), refreshCloudButton.dataset.releuBound = "true";
-  cloudSection.querySelectorAll("[data-releu-cloud-download]").forEach((button) => {
-    if (button.dataset.releuBound === "true") return;
-    button.dataset.releuBound = "true";
-    button.addEventListener("click", async () => {
-      try {
-        setButtonBusy(button, true, "Downloading...");
-        await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/download`, {
-          method: "POST",
-          body: {
-            backupId: button.dataset.releuCloudDownload,
-          },
-        });
-        showStatus("Cloud backup downloaded to the local Releu data folder.", "success");
-      } catch (error) {
-        showError(error);
-      } finally {
-        setButtonBusy(button, false);
-      }
-    });
-  });
-  cloudSection.querySelectorAll("[data-releu-cloud-restore]").forEach((button) => {
-    if (button.dataset.releuBound === "true") return;
-    button.dataset.releuBound = "true";
-    button.addEventListener("click", async () => {
-      if (!window.confirm("Restore this cloud backup onto the current server? The server must stay stopped during the restore.")) {
-        return;
-      }
-      try {
-        setButtonBusy(button, true, "Restoring...");
-        await api(`/api/servers/${encodeURIComponent(serverId)}/cloud-backup/restore`, {
-          method: "POST",
-          body: {
-            backupId: button.dataset.releuCloudRestore,
-          },
-        });
-        await refreshState(serverId);
-        await refreshCloudBackupStatus(true);
-        patchSettingsPage();
-        showStatus("Cloud backup restored.", "success");
-      } catch (error) {
-        showError(error);
-      } finally {
-        setButtonBusy(button, false);
-      }
-    });
-  });
-  let desktopSection = document.querySelector("[data-releu-desktop-section]");
-  if (!desktopSection) {
-    desktopSection = document.createElement("section");
-    desktopSection.className = "fi-section mt-6";
-    desktopSection.dataset.releuDesktopSection = "true";
-    document.querySelector(".fi-page-content")?.append(desktopSection);
-  }
+  document.querySelector("[data-releu-cloud-section]")?.remove();
+  document.querySelector("[data-releu-ui-section]")?.remove();
+  document.querySelectorAll("[data-releu-desktop-section],[data-releu-dev-section]").forEach((node) => node.remove());
+  const desktopSection = [...document.querySelectorAll(".fi-section")].find((section) =>
+    /desktop app/i.test(section.querySelector(".fi-section-header-heading")?.textContent ?? ""),
+  );
   const desktopSettings = currentDesktopSettings();
-  desktopSection.innerHTML = `
-    <header class="fi-section-header">
-      <div>
-        <h2 class="fi-section-header-heading">Desktop App</h2>
-        <p class="fi-section-header-description">Background behavior and quick-access tools for the Releu desktop app.</p>
-      </div>
-    </header>
-    <div class="fi-section-content-ctn">
-      <div class="fi-section-content" style="display:grid;gap:1rem;">
-        <div class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-5 py-4 text-sm text-slate-300" style="display:grid;gap:1rem;">
-          <label style="display:flex;align-items:flex-start;gap:.75rem;">
-            <input type="checkbox" data-releu-desktop-keep-running ${desktopSettings.keepServerRunningOnClose ? "checked" : ""}>
-            <span>
-              <span style="display:block;font-weight:600;color:#f8fafc;">Keep server running after the app is closed</span>
-              <span style="display:block;margin-top:.35rem;font-size:.75rem;color:#94a3b8;">Closing the Releu window will hide the app and keep the server running in the background until you reopen Releu or stop the server.</span>
-            </span>
-          </label>
-          <label style="display:grid;gap:.5rem;">
-            <span class="text-xs uppercase tracking-[0.16em] text-slate-500">Quick Console Shortcut</span>
-            <input class="fi-input" data-releu-desktop-shortcut type="text" value="${escapeHtml(normalizeShortcutString(desktopSettings.quickConsoleShortcut))}" placeholder="Ctrl+Shift+Space">
-            <span class="text-xs text-slate-400">Press this shortcut while Releu is focused to open a small console overlay from any page.</span>
-          </label>
-          <div style="display:flex;gap:.65rem;flex-wrap:wrap;">
-            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-desktop-save>Save Desktop Settings</button>
-            <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-desktop-open-console>Open Quick Console</button>
-          </div>
-        </div>
-      </div>
-    </div>`;
-  const desktopKeepRunning = desktopSection.querySelector("[data-releu-desktop-keep-running]");
-  const desktopShortcut = desktopSection.querySelector("[data-releu-desktop-shortcut]");
-  const saveDesktopButton = desktopSection.querySelector("[data-releu-desktop-save]");
-  const openQuickConsoleButton = desktopSection.querySelector("[data-releu-desktop-open-console]");
-  if (desktopShortcut && !desktopShortcut.dataset.releuBound) {
-    desktopShortcut.dataset.releuBound = "true";
-    desktopShortcut.addEventListener("blur", () => {
-      desktopShortcut.value = normalizeShortcutString(desktopShortcut.value);
-    });
+  const desktopKeepRunning = desktopSection?.querySelector(".desktop-checkbox");
+  const desktopShortcutKeys = desktopSection?.querySelector(".desktop-shortcut-keys");
+  const desktopShortcutDescription = desktopSection?.querySelector(".desktop-shortcut-description");
+  const desktopButtons = desktopSection ? [...desktopSection.querySelectorAll("button.fi-btn")] : [];
+  const saveDesktopButton = desktopButtons.find((button) => /save desktop settings/i.test(button.textContent ?? ""));
+  const openQuickConsoleButton = desktopButtons.find((button) => /open quick console/i.test(button.textContent ?? ""));
+  if (desktopKeepRunning) {
+    desktopKeepRunning.checked = Boolean(desktopSettings.keepServerRunningOnClose);
+  }
+  if (desktopShortcutKeys) {
+    const parts = normalizeShortcutString(desktopSettings.quickConsoleShortcut).split("+").filter(Boolean);
+    desktopShortcutKeys.innerHTML = parts.map((part, index) => `${index ? "<span>+</span>" : ""}<kbd>${escapeHtml(part)}</kbd>`).join("");
+  }
+  if (desktopShortcutDescription) {
+    desktopShortcutDescription.textContent = "Press this shortcut while Releu is focused to open a quick console window.";
   }
   if (saveDesktopButton && !saveDesktopButton.dataset.releuBound) {
     saveDesktopButton.dataset.releuBound = "true";
@@ -5773,15 +7726,10 @@ function patchSettingsPage() {
           method: "POST",
           body: {
             keepServerRunningOnClose: Boolean(desktopKeepRunning?.checked),
-            quickConsoleShortcut: normalizeShortcutString(desktopShortcut?.value ?? ""),
+            quickConsoleShortcut: normalizeShortcutString(desktopSettings.quickConsoleShortcut),
           },
         });
         APP_STATE.state = payload.state ?? APP_STATE.state;
-        if (desktopShortcut) {
-          desktopShortcut.value = normalizeShortcutString(
-            APP_STATE.state?.desktopSettings?.quickConsoleShortcut ?? desktopShortcut.value,
-          );
-        }
         await syncDesktopIntegration();
         patchSettingsPage();
         showStatus("Desktop settings saved.", "success");
@@ -5794,41 +7742,19 @@ function patchSettingsPage() {
   }
   if (openQuickConsoleButton && !openQuickConsoleButton.dataset.releuBound) {
     openQuickConsoleButton.dataset.releuBound = "true";
-    openQuickConsoleButton.addEventListener("click", () => {
-      APP_STATE.quickConsole.open = true;
-      renderQuickConsoleOverlay();
+    openQuickConsoleButton.addEventListener("click", async () => {
+      try {
+        await openDesktopQuickConsoleWindow(activeServerId());
+      } catch (error) {
+        showError(error);
+      }
     });
   }
-  document.querySelector("[data-releu-ui-section]")?.remove();
-  let devSection = document.querySelector("[data-releu-dev-section]");
-  if (!devSection) {
-    devSection = document.createElement("section");
-    devSection.className = "fi-section mt-6";
-    devSection.dataset.releuDevSection = "true";
-    devSection.innerHTML = `
-      <header class="fi-section-header">
-        <div>
-          <h2 class="fi-section-header-heading">Developer Console</h2>
-          <p class="fi-section-header-description">When off, Releu only shows Minecraft server logs in the console.</p>
-        </div>
-      </header>
-      <div class="fi-section-content-ctn">
-        <div class="fi-section-content">
-          <div class="rounded-lg border border-[#2b3642] bg-[#0f141b] px-4 py-4 text-sm text-slate-300">
-            <div class="flex items-center justify-between gap-4">
-              <div>
-                <div class="font-semibold text-slate-100">Show playit and panel logs</div>
-                <div class="mt-1 text-xs text-slate-400" data-releu-dev-console-state></div>
-              </div>
-              <button type="button" class="fi-btn fi-size-md fi-ac-btn-action" data-releu-dev-console-toggle></button>
-            </div>
-          </div>
-        </div>
-      </div>`;
-    document.querySelector(".fi-page-content")?.append(devSection);
-  }
-  const devState = devSection.querySelector("[data-releu-dev-console-state]");
-  const devToggle = devSection.querySelector("[data-releu-dev-console-toggle]");
+  const devSection = [...document.querySelectorAll(".fi-section")].find((section) =>
+    /developer console/i.test(section.querySelector(".fi-section-header-heading")?.textContent ?? ""),
+  );
+  const devState = devSection?.querySelector(".dev-console-description");
+  const devToggle = devSection ? [...devSection.querySelectorAll("button.fi-btn")].find((button) => /dev logs|enable|disable/i.test(button.textContent ?? "")) : null;
   if (devState) {
     devState.textContent = devConsoleLogsEnabled()
       ? "Developer logs are visible in the console."
@@ -5836,10 +7762,13 @@ function patchSettingsPage() {
   }
   if (devToggle) {
     devToggle.textContent = devConsoleLogsEnabled() ? "Disable Dev Logs" : "Enable Dev Logs";
-    if (!devToggle.dataset.releuBound) devToggle.addEventListener("click", () => {
-      setDevConsoleLogsEnabled(!devConsoleLogsEnabled());
-      patchSettingsPage();
-    }), devToggle.dataset.releuBound = "true";
+    if (!devToggle.dataset.releuBound) {
+      devToggle.dataset.releuBound = "true";
+      devToggle.addEventListener("click", () => {
+        setDevConsoleLogsEnabled(!devConsoleLogsEnabled());
+        patchSettingsPage();
+      });
+    }
   }
 }
 
@@ -5849,13 +7778,15 @@ async function patchPage() {
   if (PAGE === "overview.html") patchOverviewPage();
   if (PAGE === "console.html") patchConsolePage();
   if (PAGE === "players.html") patchPlayersPage();
+  if (PAGE === "cloud-backup.html") patchCloudBackupPage();
   if (PAGE === "worlds.html") patchWorldsPage();
   if (PAGE === "software.html") patchSoftwarePage();
   if (PAGE === "addons-mods.html") patchAddonsPage();
-  if (PAGE === "backups.html") patchBackupsPage();
+  if (PAGE === "backups.html") patchBackupsPageLive();
   if (PAGE === "files.html") patchFilesPage();
   if (PAGE === "misc.html") patchMiscPage();
   if (PAGE === "settings.html") patchSettingsPage();
+  APP_STATE.quickConsole.open = false;
   renderQuickConsoleOverlay();
 }
 
