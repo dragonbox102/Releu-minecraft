@@ -1,7 +1,7 @@
 ````markdown
 # Local Minecraft Panel
 
-This project provides a **localhost-only web panel** for managing Minecraft servers on Windows.
+This project provides a **desktop Minecraft server manager** for local hosting, backups, add-ons, and public join links.
 
 ## Features
 
