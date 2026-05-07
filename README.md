@@ -1,6 +1,6 @@
 # Releu Minecraft
 
-Releu is a desktop Minecraft server manager for local hosting, backups, add-ons, public join links, and optional Bedrock crossplay on Java servers.
+Releu is a desktop Minecraft server manager for local hosting, backups, add-ons, public join links, and optional Bedrock crossplay (Using Mods) on Java servers.
 
 ## Features
 
