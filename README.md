@@ -119,7 +119,7 @@ http://127.0.0.1:8787
 Releu can work with `playit.gg` for public join addresses.
 
 ### Java Tunnel Target
-Create or assign a Java tunnel pointing to:
+Create or assign a Java tunnel pointing to: ( The ports Can change depending on the server make sure to read correctly in settings )
 
 ```text
 127.0.0.1:25565
