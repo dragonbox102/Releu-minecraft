@@ -7,7 +7,7 @@ Releu is a desktop Minecraft server manager for local hosting, backups, add-ons,
 - Create and manage multiple Minecraft server instances
 - Install and use supported server software: Vanilla, Paper, Purpur, Fabric, Forge, and NeoForge
 - Start, stop, restart, and force-kill servers
-- View live console logs and send commands
+- View live console logs and send commands ( ?help doesnt list all minecraft Commands You must Figure out the commands and run them yourself )
 - Track server status, RAM usage, CPU usage, and basic host metrics
 - Edit important server and runtime settings from the app
 - Manage players with common actions such as inventory view, gamemode, kick, ban, unban, whitelist, unwhitelist, op, and deop
@@ -68,7 +68,7 @@ http://127.0.0.1:8787
 
 ### 3. Use the Main Sections
 - **Overview**: check server status, performance, and quick actions
-- **Console**: view logs and run commands
+- **Console**: view logs and run commands ( ?help doesnt list all minecraft Commands You must Figure out the commands and run them yourself )
 - **Players**: manage players and moderation actions
 - **Files**: browse and manage server files
 - **Backups**: create backups, change backup settings, and revert
