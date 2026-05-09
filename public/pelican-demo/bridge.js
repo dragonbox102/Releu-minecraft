@@ -59,6 +59,8 @@ const APP_STATE = {
   playersPage: {
     serverId: "",
     search: "",
+    rowDrafts: {},
+    renderSignature: "",
   },
   backupsPage: {
     serverId: "",
@@ -2984,7 +2986,43 @@ function renderInventoryModalContent(modal) {
   </div>`;
 }
 
+function playersPageDraftKey(playerName) {
+  return String(playerName ?? "").trim().toLowerCase();
+}
+
+function readPlayersPageRowDraft(playerName) {
+  return APP_STATE.playersPage.rowDrafts?.[playersPageDraftKey(playerName)] ?? {};
+}
+
+function writePlayersPageRowDraft(playerName, patch = {}) {
+  const key = playersPageDraftKey(playerName);
+  if (!key) return;
+  APP_STATE.playersPage.rowDrafts[key] = {
+    ...(APP_STATE.playersPage.rowDrafts[key] ?? {}),
+    ...patch,
+  };
+}
+
+function buildPlayersPageRenderSignature(players, query) {
+  return JSON.stringify({
+    query,
+    players: players.map((player) => ({
+      name: player?.name ?? "",
+      uuid: player?.uuid ?? "",
+      online: Boolean(player?.online),
+      op: Boolean(player?.op),
+      whitelisted: Boolean(player?.whitelisted),
+      banned: Boolean(player?.banned),
+      gamemode: player?.gamemode ?? "",
+      lastSeenAt: player?.lastSeenAt ?? "",
+    })),
+  });
+}
+
 function renderPlayerRow(player) {
+  const draft = readPlayersPageRowDraft(player.name);
+  const selectedGamemode = String(draft.gamemode ?? player.gamemode ?? "survival").trim().toLowerCase() || "survival";
+  const actionReason = String(draft.reason ?? "");
   const flags = [
     player.online ? `<span class="ppl-flag ppl-flag-online">Online</span>` : "",
     player.op ? `<span class="ppl-flag ppl-flag-op">OP</span>` : "",
@@ -2992,7 +3030,7 @@ function renderPlayerRow(player) {
     player.banned ? `<span class="ppl-flag ppl-flag-banned">Banned</span>` : "",
   ].filter(Boolean).join("");
   const toggleBan = player.banned ? ["pardon", "Pardon"] : ["ban", "Ban"];
-  return `<tr data-player-name="${escapeHtml(player.name)}"><td><span class="ppl-dot"><svg viewBox="0 0 8 8" fill="${player.online ? "rgb(34,197,94)" : "rgb(100,116,139)"}" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg></span></td><td><div class="ppl-player-cell"><div class="ppl-avatar"><img src="${playerAvatar(player)}" alt="${escapeHtml(player.name)}" width="32" height="32" style="border-radius:6px"></div><div><div class="ppl-player-name">${escapeHtml(player.name)}</div><div class="ppl-player-uuid">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td><div class="ppl-flags">${flags || `<span class="ppl-flag">Seen</span>`}</div></td><td><span class="ppl-lastseen">${escapeHtml(formatDate(player.lastSeenAt))}</span></td><td><div class="ppl-actions"><input type="text" class="ppl-action-input" placeholder="Reason shown to player"><select class="ppl-select">${["survival", "creative", "adventure", "spectator"].map((mode) => `<option value="${mode}" ${player.gamemode === mode ? "selected" : ""}>${mode}</option>`).join("")}</select><button class="ppl-action-btn" type="button" data-player-inventory>Inventory</button><button class="ppl-action-btn" type="button" data-player-action="gamemode">Gamemode</button><button class="ppl-action-btn" type="button" data-player-action="kick">Kick</button><button class="ppl-action-btn danger" type="button" data-player-action="${toggleBan[0]}">${toggleBan[1]}</button><button class="ppl-action-btn" type="button" data-player-action="${player.whitelisted ? "whitelist-remove" : "whitelist-add"}">${player.whitelisted ? "Unwhitelist" : "Whitelist"}</button><button class="ppl-action-btn" type="button" data-player-action="${player.op ? "deop" : "op"}">${player.op ? "Deop" : "OP"}</button></div></td></tr>`;
+  return `<tr data-player-name="${escapeHtml(player.name)}"><td><span class="ppl-dot"><svg viewBox="0 0 8 8" fill="${player.online ? "rgb(34,197,94)" : "rgb(100,116,139)"}" xmlns="http://www.w3.org/2000/svg"><circle cx="4" cy="4" r="4"/></svg></span></td><td><div class="ppl-player-cell"><div class="ppl-avatar"><img src="${playerAvatar(player)}" alt="${escapeHtml(player.name)}" width="32" height="32" style="border-radius:6px"></div><div><div class="ppl-player-name">${escapeHtml(player.name)}</div><div class="ppl-player-uuid">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td><div class="ppl-flags">${flags || `<span class="ppl-flag">Seen</span>`}</div></td><td><span class="ppl-lastseen">${escapeHtml(formatDate(player.lastSeenAt))}</span></td><td><div class="ppl-actions"><input type="text" class="ppl-action-input" placeholder="Reason shown to player" value="${escapeHtml(actionReason)}"><select class="ppl-select">${["survival", "creative", "adventure", "spectator"].map((mode) => `<option value="${mode}" ${selectedGamemode === mode ? "selected" : ""}>${mode}</option>`).join("")}</select><button class="ppl-action-btn" type="button" data-player-inventory>Inventory</button><button class="ppl-action-btn" type="button" data-player-action="gamemode">Gamemode</button><button class="ppl-action-btn" type="button" data-player-action="kick">Kick</button><button class="ppl-action-btn danger" type="button" data-player-action="${toggleBan[0]}">${toggleBan[1]}</button><button class="ppl-action-btn" type="button" data-player-action="${player.whitelisted ? "whitelist-remove" : "whitelist-add"}">${player.whitelisted ? "Unwhitelist" : "Whitelist"}</button><button class="ppl-action-btn" type="button" data-player-action="${player.op ? "deop" : "op"}">${player.op ? "Deop" : "OP"}</button></div></td></tr>`;
 }
 
 function patchPlayersPage() {
@@ -3002,6 +3040,8 @@ function patchPlayersPage() {
   if (APP_STATE.playersPage.serverId !== serverId) {
     APP_STATE.playersPage.serverId = serverId;
     APP_STATE.playersPage.search = "";
+    APP_STATE.playersPage.rowDrafts = {};
+    APP_STATE.playersPage.renderSignature = "";
   }
   const tbody = document.querySelector(".ppl-tbody");
   const searchInput = document.querySelector("[data-player-search-input]");
@@ -3014,9 +3054,14 @@ function patchPlayersPage() {
       const uuid = String(player?.uuid ?? "").toLowerCase();
       return name.includes(normalizedQuery) || uuid.includes(normalizedQuery);
     });
+    const nextSignature = buildPlayersPageRenderSignature(filteredPlayers, normalizedQuery);
+    if (APP_STATE.playersPage.renderSignature === nextSignature) {
+      return;
+    }
     tbody.innerHTML = filteredPlayers.length
       ? filteredPlayers.map(renderPlayerRow).join("")
       : `<tr><td colspan="5" class="p-4 text-sm text-slate-400">${normalizedQuery ? "No players matched that search." : "No players tracked yet."}</td></tr>`;
+    APP_STATE.playersPage.renderSignature = nextSignature;
   };
 
   if (searchInput) {
@@ -3039,14 +3084,41 @@ function patchPlayersPage() {
   }
 
   renderRows();
+  tbody?.querySelectorAll(".ppl-action-input").forEach((input) => {
+    if (input.dataset.releuBound === "true") return;
+    input.dataset.releuBound = "true";
+    input.addEventListener("input", () => {
+      const row = input.closest("tr");
+      if (!row?.dataset.playerName) return;
+      writePlayersPageRowDraft(row.dataset.playerName, { reason: input.value });
+    });
+  });
+  tbody?.querySelectorAll(".ppl-select").forEach((select) => {
+    if (select.dataset.releuBound === "true") return;
+    select.dataset.releuBound = "true";
+    const syncDraft = () => {
+      const row = select.closest("tr");
+      if (!row?.dataset.playerName) return;
+      writePlayersPageRowDraft(row.dataset.playerName, { gamemode: select.value });
+    };
+    select.addEventListener("input", syncDraft);
+    select.addEventListener("change", syncDraft);
+  });
   tbody?.querySelectorAll("[data-player-action]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
     button.addEventListener("click", async () => {
       const row = button.closest("tr");
       try {
+        writePlayersPageRowDraft(row?.dataset.playerName, {
+          reason: row?.querySelector(".ppl-action-input")?.value ?? "",
+          gamemode: row?.querySelector(".ppl-select")?.value ?? "survival",
+        });
         setButtonBusy(button, true);
         await api(`/api/servers/${encodeURIComponent(activeServerId())}/players/${encodeURIComponent(row.dataset.playerName)}/action`, { method: "POST", body: { action: button.dataset.playerAction, mode: row.querySelector(".ppl-select")?.value ?? "survival", reason: row.querySelector(".ppl-action-input")?.value ?? "" } });
         await refreshState(activeServerId());
         await refreshLogs();
+        APP_STATE.playersPage.renderSignature = "";
         patchPlayersPage();
       } catch (error) {
         showError(error);
@@ -3056,6 +3128,8 @@ function patchPlayersPage() {
     });
   });
   tbody?.querySelectorAll("[data-player-inventory]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
     button.addEventListener("click", async () => {
       const row = button.closest("tr");
       if (!row?.dataset.playerName) return;
@@ -3136,7 +3210,7 @@ function patchWorldsPage() {
         <div class="pw-card-body">
           <div class="pw-hint">Choose a world archive and import it as a server world.</div>
           <input type="file" accept=".zip,.mcworld" data-world-archive-file style="width:100%;font-size:.78rem;color:#cbd5e1;">
-          <div class="pw-desc">Releu uses the selected archive name automatically. Just choose a `.zip` or `.mcworld` file and upload it.</div>
+          <div class="pw-desc">Releu uses the selected archive name automatically. Just choose a <code>.zip</code> or <code>.mcworld</code> file and upload it.</div>
           <button class="fi-btn fi-size-md fi-ac-btn-action" type="button" data-world-upload>Upload World Archive</button>
         </div>
       </div>
@@ -7790,6 +7864,17 @@ async function patchPage() {
   renderQuickConsoleOverlay();
 }
 
+async function pollCurrentPage() {
+  if (document.visibilityState === "hidden") return;
+  await refreshState(activeServerId());
+  if (PAGE === "players.html") {
+    patchPlayersPage();
+    return;
+  }
+  await refreshLogs().catch(() => []);
+  await patchPage();
+}
+
 async function boot() {
   injectReleaseChromeStyles();
   ensureQuickConsoleBinding();
@@ -7804,12 +7889,10 @@ async function boot() {
   finishShellEnter();
   clearStatus();
   if (PAGE !== "servers.html" && PAGE !== "create-server.html") {
-    const refreshIntervalMs = PAGE === "misc.html" ? 1000 : 4000;
+    const refreshIntervalMs = PAGE === "misc.html" || PAGE === "players.html" ? 1000 : 4000;
     setInterval(async () => {
       try {
-        await refreshState(activeServerId());
-        await refreshLogs().catch(() => []);
-        await patchPage();
+        await pollCurrentPage();
       } catch (error) {
         console.error(error);
       }
