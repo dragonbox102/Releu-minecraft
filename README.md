@@ -126,7 +126,7 @@ Create or assign a Java tunnel pointing to: ( The ports Can change depending on 
 ```
 
 ### Bedrock Tunnel Target
-If you enable Geyser for Bedrock crossplay, Bedrock traffic usually needs a separate UDP tunnel pointing to:
+If you enable Geyser for Bedrock crossplay, Bedrock traffic usually needs a separate UDP tunnel pointing to:  ( The ports Can change depending on the server make sure to read correctly in settings )
 
 ```text
 127.0.0.1:19132
