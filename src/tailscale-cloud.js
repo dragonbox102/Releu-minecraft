@@ -9,6 +9,7 @@ const tailscaleCliCandidates = [
   "C:\\Program Files\\Tailscale\\tailscale.exe",
   "tailscale",
 ];
+const rollingBackupInactivityMs = 7 * 24 * 60 * 60 * 1000;
 
 function currentTimestamp() {
   return new Date().toISOString();
@@ -160,6 +161,38 @@ function getRemoteArchivePath(config, serverId) {
 
 function getRemoteMetadataPath(config, serverId) {
   return `${getRemoteServerDir(config, serverId)}/latest.json`;
+}
+
+function parseTimestampMs(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return 0;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+export function getRollingBackupLastActivityAt(metadata) {
+  if (!metadata || typeof metadata !== "object") {
+    return "";
+  }
+  return String(
+    metadata.lastActivityAt ??
+      metadata.last_activity_at ??
+      metadata.updatedAt ??
+      metadata.updated_at ??
+      metadata.uploadedAt ??
+      metadata.uploaded_at ??
+      metadata.createdAt ??
+      metadata.created_at ??
+      "",
+  ).trim();
+}
+
+export function isRollingRemoteBackupInactive(metadata, nowMs = Date.now()) {
+  const lastActivityMs = parseTimestampMs(getRollingBackupLastActivityAt(metadata));
+  if (!lastActivityMs) {
+    return false;
+  }
+  return nowMs - lastActivityMs >= rollingBackupInactivityMs;
 }
 
 export async function resolveTailscaleCliPath() {
@@ -463,6 +496,34 @@ export async function uploadRollingRemoteBackup(config, serverId, archivePath, m
     `find ${quotePosix(remoteDir)} -mindepth 1 -maxdepth 1 ! -name latest.zip ! -name latest.json -exec rm -rf {} +`,
   );
 
+  return {
+    archivePath: remoteArchivePath,
+    metadataPath: remoteMetadataPath,
+  };
+}
+
+export async function updateRollingRemoteBackupActivity(config, serverId, activityType = "activity") {
+  const metadata = await readRemoteBackupMetadata(config, serverId);
+  if (!metadata) {
+    return null;
+  }
+  const nextMetadata = {
+    ...metadata,
+    lastActivityAt: currentTimestamp(),
+    lastActivityType: String(activityType ?? "activity").trim() || "activity",
+  };
+  await writeRemoteJsonFile(config, getRemoteMetadataPath(config, serverId), nextMetadata);
+  return nextMetadata;
+}
+
+export async function deleteRollingRemoteBackup(config, serverId) {
+  const remoteDir = getRemoteServerDir(config, serverId);
+  const remoteArchivePath = getRemoteArchivePath(config, serverId);
+  const remoteMetadataPath = getRemoteMetadataPath(config, serverId);
+  await runTailscaleSsh(
+    config,
+    `rm -f ${quotePosix(remoteArchivePath)} ${quotePosix(remoteMetadataPath)} && rmdir ${quotePosix(remoteDir)} 2>/dev/null || true`,
+  );
   return {
     archivePath: remoteArchivePath,
     metadataPath: remoteMetadataPath,

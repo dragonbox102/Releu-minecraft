@@ -600,6 +600,7 @@
 <style>
 /* ── Players page styles ── */
 .ppl-add-row{display:grid;gap:.5rem;grid-template-columns:1fr 1fr auto;align-items:center;margin-bottom:.75rem}
+.ppl-add-row.ppl-search-row{grid-template-columns:minmax(0,1fr)}
 @media(max-width:800px){.ppl-add-row{grid-template-columns:1fr}}
 .ppl-input-wrap{position:relative;display:flex;align-items:center}
 .ppl-input-icon{position:absolute;left:.625rem;color:#475569;pointer-events:none;flex-shrink:0}
@@ -647,23 +648,14 @@
 .ppl-action-btn.danger:hover{background:rgba(239,68,68,.18);color:#fca5a5}
 </style>
 
-<!-- Add Player row -->
-<div class="ppl-add-row">
+<!-- Search Players row -->
+<div class="ppl-add-row ppl-search-row">
     <div class="ppl-input-wrap">
         <span class="ppl-input-icon">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
         </span>
-        <input type="text" class="ppl-input" placeholder="Username">
+        <input type="search" class="ppl-input" data-player-search-input placeholder="Search players by name or UUID" aria-label="Search players by name or UUID">
     </div>
-    <div class="ppl-input-wrap">
-        <span class="ppl-input-icon">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
-        </span>
-        <input type="text" class="ppl-input" placeholder="UUID (00000000-0000-0000-0000-000000000000)">
-    </div>
-    <button class="fi-btn fi-size-md fi-ac-btn-action" type="button">
-        Add Player
-    </button>
 </div>
 
 <!-- Players table -->

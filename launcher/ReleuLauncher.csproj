@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>..\build\icon.ico</ApplicationIcon>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(PayloadZipPath)' != '' and Exists('$(PayloadZipPath)')">
+    <EmbeddedResource Include="$(PayloadZipPath)" LogicalName="ReleuLauncher.Payload.runtime.zip" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(PayloadManifestPath)' != '' and Exists('$(PayloadManifestPath)')">
+    <EmbeddedResource Include="$(PayloadManifestPath)" LogicalName="ReleuLauncher.Payload.manifest.json" />
+  </ItemGroup>
+</Project>

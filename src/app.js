@@ -60,6 +60,7 @@ function mapPelicanSectionToPage(section) {
   if (normalized === "console") return "console.html";
   if (normalized === "files") return "files.html";
   if (normalized === "backups") return "backups.html";
+  if (normalized === "cloud" || normalized === "cloud-backup" || normalized === "cloudbackup") return "cloud-backup.html";
   if (normalized === "settings") return "settings.html";
   if (normalized === "players") return "players.html";
   if (normalized === "worlds") return "worlds.html";
@@ -438,6 +439,29 @@ export async function startPanelServer() {
     asyncRoute(async (request, response) => {
       sendOk(response, {
         backupPath: await panel.createBackup(request.params.serverId),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/settings/backups",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        backups: await panel.updateBackupSettings(request.params.serverId, request.body ?? {}),
+        state: await panel.getState(request.params.serverId),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/servers/:serverId/backups/revert",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        restore: await panel.restoreLocalBackup(
+          request.params.serverId,
+          request.body.backupName,
+        ),
         state: await panel.getState(request.params.serverId),
       });
     }),

@@ -12,13 +12,26 @@ const staleArtifacts = [
   path.join(projectRoot, "Releu-minecraft-pelican.zip"),
   path.join(projectRoot, "Releu-minecraft-portable.exe"),
   path.join(projectRoot, "Releu-minecraft-pelican-portable.exe"),
+  path.join(projectRoot, "Releu-minecraft-mac.dmg"),
+  path.join(projectRoot, "Releu-minecraft-mac.zip"),
+  path.join(projectRoot, "latest-linux.yml"),
+  path.join(projectRoot, "latest-mac.yml"),
 ];
 
 async function removeIfExists(targetPath) {
-  await fs.rm(targetPath, {
-    recursive: true,
-    force: true,
-  });
+  try {
+    await fs.rm(targetPath, {
+      recursive: true,
+      force: true,
+    });
+    return true;
+  } catch (error) {
+    if (error?.code === "EBUSY" || error?.code === "EPERM") {
+      console.warn(`Skipping locked release artifact: ${targetPath}`);
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function fileExists(targetPath) {
@@ -35,7 +48,10 @@ async function copyIfPresent(sourcePath, targetPath) {
     return;
   }
 
-  await removeIfExists(targetPath);
+  const removed = await removeIfExists(targetPath);
+  if (!removed) {
+    return;
+  }
   await fs.cp(sourcePath, targetPath, {
     recursive: true,
     force: true,
@@ -62,6 +78,21 @@ async function main() {
     await copyIfPresent(
       path.join(distDir, "latest-linux.yml"),
       path.join(projectRoot, "latest-linux.yml"),
+    );
+  }
+
+  if (mode === "mac") {
+    await copyIfPresent(
+      path.join(distDir, "Releu-minecraft-mac.dmg"),
+      path.join(projectRoot, "Releu-minecraft-mac.dmg"),
+    );
+    await copyIfPresent(
+      path.join(distDir, "Releu-minecraft-mac.zip"),
+      path.join(projectRoot, "Releu-minecraft-mac.zip"),
+    );
+    await copyIfPresent(
+      path.join(distDir, "latest-mac.yml"),
+      path.join(projectRoot, "latest-mac.yml"),
     );
   }
 }

@@ -6,6 +6,7 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("elect
 
 let panelRuntime = null;
 let mainWindow = null;
+let quickConsoleWindow = null;
 let startupWindow = null;
 let panelRuntimeClosePromise = null;
 let updateRestartScheduled = false;
@@ -69,20 +70,44 @@ function closeStartupWindow() {
   startupWindow = null;
 }
 
+function hasExternalLauncher() {
+  return String(process.env.RELEU_EXTERNAL_LAUNCHER ?? "").trim() === "1";
+}
+
+function notifyExternalLauncherReady() {
+  const readyFilePath = String(process.env.RELEU_LAUNCHER_READY_FILE ?? "").trim();
+  const readyToken = String(process.env.RELEU_LAUNCHER_READY_TOKEN ?? "").trim();
+  if (!readyFilePath || !readyToken) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(readyFilePath), {
+      recursive: true,
+    });
+    fs.writeFileSync(readyFilePath, readyToken, "utf8");
+    desktopStartupLog(`Signalled external launcher readiness via ${readyFilePath}.`);
+  } catch (error) {
+    desktopStartupLog(`Failed to signal external launcher readiness: ${error?.message || String(error)}`);
+  }
+}
+
 function createStartupWindow() {
   if (startupWindow && !startupWindow.isDestroyed()) {
     return startupWindow;
   }
 
   const window = new BrowserWindow({
-    width: 420,
-    height: 180,
+    width: 430,
+    height: 190,
     show: true,
-    frame: false,
+    frame: true,
+    transparent: false,
     resizable: false,
     minimizable: false,
     maximizable: false,
-    closable: false,
+    closable: true,
+    autoHideMenuBar: true,
     skipTaskbar: true,
     alwaysOnTop: true,
     backgroundColor: "#0b0d10",
@@ -101,68 +126,86 @@ function createStartupWindow() {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Opening Releu</title>
     <style>
-      :root { color-scheme: dark; }
+      :root {
+        color-scheme: dark;
+      }
       body {
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
         background: #0b0d10;
-        color: #eef2f7;
+        color: #e5e7eb;
         font-family: Inter, Segoe UI, system-ui, sans-serif;
       }
-      .card {
-        width: calc(100% - 32px);
-        height: calc(100% - 32px);
+      .shell {
+        width: 100%;
+        height: 100%;
         box-sizing: border-box;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 18px;
-        background: #17181b;
-        display: grid;
-        place-items: center;
+        padding: 18px;
+        display: flex;
+        align-items: stretch;
+        justify-content: stretch;
+      }
+      .card {
+        flex: 1;
+        box-sizing: border-box;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: #14181d;
+        border-radius: 16px;
+        padding: 20px 20px 16px;
         text-align: center;
-        padding: 24px;
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
       }
       h1 {
-        margin: 0 0 8px;
-        font-size: 22px;
+        margin: 0;
+        font-size: 29px;
         font-weight: 700;
+        line-height: 1.15;
+        color: #ffffff;
       }
       p {
-        margin: 0;
-        color: #94a3b8;
+        margin: 10px auto 0;
+        color: rgba(203, 213, 225, 0.8);
         font-size: 14px;
+        line-height: 1.55;
+        max-width: 320px;
       }
-      .dots {
-        margin-top: 16px;
-        display: inline-flex;
-        gap: 8px;
-      }
-      .dot {
-        width: 10px;
+      .spinner {
+        width: 100%;
         height: 10px;
+        margin: 18px 0 0;
         border-radius: 999px;
-        background: #2563eb;
-        animation: pulse 1.2s infinite ease-in-out;
+        overflow: hidden;
+        background: rgba(148, 163, 184, 0.14);
       }
-      .dot:nth-child(2) { animation-delay: 0.15s; }
-      .dot:nth-child(3) { animation-delay: 0.3s; }
-      @keyframes pulse {
-        0%, 80%, 100% { opacity: 0.35; transform: scale(0.85); }
-        40% { opacity: 1; transform: scale(1); }
+      .spinner::before {
+        content: "";
+        display: block;
+        width: 38%;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #60a5fa, #93c5fd);
+        animation: slide 1.2s ease-in-out infinite alternate;
+      }
+      .footnote {
+        margin-top: 12px;
+        font-size: 12px;
+        color: rgba(148, 163, 184, 0.72);
+      }
+      @keyframes slide {
+        from { transform: translateX(-6%); }
+        to { transform: translateX(168%); }
       }
     </style>
   </head>
   <body>
-    <div class="card">
-      <div>
+    <div class="shell">
+      <div class="card">
         <h1>Opening Releu...</h1>
         <p>Preparing the local panel. This can take a few seconds.</p>
-        <div class="dots" aria-hidden="true">
-          <span class="dot"></span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-        </div>
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="footnote">Close this window anytime. Releu keeps launching.</div>
       </div>
     </div>
   </body>
@@ -205,9 +248,11 @@ function createWindow(url) {
   window.loadURL(url);
   window.webContents.once("did-finish-load", () => {
     desktopStartupLog(`Window finished loading ${url}`);
+    notifyExternalLauncherReady();
     closeStartupWindow();
   });
   window.once("ready-to-show", () => {
+    notifyExternalLauncherReady();
     closeStartupWindow();
     window.show();
   });
@@ -227,6 +272,53 @@ function createWindow(url) {
     }
   });
   return window;
+}
+
+function openQuickConsoleWindow(serverId = "") {
+  if (!panelRuntime?.url) {
+    throw new Error("Panel runtime is not available.");
+  }
+  const targetUrl = new URL(panelRuntime.url);
+  targetUrl.pathname = "/pelican-demo/console.html";
+  if (String(serverId ?? "").trim()) {
+    targetUrl.searchParams.set("serverId", String(serverId).trim());
+  }
+
+  if (quickConsoleWindow && !quickConsoleWindow.isDestroyed()) {
+    quickConsoleWindow.loadURL(targetUrl.toString());
+    if (quickConsoleWindow.isMinimized()) {
+      quickConsoleWindow.restore();
+    }
+    quickConsoleWindow.show();
+    quickConsoleWindow.focus();
+    return { opened: true };
+  }
+
+  quickConsoleWindow = new BrowserWindow({
+    width: 1180,
+    height: 760,
+    minWidth: 980,
+    minHeight: 620,
+    autoHideMenuBar: true,
+    backgroundColor: "#0b0d10",
+    title: "Releu Quick Console",
+    parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  quickConsoleWindow.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
+    shell.openExternal(nextUrl).catch(() => {});
+    return { action: "deny" };
+  });
+  quickConsoleWindow.on("closed", () => {
+    quickConsoleWindow = null;
+  });
+  quickConsoleWindow.loadURL(targetUrl.toString());
+  return { opened: true };
 }
 
 function stripWrappingQuotes(value) {
@@ -292,6 +384,19 @@ function resolveWindowsPortableExecutablePath() {
 
 function resolveLinuxPortableAppPath() {
   return firstExistingPath([process.env.APPIMAGE, process.execPath]) ?? path.resolve(process.execPath);
+}
+
+function resolveMacAppBundlePath() {
+  const execPath = stripWrappingQuotes(process.execPath);
+  const bundleCandidate = execPath
+    ? path.resolve(execPath, "..", "..", "..")
+    : "";
+  const candidates = [
+    bundleCandidate,
+    stripWrappingQuotes(process.env.PORTABLE_EXECUTABLE_FILE),
+  ].filter((candidate) => String(candidate ?? "").toLowerCase().endsWith(".app"));
+
+  return firstExistingPath(candidates) ?? path.resolve(bundleCandidate || process.execPath);
 }
 
 function buildUpdateLogPath(platformName) {
@@ -483,6 +588,86 @@ exit 1
   child.unref();
 }
 
+function scheduleMacAppUpdate(targetAppBundlePath, resolvedStagedPath, updateLogPath) {
+  const scriptPath = path.join(
+    app.getPath("temp"),
+    `releu-apply-update-${Date.now()}.sh`,
+  );
+  const scriptBody = `
+#!/usr/bin/env sh
+set -eu
+
+CURRENT_APP="$1"
+STAGED_ZIP="$2"
+PARENT_PID="$3"
+LOG_PATH="$4"
+
+log() {
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$LOG_PATH"
+}
+
+cleanup() {
+  rm -rf "$EXTRACT_DIR" 2>/dev/null || true
+  rm -f "$STAGED_ZIP" 2>/dev/null || true
+  rm -f "$0" 2>/dev/null || true
+}
+
+log "Update helper started. current=$CURRENT_APP staged=$STAGED_ZIP parent=$PARENT_PID"
+
+if [ ! -f "$STAGED_ZIP" ]; then
+  log "Staged mac update zip was not found."
+  exit 1
+fi
+
+EXTRACT_DIR="$(mktemp -d "\${TMPDIR:-/tmp}/releu-mac-update.XXXXXX")"
+trap cleanup EXIT
+
+i=0
+while kill -0 "$PARENT_PID" 2>/dev/null && [ "$i" -lt 120 ]; do
+  sleep 0.5
+  i=$((i + 1))
+done
+
+ditto -x -k "$STAGED_ZIP" "$EXTRACT_DIR"
+EXTRACTED_APP="$(find "$EXTRACT_DIR" -maxdepth 2 -type d -name '*.app' | head -n 1)"
+if [ -z "$EXTRACTED_APP" ]; then
+  log "No .app bundle was found inside the staged mac update zip."
+  exit 1
+fi
+
+if [ -e "$CURRENT_APP" ]; then
+  chmod -R u+w "$CURRENT_APP" 2>/dev/null || true
+  rm -rf "$CURRENT_APP"
+fi
+
+ditto "$EXTRACTED_APP" "$CURRENT_APP"
+xattr -dr com.apple.quarantine "$CURRENT_APP" 2>/dev/null || true
+open -n "$CURRENT_APP" >/dev/null 2>&1 &
+log "Restarted mac application bundle."
+`.trim();
+
+  fs.writeFileSync(scriptPath, scriptBody, {
+    encoding: "utf8",
+    mode: 0o700,
+  });
+  fs.writeFileSync(
+    updateLogPath,
+    `${new Date().toISOString()} Scheduling macOS update. target=${targetAppBundlePath} staged=${resolvedStagedPath} script=${scriptPath}\n`,
+    "utf8",
+  );
+
+  const child = spawn(
+    "sh",
+    [scriptPath, targetAppBundlePath, resolvedStagedPath, String(process.pid), updateLogPath],
+    {
+      detached: true,
+      stdio: "ignore",
+    },
+  );
+
+  child.unref();
+}
+
 function schedulePortableUpdate(stagedPath) {
   if (!app.isPackaged) {
     throw new Error("App self-update is supported only in packaged builds.");
@@ -495,7 +680,10 @@ function schedulePortableUpdate(stagedPath) {
   const resolvedStagedPath = path.resolve(rawStagedPath);
 
   if (process.platform === "win32") {
-    const targetExePath = resolveWindowsPortableExecutablePath();
+    const targetExePath = firstExistingPath([
+      stripWrappingQuotes(process.env.RELEU_LAUNCHER_CURRENT_EXE),
+      resolveWindowsPortableExecutablePath(),
+    ]) ?? resolveWindowsPortableExecutablePath();
     const updateLogPath = buildUpdateLogPath("win32");
     scheduleWindowsPortableUpdate(targetExePath, resolvedStagedPath, updateLogPath);
     return;
@@ -505,6 +693,13 @@ function schedulePortableUpdate(stagedPath) {
     const targetAppPath = resolveLinuxPortableAppPath();
     const updateLogPath = buildUpdateLogPath("linux");
     scheduleLinuxPortableUpdate(targetAppPath, resolvedStagedPath, updateLogPath);
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    const targetAppBundlePath = resolveMacAppBundlePath();
+    const updateLogPath = buildUpdateLogPath("darwin");
+    scheduleMacAppUpdate(targetAppBundlePath, resolvedStagedPath, updateLogPath);
     return;
   }
 
@@ -534,6 +729,10 @@ ipcMain.handle("desktop:pick-directory", async () => {
 
 ipcMain.handle("desktop:update-settings", async (_event, payload) => {
   return applyDesktopSettings(payload);
+});
+
+ipcMain.handle("desktop:open-quick-console", async (_event, serverId) => {
+  return openQuickConsoleWindow(serverId);
 });
 
 ipcMain.handle("desktop:install-app-update", async (_event, stagedPath) => {
@@ -576,7 +775,9 @@ app.on("second-instance", () => {
 
 app.whenReady().then(async () => {
   desktopStartupLog("Electron app ready.");
-  createStartupWindow();
+  if (!hasExternalLauncher()) {
+    createStartupWindow();
+  }
   if (app.isPackaged) {
     process.env.RELEU_DESKTOP_PACKAGED = "true";
     desktopStartupLog("Packaged desktop mode enabled.");

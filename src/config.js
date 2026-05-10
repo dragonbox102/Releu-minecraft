@@ -54,6 +54,7 @@ export const paths = {
   updatesDir: path.join(releuLocalRootDir, "updates"),
   updateCacheDir: path.join(releuLocalRootDir, "updates", "cache"),
   updatePendingDir: path.join(releuLocalRootDir, "updates", "pending"),
+  cloudTargetFile: path.join(releuLocalRootDir, "data", "cloud-target.json"),
   portableDataMigrationMarker: path.join(
     writableRootDir,
     "data",
@@ -107,6 +108,7 @@ export const defaultConfig = {
   playit: {
     autoStart: true,
     agentName: "Minecraft Panel Host",
+    macDownloadUrl: "",
   },
   updater: {
     enabled: true,
@@ -123,21 +125,15 @@ export const defaultConfig = {
   },
   cloudBackup: {
     enabled: false,
-    provider: "tailscale-ssh",
-    functionName: "releu-cloud-backup",
-    bucket: "releu-backups",
+    provider: "website",
     uploadLimitMb: 50,
-    projectUrl: "https://lksffessgkckjffuzfmf.supabase.co",
-    publishableKey: "sb_publishable_jYXQJJKCYUBHrJUUyB-xvA_u7oj_sbx",
-    serviceKey: "",
+    cloudApiBaseUrl: "",
+    blobReadWriteToken: "",
     restoreKey: "",
     targetRestoreKey: "",
     deviceLabel: "",
     accountUsername: "",
     sessionToken: "",
-    tailscaleHost: "",
-    tailscaleUser: "",
-    tailscaleRemoteDir: "",
   },
 };
 
@@ -166,39 +162,42 @@ function normalizeUpdaterConfig(config, storedConfig = null) {
 function normalizeCloudBackupConfig(config) {
   const merged = deepMerge(defaultConfig.cloudBackup, config ?? {});
   merged.enabled = Boolean(merged.enabled);
-  const rawProvider =
-    String(merged.provider ?? defaultConfig.cloudBackup.provider).trim().toLowerCase() ||
-    defaultConfig.cloudBackup.provider;
-  merged.functionName = String(merged.functionName ?? defaultConfig.cloudBackup.functionName).trim() || defaultConfig.cloudBackup.functionName;
-  merged.bucket = String(merged.bucket ?? defaultConfig.cloudBackup.bucket).trim() || defaultConfig.cloudBackup.bucket;
   merged.uploadLimitMb = Math.max(
     1,
     Number(merged.uploadLimitMb ?? defaultConfig.cloudBackup.uploadLimitMb) ||
       defaultConfig.cloudBackup.uploadLimitMb,
   );
-  merged.projectUrl = String(merged.projectUrl ?? defaultConfig.cloudBackup.projectUrl).trim();
-  merged.publishableKey = String(
-    merged.publishableKey ?? defaultConfig.cloudBackup.publishableKey,
-  ).trim();
-  merged.serviceKey = String(merged.serviceKey ?? "").trim();
+  merged.cloudApiBaseUrl = String(merged.cloudApiBaseUrl ?? "").trim().replace(/\/+$/g, "");
+  merged.blobReadWriteToken = String(merged.blobReadWriteToken ?? "").trim();
   merged.restoreKey = String(merged.restoreKey ?? "").trim();
   merged.targetRestoreKey = String(merged.targetRestoreKey ?? "").trim();
   merged.deviceLabel = String(merged.deviceLabel ?? "").trim();
+  merged.provider = "website";
   merged.accountUsername = String(merged.accountUsername ?? "").trim().toLowerCase();
   merged.sessionToken = String(merged.sessionToken ?? "").trim();
-  merged.tailscaleHost = String(merged.tailscaleHost ?? "").trim();
-  merged.tailscaleUser = String(merged.tailscaleUser ?? "").trim();
-  merged.tailscaleRemoteDir = String(merged.tailscaleRemoteDir ?? "").trim();
-  const hasTailscaleConfig =
-    Boolean(merged.tailscaleHost) &&
-    Boolean(merged.tailscaleUser) &&
-    Boolean(merged.tailscaleRemoteDir);
-  merged.provider =
-    rawProvider === "tailscale-ssh" ||
-    (rawProvider === "supabase" && hasTailscaleConfig)
-      ? "tailscale-ssh"
-      : rawProvider;
   return merged;
+}
+
+function normalizePlayitConfig(config) {
+  const merged = deepMerge(defaultConfig.playit, config ?? {});
+  merged.autoStart = Boolean(merged.autoStart);
+  merged.agentName =
+    String(merged.agentName ?? defaultConfig.playit.agentName).trim() ||
+    defaultConfig.playit.agentName;
+  merged.macDownloadUrl = String(merged.macDownloadUrl ?? "").trim();
+  return merged;
+}
+
+function normalizeHiddenCloudTarget(config = {}) {
+  return {};
+}
+
+function applyHiddenCloudTarget(cloudConfig, hiddenTarget) {
+  return { ...(cloudConfig ?? {}) };
+}
+
+function hasHiddenCloudTarget(target) {
+  return false;
 }
 
 function normalizeDesktopConfig(config) {
@@ -325,24 +324,46 @@ export async function writeJsonFile(targetPath, value) {
   await fs.writeFile(targetPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+async function loadHiddenCloudTarget() {
+  return normalizeHiddenCloudTarget(
+    await readJsonFile(paths.cloudTargetFile, {}),
+  );
+}
+
+async function saveHiddenCloudTarget(target) {
+  const normalizedTarget = normalizeHiddenCloudTarget(target);
+  await fs.rm(paths.cloudTargetFile, { force: true }).catch(() => {});
+  return normalizedTarget;
+}
+
 export async function loadPanelConfig() {
   await ensureAppDirectories();
   const stored = await readJsonFile(paths.configFile, defaultConfig);
   const merged = deepMerge(defaultConfig, stored);
+  merged.playit = normalizePlayitConfig(merged.playit);
   merged.ui = normalizeUiConfig(merged.ui);
   merged.updater = normalizeUpdaterConfig(merged.updater, stored);
   merged.desktop = normalizeDesktopConfig(merged.desktop);
-  merged.cloudBackup = normalizeCloudBackupConfig(merged.cloudBackup);
+  const hiddenCloudTarget = await loadHiddenCloudTarget();
+  merged.cloudBackup = normalizeCloudBackupConfig(
+    applyHiddenCloudTarget(merged.cloudBackup, hiddenCloudTarget),
+  );
+  await saveHiddenCloudTarget(merged.cloudBackup);
   await writeJsonFile(paths.configFile, merged);
   return merged;
 }
 
 export async function savePanelConfig(config) {
   const merged = deepMerge(defaultConfig, config);
+  merged.playit = normalizePlayitConfig(merged.playit);
   merged.ui = normalizeUiConfig(merged.ui);
   merged.updater = normalizeUpdaterConfig(merged.updater, merged);
   merged.desktop = normalizeDesktopConfig(merged.desktop);
-  merged.cloudBackup = normalizeCloudBackupConfig(merged.cloudBackup);
+  const hiddenCloudTarget = await loadHiddenCloudTarget();
+  merged.cloudBackup = normalizeCloudBackupConfig(
+    applyHiddenCloudTarget(merged.cloudBackup, hiddenCloudTarget),
+  );
+  await saveHiddenCloudTarget(merged.cloudBackup);
   await writeJsonFile(paths.configFile, merged);
   return merged;
 }

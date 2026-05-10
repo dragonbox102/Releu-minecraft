@@ -32,6 +32,7 @@ export const defaultServerConfig = {
   backups: {
     enabled: true,
     intervalMinutes: 60,
+    maxStorageGb: 10,
     lastBackupAt: null,
     lastBackupPath: null,
   },

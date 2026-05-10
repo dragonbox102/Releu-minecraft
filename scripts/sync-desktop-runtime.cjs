@@ -32,10 +32,19 @@ const legacyStandaloneArtifacts = [
 ];
 
 async function removeIfExists(targetPath) {
-  await fs.rm(targetPath, {
-    recursive: true,
-    force: true,
-  });
+  try {
+    await fs.rm(targetPath, {
+      recursive: true,
+      force: true,
+    });
+    return true;
+  } catch (error) {
+    if (error?.code === "EBUSY" || error?.code === "EPERM") {
+      console.warn(`Skipping locked runtime path: ${targetPath}`);
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function ensureExists(targetPath, label) {
@@ -53,7 +62,10 @@ async function syncRuntimeToProjectRoot() {
     const sourcePath = path.join(runtimeSourceDir, entry);
     const targetPath = path.join(projectRoot, entry);
     await ensureExists(sourcePath, `Runtime entry ${entry}`);
-    await removeIfExists(targetPath);
+    const removed = await removeIfExists(targetPath);
+    if (!removed) {
+      continue;
+    }
     await fs.cp(sourcePath, targetPath, {
       recursive: true,
       force: true,

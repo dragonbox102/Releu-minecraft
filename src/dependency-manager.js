@@ -12,6 +12,7 @@ import { currentTimestamp, fileExists, paths, sanitizeLogLine } from "./config.j
 import {
   getJavaExecutableName,
   getMicrosoftJdkDownloadUrl,
+  isMac,
   isWindows,
   withHiddenConsole,
 } from "./platform.js";
@@ -237,14 +238,16 @@ export class DependencyManager {
       };
     }
 
-    const playitPresent = await fileExists(paths.playitBinary);
+    const playitBinaryPath = await this.playitManager.resolveInstalledBinaryPath();
+    const playitPresent = Boolean(playitBinaryPath);
     const playitSnapshot = this.playitManager.snapshot();
     dependencyState.playit = {
       id: "playit",
       name: "playit.gg Agent",
       type: "playit",
+      requiredOnBootstrap: !isMac,
       present: playitPresent,
-      path: paths.playitBinary,
+      path: playitBinaryPath,
       version: playitSnapshot.version ?? null,
     };
 

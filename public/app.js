@@ -46,6 +46,12 @@ const ui = {
   cloudBackupStatus: null,
   cloudBackupStatusLoading: false,
   cloudBackupStatusFetchedAt: 0,
+  cloudBackupDraft: {
+    deviceLabel: "",
+    accountUsername: "",
+    accountPassword: "",
+    targetRestoreKey: "",
+  },
   playerDrafts: {},
   consoleDrafts: {},
   variant: detectInitialUiVariant(),
@@ -2286,13 +2292,13 @@ function renderConsoleSection(server) {
 
 function renderPlayersSection(server) {
   const onlinePlayers = server.players.filter((entry) => entry.online).length;
-  return `<div class="flex flex-col gap-8"><div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><h1 class="mb-2 text-4xl font-black tracking-tight text-white">Player Database</h1><p class="max-w-3xl text-sm text-zinc-400">Manage known players, online players, and offline permission lists from one place.</p></div><div class="flex flex-wrap gap-2"><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${onlinePlayers} Active`)}</span></div><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full border border-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${server.players.length} Total`)}</span></div></div></div><form data-form="player-register" class="grid gap-4 border border-outline bg-surface p-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px]"><label class="flex flex-col gap-2"><span class="${C.label}">Player Name</span><input name="name" type="text" required class="${C.input}" placeholder="Steve" /></label><label class="flex flex-col gap-2"><span class="${C.label}">UUID (Optional)</span><input name="uuid" type="text" class="${C.input} font-mono" placeholder="00000000-0000-0000-0000-000000000000" /></label><button type="submit" class="self-end ${C.btnPrimary} py-3" data-busy-label="Adding...">Add Player</button></form><div class="overflow-hidden border border-outline bg-surface"><div class="overflow-x-auto"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-outline bg-surfaceAlt"><th class="p-4 ${C.label}">Status</th><th class="p-4 ${C.label}">Player</th><th class="p-4 ${C.label}">Flags</th><th class="p-4 ${C.label}">Last Seen</th><th class="p-4 text-right ${C.label}">Administrative Actions</th></tr></thead><tbody class="divide-y divide-zinc-900">${server.players.length ? server.players.map((player) => { const draft = ensurePlayerDraft(player); const key = playerDraftKey(player.name); return `<tr class="transition hover:bg-surfaceAlt" data-player-card data-player-key="${escapeHtml(key)}"><td class="p-4"><span class="block h-2 w-2 rounded-full ${player.online ? "bg-white shadow-[0_0_8px_rgba(255,255,255,0.4)]" : "border border-white"}"></span></td><td class="p-4"><div class="flex items-center gap-3"><img src="${escapeHtml(playerAvatarUrl(player))}" alt="${escapeHtml(player.name)}" class="h-10 w-10 border border-outline bg-black object-cover" loading="lazy" /><div><div class="text-sm font-semibold text-white">${escapeHtml(player.name)}</div><div class="font-mono text-xs text-zinc-500">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td class="p-4 font-mono text-xs text-white">${escapeHtml(renderPlayerFlags(player))}</td><td class="p-4 font-mono text-xs text-zinc-400">${escapeHtml(formatLastSeen(player.lastSeenAt))}</td><td class="p-4"><div class="ml-auto flex max-w-[540px] flex-wrap justify-end gap-2"><input name="reason" type="text" value="${escapeHtml(draft.reason)}" placeholder="Reason" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" /><select name="mode" class="border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none focus:border-white">${renderPlayerModeOptions(String(draft.mode ?? player.gamemode ?? "survival").toLowerCase())}</select><input name="destination" type="text" value="${escapeHtml(draft.destination)}" placeholder="Teleport target" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" />${renderPlayerButtons(player)}</div></td></tr>`; }).join("") : `<tr><td colspan="5" class="p-6 text-sm text-zinc-500">No players are registered yet.</td></tr>`}</tbody></table></div></div></div>`;
+  return `<div class="flex flex-col gap-8"><div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><h1 class="mb-2 text-4xl font-black tracking-tight text-white">Player Database</h1><p class="max-w-3xl text-sm text-zinc-400">Manage known players, online players, and offline permission lists from one place.</p></div><div class="flex flex-wrap gap-2"><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full bg-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${onlinePlayers} Active`)}</span></div><div class="flex items-center gap-2 border border-outline bg-surface px-4 py-2"><span class="h-2 w-2 rounded-full border border-white"></span><span class="text-[11px] font-bold uppercase tracking-[0.18em]">${escapeHtml(`${server.players.length} Total`)}</span></div></div></div><form data-form="player-register" class="grid gap-4 border border-outline bg-surface p-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px]"><label class="flex flex-col gap-2"><span class="${C.label}">Player Name</span><input name="name" type="text" required class="${C.input}" placeholder="Steve" /></label><label class="flex flex-col gap-2"><span class="${C.label}">UUID (Optional)</span><input name="uuid" type="text" class="${C.input} font-mono" placeholder="00000000-0000-0000-0000-000000000000" /></label><button type="submit" class="self-end ${C.btnPrimary} py-3" data-busy-label="Adding...">Add Player</button></form><div class="overflow-hidden border border-outline bg-surface"><div class="overflow-x-auto"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-outline bg-surfaceAlt"><th class="p-4 ${C.label}">Status</th><th class="p-4 ${C.label}">Player</th><th class="p-4 ${C.label}">Flags</th><th class="p-4 ${C.label}">Last Seen</th><th class="p-4 text-right ${C.label}">Administrative Actions</th></tr></thead><tbody class="divide-y divide-zinc-900">${server.players.length ? server.players.map((player) => { const draft = ensurePlayerDraft(player); const key = playerDraftKey(player.name); return `<tr class="transition hover:bg-surfaceAlt" data-player-card data-player-key="${escapeHtml(key)}"><td class="p-4"><span class="block h-2 w-2 rounded-full ${player.online ? "bg-white shadow-[0_0_8px_rgba(255,255,255,0.4)]" : "border border-white"}"></span></td><td class="p-4"><div class="flex items-center gap-3"><img src="${escapeHtml(playerAvatarUrl(player))}" alt="${escapeHtml(player.name)}" class="h-10 w-10 border border-outline bg-black object-cover" loading="lazy" /><div><div class="text-sm font-semibold text-white">${escapeHtml(player.name)}</div><div class="font-mono text-xs text-zinc-500">${escapeHtml(player.uuid ?? "UUID unknown")}</div></div></div></td><td class="p-4 font-mono text-xs text-white">${escapeHtml(renderPlayerFlags(player))}</td><td class="p-4 font-mono text-xs text-zinc-400">${escapeHtml(formatLastSeen(player.lastSeenAt))}</td><td class="p-4"><div class="ml-auto flex max-w-[540px] flex-wrap justify-end gap-2"><input name="reason" type="text" value="${escapeHtml(draft.reason)}" placeholder="Reason shown to player" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" /><select name="mode" class="border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none focus:border-white">${renderPlayerModeOptions(String(draft.mode ?? player.gamemode ?? "survival").toLowerCase())}</select><input name="destination" type="text" value="${escapeHtml(draft.destination)}" placeholder="Teleport target" class="min-w-[120px] border border-outline bg-black px-2 py-1 text-[10px] text-white outline-none placeholder:text-zinc-700 focus:border-white" />${renderPlayerButtons(player)}</div></td></tr>`; }).join("") : `<tr><td colspan="5" class="p-6 text-sm text-zinc-500">No players are registered yet.</td></tr>`}</tbody></table></div></div></div>`;
 }
 
 function renderWorldsSection(server) {
   const world = currentWorld(server)?.name ?? server.server.properties["level-name"] ?? "world";
   const levelSeed = String(server.server?.properties?.["level-seed"] ?? "").trim();
-  return `<div class="space-y-8"><div class="grid grid-cols-1 gap-4 md:grid-cols-3"><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Worlds</h3><h2 class="text-2xl font-semibold uppercase text-white">Active World</h2></div><form data-form="world-select" class="flex flex-col gap-4"><label class="flex flex-col gap-2"><span class="${C.label}">World Name</span><select name="name" class="${C.input}">${server.worlds.map((entry) => `<option value="${escapeHtml(entry.name)}" ${entry.name === world ? "selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}</select></label><label class="flex flex-col gap-2"><span class="${C.label}">Level Seed (Optional)</span><input name="seed" type="text" value="${escapeHtml(levelSeed)}" placeholder="Leave blank for random generation" class="${C.input}" /></label><div class="flex flex-col gap-2"><button type="submit" class="${C.btnPrimary} py-3">Use This World</button><button type="button" class="${C.btnGhost} py-3" data-action="regenerate-active-world">Regenerate Active World</button></div></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Upload World</h3><h2 class="text-2xl font-semibold uppercase text-white">Import A Zip</h2></div><form data-form="world-archive-upload" class="flex flex-col gap-4"><input name="file" type="file" accept=".zip,.mcworld" required class="w-full border border-outline bg-black px-4 py-3 text-sm text-zinc-300 file:mr-4 file:border-0 file:bg-white file:px-3 file:py-2 file:text-[11px] file:font-bold file:uppercase file:tracking-[0.18em] file:text-black" /><input name="worldName" type="text" placeholder="survival-archive" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Upload World Archive</button></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Import Folder</h3><h2 class="text-2xl font-semibold uppercase text-white">Use A Local World Folder</h2></div><form data-form="world-folder-import" class="flex flex-col gap-4"><div class="flex gap-2"><input name="sourcePath" type="text" placeholder="C:\\Worlds\\MyWorld" class="${C.input} flex-1" />${isDesktopApp() ? `<button type="button" class="${C.btnGhost}" data-action="pick-world-folder">Browse</button>` : ""}</div><input name="worldName" type="text" placeholder="local-import-01" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Import World Folder</button></form></section></div><div class="grid grid-cols-1 gap-4 xl:grid-cols-2">${server.worlds.map((entry) => renderWorldCard(entry)).join("")}</div></div>`;
+  return `<div class="space-y-8"><div class="grid grid-cols-1 gap-4 md:grid-cols-3"><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Worlds</h3><h2 class="text-2xl font-semibold uppercase text-white">Active World</h2></div><form data-form="world-select" class="flex flex-col gap-4"><label class="flex flex-col gap-2"><span class="${C.label}">World Name</span><select name="name" class="${C.input}">${server.worlds.map((entry) => `<option value="${escapeHtml(entry.name)}" ${entry.name === world ? "selected" : ""}>${escapeHtml(entry.name)}</option>`).join("")}</select></label><label class="flex flex-col gap-2"><span class="${C.label}">Level Seed (Optional)</span><input name="seed" type="text" value="${escapeHtml(levelSeed)}" placeholder="Leave blank for random generation" class="${C.input}" /></label><div class="flex flex-col gap-2"><button type="submit" class="${C.btnPrimary} py-3">Use This World</button><button type="button" class="${C.btnGhost} py-3" data-action="regenerate-active-world">Regenerate Active World</button></div></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Upload World</h3><h2 class="text-2xl font-semibold uppercase text-white">Import A Zip</h2></div><form data-form="world-archive-upload" class="flex flex-col gap-4"><input name="file" type="file" accept=".zip,.mcworld" required class="w-full border border-outline bg-black px-4 py-3 text-sm text-zinc-300 file:mr-4 file:border-0 file:bg-white file:px-3 file:py-2 file:text-[11px] file:font-bold file:uppercase file:tracking-[0.18em] file:text-black" /><div class="text-sm leading-6 text-zinc-400">Releu uses the selected archive name automatically. Just choose a <code>.zip</code> or <code>.mcworld</code> file and upload it.</div><button type="submit" class="${C.btnPrimary} py-3">Upload World Archive</button></form></section><section class="flex flex-col gap-6 border border-white bg-black p-6"><div><h3 class="${C.labelOn} mb-2">Import Folder</h3><h2 class="text-2xl font-semibold uppercase text-white">Use A Local World Folder</h2></div><form data-form="world-folder-import" class="flex flex-col gap-4"><div class="flex gap-2"><input name="sourcePath" type="text" placeholder="C:\\Worlds\\MyWorld" class="${C.input} flex-1" />${isDesktopApp() ? `<button type="button" class="${C.btnGhost}" data-action="pick-world-folder">Browse</button>` : ""}</div><input name="worldName" type="text" placeholder="local-import-01" class="${C.input}" /><button type="submit" class="${C.btnPrimary} py-3">Import World Folder</button></form></section></div><div class="grid grid-cols-1 gap-4 xl:grid-cols-2">${server.worlds.map((entry) => renderWorldCard(entry)).join("")}</div></div>`;
 }
 
 function renderAddonCompatibilityBanner(server, kind) {
@@ -2390,7 +2396,61 @@ function renderAddonsSection(server) {
 }
 
 function renderBackupsSection(server) {
-  return `<div class="grid grid-cols-1 gap-4 md:grid-cols-12"><section class="${C.card} space-y-6 md:col-span-4"><div class="space-y-2"><h2 class="${C.labelOn}">Protection</h2><div class="h-px w-full bg-outline"></div></div><form data-form="backup-settings" class="space-y-4"><label class="flex items-center gap-3"><input name="autoBackups" type="checkbox" class="h-4 w-4 accent-white" ${server.backups.enabled ? "checked" : ""} /><span class="text-[12px] text-zinc-300">Enable automatic backups</span></label><input name="backupIntervalMinutes" type="number" min="5" value="${escapeHtml(server.backups.intervalMinutes ?? 60)}" class="${C.input} font-mono" /><button type="submit" class="w-full ${C.btnPrimary} py-4">Save Backup Schedule</button></form><button type="button" class="w-full ${C.btnGhost} py-4" data-action="server-control" data-server-command="backup">Create Backup Now</button></section><section class="flex min-h-[600px] flex-col border border-outline bg-surface md:col-span-8"><div class="space-y-2 p-6"><h2 class="${C.labelOn}">Backup History</h2><div class="h-px w-full bg-outline"></div></div><div class="flex-1 overflow-hidden"><table class="w-full border-collapse text-left"><thead><tr class="border-b border-zinc-900"><th class="p-4 ${C.label}">Timestamp</th><th class="p-4 ${C.label}">Folder Path</th><th class="p-4 text-right ${C.label}">Actions</th></tr></thead><tbody class="font-mono text-[13px]">${server.backups.recent.length ? server.backups.recent.map((backup) => `<tr class="border-b border-zinc-900 transition hover:bg-surfaceAlt"><td class="p-4 text-white">${escapeHtml(formatTimestamp(backup.createdAt))}</td><td class="p-4 text-zinc-500">${escapeHtml(backup.path)}</td><td class="space-x-3 p-4 text-right">${isDesktopApp() ? `<button type="button" class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:text-white" data-action="open-path" data-path="${escapeHtml(backup.path)}">Open Folder</button>` : ""}</td></tr>`).join("") : `<tr><td colspan="3" class="p-6 text-sm text-zinc-500">No backups have been created yet.</td></tr>`}</tbody></table></div></section></div>`;
+  const backups = Array.isArray(server.backups?.recent) ? server.backups.recent : [];
+  const totalBytes = Math.max(0, Number(server.backups?.totalBytes ?? 0) || 0);
+  const maxStorageGb = Math.max(1, Number(server.backups?.maxStorageGb ?? 10) || 10);
+  const nextBackupAt = server.backups?.nextBackupAt ? formatTimestamp(server.backups.nextBackupAt) : "Disabled";
+  return `<div class="grid grid-cols-1 gap-4 md:grid-cols-12">
+    <section class="${C.card} space-y-6 md:col-span-4">
+      <div class="space-y-2">
+        <h2 class="${C.labelOn}">Protection</h2>
+        <div class="h-px w-full bg-outline"></div>
+      </div>
+      <form data-form="backup-settings" class="space-y-4">
+        <label class="flex items-center gap-3">
+          <input name="autoBackups" type="checkbox" class="h-4 w-4 accent-white" ${server.backups.enabled ? "checked" : ""} />
+          <span class="text-[12px] text-zinc-300">Enable automatic backups</span>
+        </label>
+        <label class="flex flex-col gap-2">
+          <span class="${C.label}">Backup Interval Minutes</span>
+          <input name="backupIntervalMinutes" type="number" min="5" step="5" value="${escapeHtml(server.backups.intervalMinutes ?? 60)}" class="${C.input} font-mono" />
+        </label>
+        <label class="flex flex-col gap-2">
+          <span class="${C.label}">Max Total Backup Storage (GB)</span>
+          <input name="maxBackupStorageGb" type="number" min="1" step="1" value="${escapeHtml(maxStorageGb)}" class="${C.input} font-mono" />
+        </label>
+        <div class="space-y-2 border border-outline bg-black p-4 text-sm text-zinc-400">
+          <div class="flex items-center justify-between gap-3"><span>Current Usage</span><span class="font-mono text-white">${escapeHtml(formatBytes(totalBytes))}</span></div>
+          <div class="flex items-center justify-between gap-3"><span>Next Scheduled Backup</span><span class="font-mono text-white">${escapeHtml(nextBackupAt)}</span></div>
+        </div>
+        <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">If the total backup folder size reaches the configured max, Releu deletes the oldest local backups first to make room for new ones.</div>
+        <button type="submit" class="w-full ${C.btnPrimary} py-4">Save Backup Settings</button>
+      </form>
+      <button type="button" class="w-full ${C.btnGhost} py-4" data-action="server-control" data-server-command="backup">Create Backup Now</button>
+    </section>
+    <section class="flex min-h-[600px] flex-col border border-outline bg-surface md:col-span-8">
+      <div class="space-y-2 p-6">
+        <h2 class="${C.labelOn}">Backup History</h2>
+        <div class="h-px w-full bg-outline"></div>
+        <p class="text-sm text-zinc-400">Revert creates one safety backup first, then restores the selected backup onto the current server after three confirmations.</p>
+      </div>
+      <div class="flex-1 overflow-hidden">
+        <table class="w-full border-collapse text-left">
+          <thead>
+            <tr class="border-b border-zinc-900">
+              <th class="p-4 ${C.label}">Timestamp</th>
+              <th class="p-4 ${C.label}">Size</th>
+              <th class="p-4 ${C.label}">Folder Path</th>
+              <th class="p-4 text-right ${C.label}">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="font-mono text-[13px]">
+            ${backups.length ? backups.map((backup) => `<tr class="border-b border-zinc-900 transition hover:bg-surfaceAlt"><td class="p-4 text-white">${escapeHtml(formatTimestamp(backup.createdAt))}</td><td class="p-4 text-zinc-300">${escapeHtml(formatBytes(backup.bytes ?? 0))}</td><td class="p-4 text-zinc-500">${escapeHtml(backup.path)}</td><td class="space-x-3 p-4 text-right"><button type="button" class="text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:text-zinc-300" data-action="backup-revert" data-backup-name="${escapeHtml(backup.name)}" data-busy-label="Reverting...">Revert</button>${isDesktopApp() ? `<button type="button" class="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:text-white" data-action="open-path" data-path="${escapeHtml(backup.path)}">Open Folder</button>` : ""}</td></tr>`).join("") : `<tr><td colspan="4" class="p-6 text-sm text-zinc-500">No backups have been created yet.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>`;
 }
 
 function renderMiscSection(server) {
@@ -2567,6 +2627,19 @@ function renderSettingsSection(server) {
   const cloudConfig = runtime.data.cloudBackupSettings ?? {};
   const cloudProvider = cloud.provider ?? cloudConfig.provider ?? "tailscale-ssh";
   const usingTailscaleCloud = cloudProvider === "tailscale-ssh";
+  const cloudNeedsAuthGate = usingTailscaleCloud && !cloud.loggedIn;
+  const cloudDraft = {
+    deviceLabel:
+      String(ui.cloudBackupDraft?.deviceLabel ?? "").trim() ||
+      String(cloud.deviceLabel ?? cloudConfig.deviceLabel ?? "").trim(),
+    accountUsername:
+      String(ui.cloudBackupDraft?.accountUsername ?? "").trim() ||
+      String(cloud.accountUsername ?? cloudConfig.accountUsername ?? "").trim(),
+    accountPassword: String(ui.cloudBackupDraft?.accountPassword ?? ""),
+    targetRestoreKey:
+      String(ui.cloudBackupDraft?.targetRestoreKey ?? "").trim() ||
+      String(cloud.targetRestoreKey ?? cloudConfig.targetRestoreKey ?? "").trim(),
+  };
   const cloudUploadLimitBytes =
     Number(cloud.uploadLimitBytes ?? (cloudConfig.uploadLimitMb ?? 50) * 1024 * 1024) || 0;
   const cloudUploadLimitLabel = usingTailscaleCloud
@@ -2678,18 +2751,32 @@ function renderSettingsSection(server) {
           </label>
           <label class="block">
             <span class="${C.label} mb-2 block">Device Label</span>
-            <input name="deviceLabel" type="text" value="${escapeHtml(cloud.deviceLabel ?? cloudConfig.deviceLabel ?? "")}" placeholder="My desktop PC" class="${C.input} w-full" />
+            <input name="deviceLabel" type="text" value="${escapeHtml(cloudDraft.deviceLabel)}" placeholder="My desktop PC" class="${C.input} w-full" />
           </label>
           <input name="provider" type="hidden" value="${escapeHtml(cloudProvider)}" />
-          ${usingTailscaleCloud
+          ${usingTailscaleCloud && cloudNeedsAuthGate
             ? `
+              <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
+                <div class="mb-1 text-white">Sign in or create a cloud backup account first.</div>
+                <div>Cloud upload, restore, backup keys, and shared backup targets stay locked until you log in.</div>
+              </div>
               <label class="block">
                 <span class="${C.label} mb-2 block">Cloud Username</span>
-                <input name="accountUsername" type="text" value="${escapeHtml(cloud.accountUsername ?? cloudConfig.accountUsername ?? "")}" placeholder="alex" class="${C.input} w-full" />
+                <input name="accountUsername" type="text" value="${escapeHtml(cloudDraft.accountUsername)}" placeholder="alex" class="${C.input} w-full" />
               </label>
               <label class="block">
                 <span class="${C.label} mb-2 block">Cloud Password</span>
-                <input name="accountPassword" type="password" value="" placeholder="Log in to backup" class="${C.input} w-full" />
+                <input name="accountPassword" type="password" value="${escapeHtml(cloudDraft.accountPassword)}" placeholder="Log in to backup" class="${C.input} w-full" />
+              </label>`
+            : usingTailscaleCloud
+            ? `
+              <label class="block">
+                <span class="${C.label} mb-2 block">Cloud Username</span>
+                <input name="accountUsername" type="text" value="${escapeHtml(cloudDraft.accountUsername)}" placeholder="alex" class="${C.input} w-full" />
+              </label>
+              <label class="block">
+                <span class="${C.label} mb-2 block">Cloud Password</span>
+                <input name="accountPassword" type="password" value="${escapeHtml(cloudDraft.accountPassword)}" placeholder="Log in to backup" class="${C.input} w-full" />
               </label>
               <label class="block">
                 <span class="${C.label} mb-2 block">My Backup Key</span>
@@ -2697,7 +2784,7 @@ function renderSettingsSection(server) {
               </label>
               <label class="block">
                 <span class="${C.label} mb-2 block">Shared Backup Key (Optional)</span>
-                <input name="targetRestoreKey" type="text" value="${escapeHtml(cloud.targetRestoreKey ?? cloudConfig.targetRestoreKey ?? "")}" placeholder="Enter another user's key to upload or restore their backup space" class="${C.input} w-full font-mono text-xs" />
+                <input name="targetRestoreKey" type="text" value="${escapeHtml(cloudDraft.targetRestoreKey)}" placeholder="Enter another user's key to upload or restore their backup space" class="${C.input} w-full font-mono text-xs" />
               </label>`
             : `
               <label class="block">
@@ -2707,21 +2794,23 @@ function renderSettingsSection(server) {
           <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
             <div>${usingTailscaleCloud ? "Connection" : "Function"}: <span class="font-mono text-zinc-200">${escapeHtml(cloud.functionReady ? "ready" : ui.cloudBackupStatusLoading ? "checking" : "not ready")}</span></div>
             ${usingTailscaleCloud ? `<div class="mt-1">Login: <span class="font-mono text-zinc-200">${escapeHtml(cloud.loggedIn ? `logged in as ${cloud.accountUsername || "account"}` : "not logged in")}</span></div>` : ""}
-            <div class="mt-1">Upload limit: <span class="font-mono text-zinc-200">${escapeHtml(cloudUploadLimitLabel)}</span></div>
-            <div class="mt-1">Cloud used: <span class="font-mono text-zinc-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>
-            <div class="mt-1">Saved backups: <span class="font-mono text-zinc-200">${escapeHtml(formatCount(cloud.backupsCount ?? 0))}</span></div>
-            <div class="mt-1">Latest backup: <span class="font-mono text-zinc-200">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>
-            ${usingTailscaleCloud && cloud.usingSharedRestoreKey ? `<div class="mt-1">Target key: <span class="font-mono text-zinc-200">shared backup space</span></div>` : ""}
+            ${cloudNeedsAuthGate ? "" : `<div class="mt-1">Upload limit: <span class="font-mono text-zinc-200">${escapeHtml(cloudUploadLimitLabel)}</span></div>`}
+            ${cloudNeedsAuthGate ? "" : `<div class="mt-1">Cloud used: <span class="font-mono text-zinc-200">${escapeHtml(formatBytes(cloud.usedBytes ?? 0))}</span></div>`}
+            ${cloudNeedsAuthGate ? "" : `<div class="mt-1">Saved backups: <span class="font-mono text-zinc-200">${escapeHtml(formatCount(cloud.backupsCount ?? 0))}</span></div>`}
+            ${cloudNeedsAuthGate ? "" : `<div class="mt-1">Latest backup: <span class="font-mono text-zinc-200">${escapeHtml(cloud.latestBackup?.backup_name ?? "None yet")}</span></div>`}
+            ${usingTailscaleCloud && cloud.usingSharedRestoreKey && !cloudNeedsAuthGate ? `<div class="mt-1">Target key: <span class="font-mono text-zinc-200">shared backup space</span></div>` : ""}
             ${cloud.authError ? `<div class="mt-2 text-red-300">${escapeHtml(cloud.authError)}</div>` : ""}
             ${cloud.functionError ? `<div class="mt-2 text-red-300">${escapeHtml(cloud.functionError)}</div>` : ""}
           </div>
           <div class="flex flex-wrap gap-2">
-            <button type="submit" class="${C.btnPrimary}">Save Cloud Settings</button>
+            <button type="submit" class="${C.btnPrimary}">${cloudNeedsAuthGate ? "Save Cloud Setup" : "Save Cloud Settings"}</button>
             <button type="button" class="${C.btnGhost}" data-action="cloud-backup-refresh">Refresh Cloud Status</button>
-            ${usingTailscaleCloud
+            ${usingTailscaleCloud && cloudNeedsAuthGate
               ? `
-                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-register">Register</button>
-                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-login">Log In</button>
+                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-register">Create Account</button>
+                <button type="button" class="${C.btnGhost}" data-action="cloud-backup-login">Log In</button>`
+              : usingTailscaleCloud
+              ? `
                 ${cloud.loggedIn ? `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-logout">Log Out</button>` : ""}
                 ${cloud.loggedIn ? `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>` : ""}
                 <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled || !cloud.loggedIn ? "disabled" : ""}>Backup To Cloud Now</button>`
@@ -2730,7 +2819,7 @@ function renderSettingsSection(server) {
                 ${!cloud.restoreKeyPresent ? "" : `<button type="button" class="${C.btnGhost}" data-action="cloud-backup-rotate-key">Rotate Key</button>`}
                 <button type="button" class="${C.btnGhost}" data-action="cloud-backup-upload" ${!cloudConfig.enabled || !cloud.restoreKeyPresent ? "disabled" : ""}>Backup To Cloud Now</button>`}
           </div>
-          <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
+          ${cloudNeedsAuthGate ? "" : `<div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
             <div class="mb-3 text-[11px] font-bold uppercase tracking-[0.18em] text-white">${usingTailscaleCloud ? "Rolling Cloud Backup" : "Cloud Backups"}</div>
             ${
               cloud.backups?.length
@@ -2752,7 +2841,7 @@ function renderSettingsSection(server) {
                     .join("")
                 : `<div class="text-[11px] text-zinc-500">No cloud backups uploaded yet.</div>`
             }
-          </div>
+          </div>`}
         </form>
       </div>
       <div class="${C.card}">
@@ -2789,11 +2878,15 @@ function renderPanelScreen() {
   return `<div class="releu-screen min-h-screen bg-black text-white">${renderHeader()}<main class="mx-auto max-w-[1440px] p-6 lg:p-8">${content || overview}</main></div>`;
 }
 
+function shouldRenderBlockingBootstrap() {
+  return ui.bootstrap.active;
+}
+
 function render() {
   syncVariantAssets();
   const focusSnapshot = captureEditableFocus();
   let page;
-  if (ui.bootstrap.active) {
+  if (shouldRenderBlockingBootstrap()) {
     stopPlayitGatePolling();
     app.innerHTML = renderBootstrapScreen();
     restoreEditableFocus(focusSnapshot);
@@ -3188,6 +3281,7 @@ async function handleAction(event) {
     "cloud-backup-upload",
     "cloud-backup-download",
     "cloud-backup-restore",
+    "backup-revert",
     "choose-ui-variant",
   ]);
 
@@ -3269,6 +3363,28 @@ async function handleAction(event) {
       case "server-control":
         await runServerControl(button.dataset.serverCommand);
         break;
+      case "backup-revert": {
+        const backupName = String(button.dataset.backupName ?? "").trim();
+        if (!backupName) {
+          throw new Error("Choose a backup first.");
+        }
+        if (!window.confirm(`Revert the current server to "${backupName}"?\n\nThis overwrites the live server files and worlds with the selected backup.`)) {
+          break;
+        }
+        if (!window.confirm("This can permanently replace newer progress if you choose the wrong backup.\n\nAre you sure you want to continue?")) {
+          break;
+        }
+        if (!window.confirm(`Final warning: Releu will create one safety backup, then revert this server to "${backupName}".\n\nProceed with the revert?`)) {
+          break;
+        }
+        await api(activeServerPath("/backups/revert"), {
+          method: "POST",
+          body: { backupName },
+        });
+        await refreshState();
+        await refreshLogs();
+        break;
+      }
       case "copy-address":
         if (!playitMinecraftIp()) throw new Error(runtime.data?.playit?.secretConfigured ? "No public join address is available yet." : "Link playit.gg once first.");
         await copyText(playitMinecraftIp());
@@ -3413,6 +3529,9 @@ async function handleAction(event) {
         runtime.data = payload.state;
         ui.cloudBackupStatus = payload.cloudBackup ?? null;
         ui.cloudBackupStatusFetchedAt = Date.now();
+        ui.cloudBackupDraft.accountUsername = form?.elements?.accountUsername?.value ?? "";
+        ui.cloudBackupDraft.accountPassword = "";
+        ui.cloudBackupDraft.deviceLabel = form?.elements?.deviceLabel?.value ?? "";
         render();
         break;
       }
@@ -3429,6 +3548,9 @@ async function handleAction(event) {
         runtime.data = payload.state;
         ui.cloudBackupStatus = payload.cloudBackup ?? null;
         ui.cloudBackupStatusFetchedAt = Date.now();
+        ui.cloudBackupDraft.accountUsername = form?.elements?.accountUsername?.value ?? "";
+        ui.cloudBackupDraft.accountPassword = "";
+        ui.cloudBackupDraft.deviceLabel = form?.elements?.deviceLabel?.value ?? "";
         render();
         break;
       }
@@ -3437,6 +3559,7 @@ async function handleAction(event) {
         runtime.data = payload.state;
         ui.cloudBackupStatus = payload.cloudBackup ?? null;
         ui.cloudBackupStatusFetchedAt = Date.now();
+        ui.cloudBackupDraft.accountPassword = "";
         render();
         break;
       }
@@ -3621,9 +3744,7 @@ async function handleSubmit(event) {
       case "world-archive-upload": {
         const file = form.elements.file.files?.[0];
         if (!file) throw new Error("Choose a world archive first.");
-        const params = new URLSearchParams();
-        if (String(form.elements.worldName.value ?? "").trim()) params.set("worldName", String(form.elements.worldName.value).trim());
-        await apiRaw(`${activeServerPath("/worlds/upload-archive")}?${params.toString()}`, await file.arrayBuffer(), { "Content-Type": "application/octet-stream", "X-File-Name": file.name });
+        await apiRaw(activeServerPath("/worlds/upload-archive"), await file.arrayBuffer(), { "Content-Type": "application/octet-stream", "X-File-Name": file.name });
         form.reset();
         await refreshState();
         await refreshLogs();
@@ -3692,7 +3813,14 @@ async function handleSubmit(event) {
         await refreshLogs();
         break;
       case "backup-settings":
-        await api(activeServerPath("/settings/profile"), { method: "POST", body: { name: activeServer().name, autoBackups: form.elements.autoBackups.checked, backupIntervalMinutes: Number(form.elements.backupIntervalMinutes.value) || 60 } });
+        await api(activeServerPath("/settings/backups"), {
+          method: "POST",
+          body: {
+            autoBackups: form.elements.autoBackups.checked,
+            backupIntervalMinutes: Number(form.elements.backupIntervalMinutes.value) || 60,
+            maxBackupStorageGb: Number(form.elements.maxBackupStorageGb.value) || 10,
+          },
+        });
         await refreshState();
         break;
       case "server-settings":
@@ -3717,11 +3845,32 @@ async function handleSubmit(event) {
         form.dataset.miscSaving = "true";
         form.dataset.miscResubmit = "false";
         try {
-          if (Boolean(activeServer().misc?.keepInventory) !== (form.elements.keepInventory.value === "true")) {
+          const currentAllowCrackedClients =
+            String(activeServer().server?.properties?.["online-mode"] ?? "true").toLowerCase() !== "true";
+          const nextAllowCrackedClients = form.elements.allowCrackedClients.value === "true";
+          if (currentAllowCrackedClients !== nextAllowCrackedClients) {
             const proceed = window.confirm(
-              "Warning: changing Keep Inventory can immediately affect what players are wearing or holding in their inventory. Do you want to continue?",
+              "Warning: changing Allow Cracked Clients switches players to a different save slot / UUID, so their inventory can look missing in this mode.\n\nIf you switch it back later, the original save usually comes back.\n\nDo you want to continue?",
             );
             if (!proceed) {
+              form.elements.allowCrackedClients.value = currentAllowCrackedClients ? "true" : "false";
+              const statusNode = document.querySelector("[data-misc-autosave-status]");
+              if (statusNode) {
+                statusNode.textContent = "Allow Cracked Clients change cancelled.";
+              }
+              break;
+            }
+          }
+          if (Boolean(activeServer().misc?.keepInventory) !== (form.elements.keepInventory.value === "true")) {
+            const proceed = window.confirm(
+              "Warning: changing Keep Inventory can sometimes make every user's inventory look missing or get lost, and sometimes nothing happens.\n\nThis usually depends on when player data gets saved, deaths, and world state.\n\nDo you want to continue?",
+            );
+            if (!proceed) {
+              form.elements.keepInventory.value = Boolean(activeServer().misc?.keepInventory) ? "true" : "false";
+              const statusNode = document.querySelector("[data-misc-autosave-status]");
+              if (statusNode) {
+                statusNode.textContent = "Keep Inventory change cancelled.";
+              }
               break;
             }
           }
@@ -3792,6 +3941,8 @@ async function handleSubmit(event) {
         runtime.data = payload.state;
         ui.cloudBackupStatus = payload.status ?? null;
         ui.cloudBackupStatusFetchedAt = Date.now();
+        ui.cloudBackupDraft.deviceLabel = form.elements.deviceLabel.value;
+        ui.cloudBackupDraft.targetRestoreKey = form.elements.targetRestoreKey?.value ?? "";
         render();
         break;
       }
@@ -3854,6 +4005,15 @@ function handleInput(event) {
       const maxInput = document.querySelector('[data-create-field="maxRamMb"]');
       if (maxInput) maxInput.min = String(ui.createDraft.minRamMb);
     }
+  }
+  const cloudForm = event.target?.closest?.('form[data-form="cloud-backup-settings"]');
+  if (
+    cloudForm &&
+    ["deviceLabel", "accountUsername", "accountPassword", "targetRestoreKey"].includes(
+      event.target?.name ?? "",
+    )
+  ) {
+    ui.cloudBackupDraft[event.target.name] = event.target.value;
   }
   const commandForm = event.target?.closest?.('form[data-form="console-command"]');
   if (commandForm && event.target?.name === "command") {
@@ -3933,12 +4093,13 @@ async function boot() {
   document.addEventListener("change", handleInput);
   document.addEventListener("keydown", handleKeydown);
   render();
-  await sleep(250);
-  await ensureDependenciesReady();
+  await sleep(25);
+  const dependencyPromise = ensureDependenciesReady();
   await refreshState();
-  await runStartupAppUpdateCheck();
   scheduleLogsPolling();
   scheduleStatePolling();
+  await dependencyPromise;
+  await runStartupAppUpdateCheck();
 }
 
 boot().catch((error) => {

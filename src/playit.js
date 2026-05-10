@@ -1,10 +1,12 @@
 import fs from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import https from "node:https";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { Readable } from "node:stream";
+import extractZip from "extract-zip";
 
 import {
   currentTimestamp,
@@ -17,13 +19,64 @@ import {
 import {
   getPlayitAssetCandidates,
   isWindows,
+  runtimeArch,
   runtimePlatform,
   withHiddenConsole,
 } from "./platform.js";
 
 const PLAYIT_RELEASES_URL =
   "https://api.github.com/repos/playit-cloud/playit-agent/releases/latest";
+const PLAYIT_SOURCE_REPO = "playit-cloud/playit-agent";
 const PLAYIT_API_BASE = "https://api.playit.gg";
+const playitExecutableName = path.basename(paths.playitBinary);
+const macCargoBinaryName = isWindows ? "cargo.exe" : "cargo";
+
+function splitPathEntries() {
+  return String(process.env.PATH ?? "")
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function uniqueValues(values) {
+  return [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))];
+}
+
+async function resolveExistingPlayitBinaryPath() {
+  const pathEntries = splitPathEntries();
+  const explicitMacCandidates =
+    runtimePlatform === "darwin"
+      ? ["/opt/homebrew/bin/playit", "/usr/local/bin/playit", "/opt/local/bin/playit"]
+      : [];
+  const candidates = uniqueValues([
+    paths.playitBinary,
+    ...explicitMacCandidates,
+    ...pathEntries.map((entry) => path.join(entry, playitExecutableName)),
+  ]);
+
+  for (const candidate of candidates) {
+    if (await fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function resolveExistingSystemBinary(binaryName, explicitCandidates = []) {
+  const candidates = uniqueValues([
+    ...explicitCandidates,
+    ...splitPathEntries().map((entry) => path.join(entry, binaryName)),
+  ]);
+
+  for (const candidate of candidates) {
+    if (await fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
 
 function extractUiMessage(rawLine) {
   const cleaned = sanitizeLogLine(rawLine);
@@ -150,9 +203,10 @@ function normalizeApiTunnel(accountTunnel, agentTunnel = null) {
 }
 
 export class PlayitManager {
-  constructor({ appendLog, getServerPort }) {
+  constructor({ appendLog, getServerPort, getDownloadUrlOverride = null }) {
     this.appendLog = appendLog;
     this.getServerPort = getServerPort;
+    this.getDownloadUrlOverride = getDownloadUrlOverride;
     this.agentProcess = null;
     this.exchangeProcess = null;
     this.probeProcess = null;
@@ -160,6 +214,7 @@ export class PlayitManager {
     this.probePromise = null;
     this.lastAnnouncedPublicAddress = null;
     this.lastAnnouncedTunnelState = null;
+    this.binaryPath = null;
     this.state = {
       installed: false,
       version: null,
@@ -177,6 +232,8 @@ export class PlayitManager {
       statusMessage: null,
       dashboardTunnelUrl: "https://playit.gg/account/tunnels",
       newTunnelUrl: "https://playit.gg/account/setup/new-tunnel",
+      binaryPath: null,
+      usesExternalBinary: false,
       lastError: null,
       lastStartedAt: null,
       lastExitedAt: null,
@@ -186,10 +243,11 @@ export class PlayitManager {
     };
     this.lastRefreshAtMs = 0;
     this.lastProbeAtMs = 0;
+    this.installPromise = null;
   }
 
   async init() {
-    this.state.installed = await fileExists(paths.playitBinary);
+    this.state.installed = Boolean(await this.resolveInstalledBinaryPath());
     this.state.secretConfigured = await fileExists(paths.playitSecretFile);
     if (this.state.installed) {
       try {
@@ -225,6 +283,24 @@ export class PlayitManager {
       ...this.state,
       recommendedTunnelTarget: `127.0.0.1:${this.getServerPort()}`,
     };
+  }
+
+  async resolveInstalledBinaryPath() {
+    const binaryPath = await resolveExistingPlayitBinaryPath();
+    this.binaryPath = binaryPath;
+    this.state.binaryPath = binaryPath;
+    this.state.usesExternalBinary = Boolean(
+      binaryPath && path.resolve(binaryPath) !== path.resolve(paths.playitBinary),
+    );
+    this.state.installed = Boolean(binaryPath);
+    return binaryPath;
+  }
+
+  getBinaryPathOrThrow() {
+    if (!this.binaryPath) {
+      throw new Error("playit is not installed yet.");
+    }
+    return this.binaryPath;
   }
 
   async persistClaimInfo(claimUrl) {
@@ -493,9 +569,269 @@ export class PlayitManager {
   }
 
   async installBinary(onProgress = null) {
+    if (this.installPromise) {
+      return this.installPromise;
+    }
+
+    this.installPromise = this.installBinaryInternal(onProgress).finally(() => {
+      this.installPromise = null;
+    });
+    return this.installPromise;
+  }
+
+  async installBinaryInternal(onProgress = null) {
+    const existingBinary = await this.resolveInstalledBinaryPath();
+    if (existingBinary) {
+      if (!this.state.version) {
+        try {
+          const versionOutput = await this.runCommand(["version"]);
+          this.state.version = extractUiMessage(versionOutput.stdout)
+            .split(/\s+/)
+            .at(-1);
+        } catch {
+          this.state.version = null;
+        }
+      }
+      this.state.status = this.state.secretConfigured ? "ready" : "needs-claim";
+      this.appendLog(
+        "playit",
+        `Using existing playit agent at ${existingBinary}.`,
+      );
+      return this.snapshot();
+    }
+
+    const overrideUrl =
+      typeof this.getDownloadUrlOverride === "function"
+        ? String(this.getDownloadUrlOverride() ?? "").trim()
+        : "";
+    if (runtimePlatform === "darwin" && !overrideUrl) {
+      return this.installBinaryFromMacSource(onProgress);
+    }
+
+    const release = overrideUrl ? null : await this.fetchLatestRelease();
+    const asset = release ? this.pickPlatformAsset(release) : null;
+    const downloadUrl = overrideUrl || asset?.browser_download_url;
+    const downloadName =
+      asset?.name ??
+      (() => {
+        try {
+          return path.basename(new URL(downloadUrl).pathname) || "playit";
+        } catch {
+          return "playit";
+        }
+      })();
+    await this.downloadBinaryToPath(downloadUrl, paths.playitBinary, {
+      fileName: downloadName,
+      onProgress,
+    });
+
+    this.binaryPath = paths.playitBinary;
+    this.state.installed = true;
+    this.state.binaryPath = paths.playitBinary;
+    this.state.usesExternalBinary = false;
+    this.state.version = release?.tag_name ?? this.state.version ?? null;
+    this.state.status = this.state.secretConfigured ? "ready" : "needs-claim";
+    this.appendLog(
+      "playit",
+      `Installed playit agent ${this.state.version ?? "custom build"} to ${paths.playitBinary}.`,
+    );
+
+    return this.snapshot();
+  }
+
+  async installBinaryFromMacSource(onProgress = null) {
+    this.appendLog(
+      "playit",
+      "No prebuilt macOS playit binary is configured. Releu will build playit locally on this Mac.",
+    );
+
+    await this.ensureMacCommandLineTools();
+    const cargoPath = await this.ensureMacCargo();
     const release = await this.fetchLatestRelease();
-    const asset = this.pickPlatformAsset(release);
-    const response = await fetch(asset.browser_download_url, {
+    const tagName = String(release?.tag_name ?? "").trim() || "latest";
+    const sourceUrl = this.getMacSourceArchiveUrl(tagName);
+    const buildRoot = path.join(paths.playitToolDir, "mac-build");
+    const tempRoot = path.join(buildRoot, `build-${Date.now()}`);
+    const archivePath = path.join(tempRoot, `playit-agent-${tagName}.zip`);
+    const extractDir = path.join(tempRoot, "source");
+
+    await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    await fs.mkdir(extractDir, { recursive: true });
+
+    try {
+      this.appendLog(
+        "playit",
+        `Downloading official playit source ${tagName} for local macOS build.`,
+      );
+      await this.downloadBinaryToPath(sourceUrl, archivePath, {
+        fileName: path.basename(archivePath),
+        onProgress,
+      });
+
+      this.appendLog("playit", "Extracting playit source archive.");
+      await extractZip(archivePath, { dir: extractDir });
+      const sourceRoot = await this.findPlayitSourceRoot(extractDir);
+
+      this.appendLog(
+        "playit",
+        "Building playit locally on macOS. This can take a few minutes the first time.",
+      );
+      await this.runSystemCommand(
+        cargoPath,
+        ["build", "--release", "--locked", "-p", "playit-cli"],
+        {
+          cwd: sourceRoot,
+          timeoutMs: 30 * 60 * 1000,
+          env: this.getMacToolchainEnv(),
+        },
+      );
+
+      const builtBinaryPath = path.join(sourceRoot, "target", "release", "playit-cli");
+      if (!(await fileExists(builtBinaryPath))) {
+        throw new Error("playit built successfully, but Releu could not find the compiled macOS CLI.");
+      }
+
+      await fs.mkdir(path.dirname(paths.playitBinary), { recursive: true });
+      await fs.rm(paths.playitBinary, { force: true }).catch(() => {});
+      await fs.copyFile(builtBinaryPath, paths.playitBinary);
+      await fs.chmod(paths.playitBinary, 0o755);
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.binaryPath = paths.playitBinary;
+    this.state.installed = true;
+    this.state.binaryPath = paths.playitBinary;
+    this.state.usesExternalBinary = false;
+    try {
+      const versionOutput = await this.runCommand(["version"]);
+      this.state.version = extractUiMessage(versionOutput.stdout)
+        .split(/\s+/)
+        .at(-1);
+    } catch {
+      this.state.version = tagName;
+    }
+    this.state.status = this.state.secretConfigured ? "ready" : "needs-claim";
+    this.appendLog(
+      "playit",
+      `Built and installed playit ${this.state.version ?? tagName} locally for macOS.`,
+    );
+    return this.snapshot();
+  }
+
+  getMacSourceArchiveUrl(tagName) {
+    return `https://github.com/${PLAYIT_SOURCE_REPO}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`;
+  }
+
+  getMacRustupInitUrl() {
+    if (runtimeArch === "arm64") {
+      return "https://static.rust-lang.org/rustup/dist/aarch64-apple-darwin/rustup-init";
+    }
+    if (runtimeArch === "x64") {
+      return "https://static.rust-lang.org/rustup/dist/x86_64-apple-darwin/rustup-init";
+    }
+    throw new Error(`Releu does not know how to install Rust automatically for macOS/${runtimeArch}.`);
+  }
+
+  getMacToolchainEnv() {
+    const cargoHome = path.join(os.homedir(), ".cargo");
+    const rustupHome = path.join(os.homedir(), ".rustup");
+    const existingPathEntries = splitPathEntries();
+    return {
+      ...process.env,
+      CARGO_HOME: cargoHome,
+      RUSTUP_HOME: rustupHome,
+      PATH: uniqueValues([path.join(cargoHome, "bin"), ...existingPathEntries]).join(path.delimiter),
+    };
+  }
+
+  async ensureMacCommandLineTools() {
+    if (runtimePlatform !== "darwin") {
+      return;
+    }
+
+    try {
+      await this.runSystemCommand("/usr/bin/xcode-select", ["-p"], {
+        timeoutMs: 10000,
+      });
+    } catch {
+      await this.runSystemCommand("/usr/bin/xcode-select", ["--install"], {
+        timeoutMs: 15000,
+        allowNonZero: true,
+      }).catch(() => {});
+      throw new Error(
+        "Apple Command Line Tools are required so Releu can build playit locally on macOS. Releu opened the official installer prompt. Finish that install, then click Install Playit again.",
+      );
+    }
+  }
+
+  async ensureMacCargo() {
+    const existingCargo = await this.resolveMacCargoPath();
+    if (existingCargo) {
+      return existingCargo;
+    }
+
+    this.appendLog("playit", "Rust toolchain not found. Installing rustup and cargo automatically for macOS.");
+    const tempRoot = path.join(paths.playitToolDir, "mac-rustup");
+    const rustupInitPath = path.join(tempRoot, "rustup-init");
+
+    await fs.mkdir(tempRoot, { recursive: true });
+    await this.downloadBinaryToPath(this.getMacRustupInitUrl(), rustupInitPath, {
+      fileName: "rustup-init",
+    });
+    await fs.chmod(rustupInitPath, 0o755);
+
+    try {
+      await this.runSystemCommand(
+        rustupInitPath,
+        ["-y", "--profile", "minimal", "--default-toolchain", "stable"],
+        {
+          cwd: tempRoot,
+          timeoutMs: 20 * 60 * 1000,
+          env: this.getMacToolchainEnv(),
+        },
+      );
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    }
+
+    const installedCargo = await this.resolveMacCargoPath();
+    if (!installedCargo) {
+      throw new Error("Rust installed, but Releu still could not find cargo on this Mac.");
+    }
+    this.appendLog("playit", "Installed the Rust toolchain required for local macOS playit builds.");
+    return installedCargo;
+  }
+
+  async resolveMacCargoPath() {
+    return resolveExistingSystemBinary(macCargoBinaryName, [
+      path.join(os.homedir(), ".cargo", "bin", macCargoBinaryName),
+    ]);
+  }
+
+  async findPlayitSourceRoot(extractDir) {
+    const candidates = [extractDir];
+    const topLevelEntries = await fs.readdir(extractDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of topLevelEntries) {
+      if (entry.isDirectory()) {
+        candidates.push(path.join(extractDir, entry.name));
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (
+        (await fileExists(path.join(candidate, "Cargo.toml"))) &&
+        (await fileExists(path.join(candidate, "packages", "agent_cli", "Cargo.toml")))
+      ) {
+        return candidate;
+      }
+    }
+
+    throw new Error("Releu could not find the playit source workspace after extracting the macOS source archive.");
+  }
+
+  async downloadBinaryToPath(downloadUrl, targetPath, { fileName = null, onProgress = null } = {}) {
+    const response = await fetch(downloadUrl, {
       headers: {
         Accept: "application/octet-stream",
         "User-Agent": "localhost-minecraft-panel/1.0",
@@ -503,11 +839,11 @@ export class PlayitManager {
     });
 
     if (!response.ok) {
-      throw new Error(`Unable to download playit agent (${response.status}).`);
+      throw new Error(`Unable to download ${fileName ?? "playit"} (${response.status}).`);
     }
 
-    await fs.mkdir(path.dirname(paths.playitBinary), { recursive: true });
-    const tempPath = `${paths.playitBinary}.download`;
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const tempPath = `${targetPath}.download`;
     await fs.rm(tempPath, { force: true }).catch(() => {});
     const output = createWriteStream(tempPath);
     const totalBytes = Number(response.headers.get("content-length")) || null;
@@ -524,7 +860,7 @@ export class PlayitManager {
         if (onProgress) {
           const elapsedSeconds = Math.max(0.25, (Date.now() - startedAt) / 1000);
           onProgress({
-            fileName: asset.name,
+            fileName: fileName ?? path.basename(targetPath),
             downloadedBytes,
             totalBytes,
             speedBytesPerSecond: downloadedBytes / elapsedSeconds,
@@ -541,26 +877,16 @@ export class PlayitManager {
           resolve();
         });
       });
-      await fs.rm(paths.playitBinary, { force: true }).catch(() => {});
-      await fs.rename(tempPath, paths.playitBinary);
+      await fs.rm(targetPath, { force: true }).catch(() => {});
+      await fs.rename(tempPath, targetPath);
       if (!isWindows) {
-        await fs.chmod(paths.playitBinary, 0o755);
+        await fs.chmod(targetPath, 0o755);
       }
     } catch (error) {
       output.destroy();
       await fs.rm(tempPath, { force: true }).catch(() => {});
       throw error;
     }
-
-    this.state.installed = true;
-    this.state.version = release.tag_name ?? null;
-    this.state.status = this.state.secretConfigured ? "ready" : "needs-claim";
-    this.appendLog(
-      "playit",
-      `Installed playit agent ${this.state.version ?? "latest"} to ${paths.playitBinary}.`,
-    );
-
-    return this.snapshot();
   }
 
   async fetchLatestRelease() {
@@ -586,6 +912,11 @@ export class PlayitManager {
       .find(Boolean);
 
     if (!asset) {
+      if (runtimePlatform === "darwin") {
+        throw new Error(
+          `playit does not expose a macOS release asset here. Leave playit.macDownloadUrl blank and let Releu build playit locally on macOS instead, or provide an existing binary at ${paths.playitBinary}.`,
+        );
+      }
       throw new Error(
         `No supported ${runtimePlatform} playit executable was found in the latest release.`,
       );
@@ -634,7 +965,7 @@ export class PlayitManager {
     }
 
     const child = spawn(
-      paths.playitBinary,
+      this.getBinaryPathOrThrow(),
       ["--stdout", "claim", "exchange", claimCode, "--wait", "0"],
       withHiddenConsole({
         cwd: paths.playitDataDir,
@@ -700,6 +1031,7 @@ export class PlayitManager {
 
   async startAgent({ allowSetup = false } = {}) {
     await this.ensureBinary();
+    const binaryPath = this.getBinaryPathOrThrow();
     const secretConfigured = await fileExists(paths.playitSecretFile);
     if (!secretConfigured && !allowSetup) {
       throw new Error("No playit secret is configured yet.");
@@ -714,7 +1046,7 @@ export class PlayitManager {
     }
 
     const child = spawn(
-      paths.playitBinary,
+      binaryPath,
       ["--secret_path", paths.playitSecretFile, "--stdout", "start"],
       withHiddenConsole({
         cwd: paths.playitDataDir,
@@ -802,7 +1134,7 @@ export class PlayitManager {
   }
 
   async refreshTunnels({ force = false } = {}) {
-    if (!(await fileExists(paths.playitSecretFile)) || !(await fileExists(paths.playitBinary))) {
+    if (!(await fileExists(paths.playitSecretFile)) || !(await this.resolveInstalledBinaryPath())) {
       this.state.tunnels = [];
       this.state.configuredTunnelCount = 0;
       this.state.detectedTunnelCount = 0;
@@ -872,6 +1204,9 @@ export class PlayitManager {
       return this.snapshot();
     }
 
+    await this.ensureBinary();
+    const binaryPath = this.getBinaryPathOrThrow();
+
     const now = Date.now();
     if (!force && now - this.lastProbeAtMs < 30000) {
       return this.snapshot();
@@ -885,7 +1220,7 @@ export class PlayitManager {
     this.state.checkingTunnelStatus = true;
     this.probePromise = new Promise((resolve) => {
       const child = spawn(
-        paths.playitBinary,
+        binaryPath,
         ["--secret_path", paths.playitSecretFile, "--stdout", "start"],
         withHiddenConsole({
           cwd: paths.playitDataDir,
@@ -969,22 +1304,23 @@ export class PlayitManager {
   }
 
   async ensureBinary() {
-    if (!(await fileExists(paths.playitBinary))) {
+    const binaryPath = await this.resolveInstalledBinaryPath();
+    if (!binaryPath) {
+      if (runtimePlatform === "darwin") {
+        throw new Error(
+          `playit is not installed yet. Click Install Playit to let Releu build it locally on macOS, or provide playit.macDownloadUrl / an existing binary at ${paths.playitBinary}.`,
+        );
+      }
       throw new Error("playit is not installed yet.");
     }
+    return binaryPath;
   }
 
-  async runCommand(commandArgs, options = {}) {
-    await this.ensureBinary();
-    const args = [];
-    if (options.includeSecretPath) {
-      args.push("--secret_path", paths.playitSecretFile);
-    }
-    args.push("--stdout", ...commandArgs);
-
+  async runSystemCommand(command, commandArgs = [], options = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawn(paths.playitBinary, args, {
-        cwd: paths.playitDataDir,
+      const child = spawn(command, commandArgs, {
+        cwd: options.cwd ?? paths.playitDataDir,
+        env: options.env ?? process.env,
         ...withHiddenConsole(),
       });
 
@@ -999,7 +1335,7 @@ export class PlayitManager {
         }
         finished = true;
         child.kill();
-        reject(new Error("playit command timed out."));
+        reject(new Error(`${path.basename(command)} timed out.`));
       }, timeoutMs);
 
       child.stdout.on("data", (chunk) => {
@@ -1026,13 +1362,40 @@ export class PlayitManager {
         finished = true;
         clearTimeout(timeout);
 
-        if (code !== 0) {
-          reject(new Error(stderr.trim() || stdout.trim() || `playit exited with code ${code}.`));
+        if (code !== 0 && !options.allowNonZero) {
+          reject(
+            new Error(
+              stderr.trim() || stdout.trim() || `${path.basename(command)} exited with code ${code}.`,
+            ),
+          );
           return;
         }
 
-        resolve({ stdout: sanitizeLogLine(stdout), stderr: sanitizeLogLine(stderr) });
+        resolve({
+          stdout: sanitizeLogLine(stdout),
+          stderr: sanitizeLogLine(stderr),
+          code,
+        });
       });
     });
+  }
+
+  async runCommand(commandArgs, options = {}) {
+    await this.ensureBinary();
+    const binaryPath = this.getBinaryPathOrThrow();
+    const args = [];
+    if (options.includeSecretPath) {
+      args.push("--secret_path", paths.playitSecretFile);
+    }
+    args.push("--stdout", ...commandArgs);
+
+    const result = await this.runSystemCommand(binaryPath, args, {
+      cwd: paths.playitDataDir,
+      timeoutMs: options.timeoutMs ?? 20000,
+    });
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
   }
 }

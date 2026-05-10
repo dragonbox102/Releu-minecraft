@@ -8,15 +8,16 @@
     "start": "node src/app.js",
     "start:desktop": "node scripts/start-desktop.cjs",
     "test": "node --check src/app.js && node --check public/app.js && node --check electron/main.cjs && node --check electron/preload.cjs",
-    "build:exe": "electron-builder --win portable && node scripts/sync-desktop-runtime.cjs && node scripts/sync-release-assets.cjs win",
-    "build:linux": "electron-builder --linux AppImage && node scripts/sync-release-assets.cjs linux"
+    "build:exe": "electron-builder --win dir && node scripts/sync-desktop-runtime.cjs && node scripts/build-launcher-exe.cjs && node scripts/sync-release-assets.cjs win",
+    "build:linux": "electron-builder --linux AppImage && node scripts/sync-release-assets.cjs linux",
+    "build:mac": "electron-builder --mac dmg zip && node scripts/sync-release-assets.cjs mac"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@supabase/supabase-js": "^2.105.1",
+    "@vercel/blob": "^2.3.3",
     "archiver": "^7.0.1",
     "express": "^5.2.1",
     "extract-zip": "^2.0.1",
@@ -63,6 +64,10 @@
       "!Releu.exe",
       "!Releu-minecraft.exe",
       "!Releu-minecraft.AppImage",
+      "!Releu-minecraft-mac.dmg",
+      "!Releu-minecraft-mac.zip",
+      "!latest-linux.yml",
+      "!latest-mac.yml",
       "!*.zip"
     ],
     "asar": false,
@@ -91,6 +96,15 @@
         }
       ],
       "category": "Game"
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "artifactName": "Releu-minecraft-mac.${ext}",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.games"
     }
   }
 }

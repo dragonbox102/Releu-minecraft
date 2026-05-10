@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld("desktop", {
   applySettings(settings) {
     return ipcRenderer.invoke("desktop:update-settings", settings);
   },
+  openQuickConsole(serverId) {
+    return ipcRenderer.invoke("desktop:open-quick-console", serverId);
+  },
   installAppUpdate(stagedPath) {
     return ipcRenderer.invoke("desktop:install-app-update", stagedPath);
   },

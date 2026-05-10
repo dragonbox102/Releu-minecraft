@@ -7,6 +7,7 @@ export const runtimeArch = process.arch;
 export const isWindows = runtimePlatform === "win32";
 export const isLinux = runtimePlatform === "linux";
 export const isMac = runtimePlatform === "darwin";
+export const isUnix = isLinux || isMac;
 
 export function getAppDataHomeDir(appName = "Releu") {
   if (isWindows) {
@@ -43,6 +44,10 @@ export function getDefaultUpdaterAssetName() {
 
   if (isLinux) {
     return "Releu-minecraft.AppImage";
+  }
+
+  if (isMac) {
+    return "Releu-minecraft-mac.zip";
   }
 
   return "Releu-minecraft";
@@ -123,6 +128,16 @@ export function getMicrosoftJdkDownloadUrl(major) {
 
     if (runtimeArch === "arm64") {
       return `https://aka.ms/download-jdk/microsoft-jdk-${normalizedMajor}-linux-aarch64.tar.gz`;
+    }
+  }
+
+  if (isMac) {
+    if (runtimeArch === "x64") {
+      return `https://aka.ms/download-jdk/microsoft-jdk-${normalizedMajor}-macos-x64.tar.gz`;
+    }
+
+    if (runtimeArch === "arm64") {
+      return `https://aka.ms/download-jdk/microsoft-jdk-${normalizedMajor}-macos-aarch64.tar.gz`;
     }
   }
 

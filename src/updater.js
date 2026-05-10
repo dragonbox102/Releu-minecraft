@@ -7,6 +7,7 @@ import { Readable } from "node:stream";
 import { currentTimestamp, fileExists, paths, readJsonFile } from "./config.js";
 import {
   getDefaultUpdaterAssetName,
+  isMac,
   isLinux,
   isWindows,
 } from "./platform.js";
@@ -62,7 +63,7 @@ function pickReleaseAsset(release, preferredAssetName) {
     return preferred;
   }
 
-  const fallbackExtension = isWindows ? ".exe" : isLinux ? ".appimage" : "";
+  const fallbackExtension = isWindows ? ".exe" : isLinux ? ".appimage" : isMac ? ".zip" : "";
   if (fallbackExtension) {
     return (
       assets.find((asset) =>
@@ -96,7 +97,7 @@ export class AppUpdater {
     this.getPanelConfig = getPanelConfig;
     this.hasRunningServers = hasRunningServers;
     this.state = {
-      supported: isWindows || isLinux,
+      supported: isWindows || isLinux || isMac,
       currentVersion: "0.0.0",
       configured: false,
       enabled: false,
@@ -256,8 +257,7 @@ export class AppUpdater {
   async checkForUpdates() {
     this.syncConfig();
     if (!this.state.supported) {
-      this.state.statusMessage =
-        "Self-update is supported on Windows .exe builds and Linux AppImage builds.";
+      this.state.statusMessage = "App self-update is not supported on this platform.";
       return this.snapshot();
     }
 
