@@ -4,6 +4,8 @@ const LOG_POLL_MS = 2500;
 const SOFTWARE_ORDER = ["purpur", "paper", "vanilla", "fabric", "forge", "neoforge", "quilt"];
 const DEPENDENCY_CHECK_MIN_MS = 3000;
 const DEPENDENCY_CHECK_MAX_MS = 6000;
+const INITIAL_PANEL_CONNECT_TIMEOUT_MS = 15000;
+const INITIAL_PANEL_CONNECT_RETRY_MS = 350;
 const UI_VARIANT_CLASSIC = "classic";
 const UI_VARIANT_PELICAN_BLUEPRINT = "pelican-blueprint";
 const PELICAN_ASSET_HREFS = [
@@ -211,6 +213,15 @@ async function apiRaw(path, body, headers = {}) {
 
 function showError(error) {
   window.alert(error.message ?? String(error));
+}
+
+function isTransientLaunchFetchError(error) {
+  const message = String(error?.message ?? error ?? "").toLowerCase();
+  return (
+    message.includes("failed to fetch") ||
+    message.includes("networkerror") ||
+    message.includes("load failed")
+  );
 }
 
 function escapeHtml(value) {
@@ -3052,6 +3063,32 @@ async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activ
   }
 }
 
+async function waitForInitialState() {
+  const deadline = Date.now() + INITIAL_PANEL_CONNECT_TIMEOUT_MS;
+  let lastError = null;
+  for (;;) {
+    try {
+      await refreshState();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientLaunchFetchError(error) || Date.now() >= deadline) {
+        throw lastError;
+      }
+      ui.bootstrap.active = true;
+      ui.bootstrap.stage = "checking";
+      ui.bootstrap.title = "Opening Releu";
+      ui.bootstrap.detail = "Connecting to the local Releu panel.";
+      ui.bootstrap.warning = "";
+      ui.bootstrap.metaLeft = "System Node_01";
+      ui.bootstrap.metaRight = "Retrying";
+      ui.bootstrap.progressWidth = 30;
+      render();
+      await sleep(INITIAL_PANEL_CONNECT_RETRY_MS);
+    }
+  }
+}
+
 async function refreshCloudBackupStatus(force = false) {
   if (ui.cloudBackupStatusLoading) {
     return ui.cloudBackupStatus;
@@ -4125,7 +4162,7 @@ async function boot() {
   document.addEventListener("keydown", handleKeydown);
   render();
   await sleep(25);
-  await refreshState();
+  await waitForInitialState();
   scheduleLogsPolling();
   scheduleStatePolling();
   if (playitLinkRequired()) {

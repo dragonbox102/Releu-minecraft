@@ -1,4 +1,6 @@
 const PAGE = location.pathname.split("/").pop() || "servers.html";
+const INITIAL_PANEL_CONNECT_TIMEOUT_MS = 15000;
+const INITIAL_PANEL_CONNECT_RETRY_MS = 350;
 const SERVER_PAGES = new Set([
   "overview.html",
   "console.html",
@@ -479,6 +481,15 @@ function showError(error) {
   const message = error?.message ?? String(error ?? "Unexpected error.");
   showStatus(message, "error");
   console.error(error);
+}
+
+function isTransientLaunchFetchError(error) {
+  const message = String(error?.message ?? error ?? "").toLowerCase();
+  return (
+    message.includes("failed to fetch") ||
+    message.includes("networkerror") ||
+    message.includes("load failed")
+  );
 }
 
 function escapeHtml(value) {
@@ -8273,6 +8284,24 @@ async function pollCurrentPage() {
   await patchPage();
 }
 
+async function waitForInitialState() {
+  const deadline = Date.now() + INITIAL_PANEL_CONNECT_TIMEOUT_MS;
+  let lastError = null;
+  for (;;) {
+    try {
+      await refreshState();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientLaunchFetchError(error) || Date.now() >= deadline) {
+        throw lastError;
+      }
+      showStatus("Connecting to the local Releu panel...");
+      await sleep(INITIAL_PANEL_CONNECT_RETRY_MS);
+    }
+  }
+}
+
 async function boot() {
   injectReleaseChromeStyles();
   ensureQuickConsoleBinding();
@@ -8280,7 +8309,7 @@ async function boot() {
   wireLocalNavigation();
   suppressSavedShellBehavior();
   showStatus("Loading Releu...");
-  await refreshState();
+  await waitForInitialState();
   if (isDesktopApp()) {
     kickoffAppUpdateCheck().catch((error) => {
       console.error(error);
