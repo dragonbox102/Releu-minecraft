@@ -47,6 +47,13 @@ async function main() {
     await removeIfExists(artifactPath);
   }
 
+  if (mode === "win") {
+    await copyIfPresent(
+      path.join(distDir, "Releu-minecraft.exe"),
+      path.join(projectRoot, "Releu-minecraft.exe"),
+    );
+  }
+
   if (mode === "linux") {
     await copyIfPresent(
       path.join(distDir, "Releu-minecraft.AppImage"),
