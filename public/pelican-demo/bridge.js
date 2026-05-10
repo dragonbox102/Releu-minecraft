@@ -1841,8 +1841,17 @@ function ensureCreateNamePanel() {
   root.prepend(panel);
 }
 
+function normalizeDraftJavaPath(javaPath) {
+  const normalized = String(javaPath ?? "").trim();
+  if (!normalized) return "java";
+  if (/^win/i.test(String(navigator.platform ?? "")) && normalized.startsWith("/")) {
+    return "java";
+  }
+  return normalized;
+}
+
 function buildCreateDraft() {
-  return { name: "", software: "purpur", version: "latest", minRamMb: 1024, maxRamMb: 4096, cpuCores: 4, gpuShare: 0, javaPath: "/usr/bin/java" };
+  return { name: "", software: "purpur", version: "latest", minRamMb: 1024, maxRamMb: 4096, cpuCores: 4, gpuShare: 0, javaPath: "java" };
 }
 
 function buildSoftwareDraft(server) {
@@ -1855,7 +1864,7 @@ function buildSoftwareDraft(server) {
     minRamMb: Number(String(launcher.minRam ?? "1024").replace(/[^\d]/g, "")) || 1024,
     cpuCores: Number(launcher.cpuCores ?? 0) || 0,
     gpuShare: Number(launcher.gpuShare ?? 0) || 0,
-    javaPath: launcher.javaPath ?? "java",
+    javaPath: normalizeDraftJavaPath(launcher.javaPath),
   };
 }
 

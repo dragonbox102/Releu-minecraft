@@ -60,6 +60,7 @@ import {
 } from "./server-registry.js";
 import {
   isLinux,
+  isWindows,
   withHiddenConsole,
 } from "./platform.js";
 import {
@@ -1312,6 +1313,47 @@ export class MinecraftPanelService {
     return pathEqualsOrInside(normalized, paths.toolsDir);
   }
 
+  isForeignJavaPath(javaPath) {
+    const normalized = String(javaPath ?? "").trim();
+    if (!normalized) {
+      return false;
+    }
+
+    if (isWindows) {
+      return normalized.startsWith("/");
+    }
+
+    return /^[a-z]:[\\/]/i.test(normalized);
+  }
+
+  normalizeLauncherJavaPath(javaPath, version = null) {
+    const normalized = String(javaPath ?? "").trim();
+    const preferredJavaPath = this.getPreferredManagedJavaPath(version);
+
+    if (!normalized || this.shouldAutoManageJavaPath(normalized)) {
+      return preferredJavaPath || normalized || "java";
+    }
+
+    if (this.isForeignJavaPath(normalized)) {
+      return preferredJavaPath || "java";
+    }
+
+    return normalized;
+  }
+
+  async shouldRepairJavaPath(javaPath) {
+    const normalized = String(javaPath ?? "").trim();
+    if (!normalized || this.shouldAutoManageJavaPath(normalized)) {
+      return false;
+    }
+
+    if (this.isForeignJavaPath(normalized)) {
+      return true;
+    }
+
+    return path.isAbsolute(normalized) && !(await fileExists(normalized));
+  }
+
   async applyManagedJavaDefaults() {
     const dependencyState = this.dependencies.snapshot();
     if (!dependencyState.ready) {
@@ -1329,17 +1371,26 @@ export class MinecraftPanelService {
         continue;
       }
 
-      if (!this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
+      const shouldRepairJavaPath = await this.shouldRepairJavaPath(
+        context.config.launcher.javaPath,
+      );
+      if (!shouldRepairJavaPath && !this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
         continue;
       }
 
-      if (context.config.launcher.javaPath === preferredJavaPath) {
+      const nextJavaPath = this.normalizeLauncherJavaPath(
+        context.config.launcher.javaPath,
+        context.config.install.installedVersion ??
+          context.config.install.requestedVersion ??
+          null,
+      );
+      if (context.config.launcher.javaPath === nextJavaPath) {
         continue;
       }
 
       context.config.launcher = {
         ...context.config.launcher,
-        javaPath: preferredJavaPath,
+        javaPath: nextJavaPath,
       };
       await this.saveContextConfig(context);
     }
@@ -2014,15 +2065,12 @@ if (-not $sample) { exit 0 }
       ...sourceConfig,
       launcher: {
         ...sourceConfig.launcher,
-        javaPath:
-          String(
-            payload.javaPath ??
-              this.getPreferredManagedJavaPath(
-                payload.version ?? sourceConfig.install.requestedVersion ?? "latest",
-              ) ??
-              sourceConfig.launcher.javaPath ??
-              "java",
-          ).trim() || "java",
+        javaPath: this.normalizeLauncherJavaPath(
+          payload.javaPath ??
+            sourceConfig.launcher.javaPath ??
+            "java",
+          payload.version ?? sourceConfig.install.requestedVersion ?? "latest",
+        ),
         minRam: String(payload.minRam ?? sourceConfig.launcher.minRam ?? "2G").trim() || "2G",
         maxRam: String(payload.maxRam ?? sourceConfig.launcher.maxRam ?? "4G").trim() || "4G",
         cpuCores: clampNumber(
@@ -3256,7 +3304,12 @@ if (-not $sample) { exit 0 }
     const hostResources = this.getHostResources();
     context.config.launcher = {
       ...context.config.launcher,
-      javaPath: String(payload.javaPath ?? context.config.launcher.javaPath).trim() || "java",
+      javaPath: this.normalizeLauncherJavaPath(
+        payload.javaPath ?? context.config.launcher.javaPath,
+        context.config.install.installedVersion ??
+          context.config.install.requestedVersion ??
+          null,
+      ),
       minRam: String(payload.minRam ?? context.config.launcher.minRam).trim() || "2G",
       maxRam: String(payload.maxRam ?? context.config.launcher.maxRam).trim() || "4G",
       cpuCores: clampNumber(
@@ -3346,12 +3399,15 @@ if (-not $sample) { exit 0 }
 
     const requiredJavaMajor = getRequiredJavaMajor(resolvedVersion);
 
-    if (this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
+    const shouldRepairJavaPath = await this.shouldRepairJavaPath(context.config.launcher.javaPath);
+    if (this.shouldAutoManageJavaPath(context.config.launcher.javaPath) || shouldRepairJavaPath) {
       await this.dependencies.ensureJavaMajor(requiredJavaMajor).catch(() => null);
     }
 
-    const installerJavaPath =
-      this.getPreferredManagedJavaPath(resolvedVersion) ?? context.config.launcher.javaPath;
+    const installerJavaPath = this.normalizeLauncherJavaPath(
+      context.config.launcher.javaPath,
+      resolvedVersion,
+    );
     this.setServerOperation(context, {
       type: "install",
       title: "Installing Server Software",
@@ -3388,10 +3444,18 @@ if (-not $sample) { exit 0 }
       };
 
       const preferredJavaPath = this.getPreferredManagedJavaPath(installMeta.version);
-      if (preferredJavaPath && this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
+      if (
+        preferredJavaPath &&
+        (this.shouldAutoManageJavaPath(context.config.launcher.javaPath) || shouldRepairJavaPath)
+      ) {
         context.config.launcher = {
           ...context.config.launcher,
           javaPath: preferredJavaPath,
+        };
+      } else if (shouldRepairJavaPath) {
+        context.config.launcher = {
+          ...context.config.launcher,
+          javaPath: "java",
         };
       }
 
@@ -3730,22 +3794,28 @@ if (-not $sample) { exit 0 }
       "This server";
     const requiredJavaMajor = getRequiredJavaMajor(installedVersion);
 
-    if (this.shouldAutoManageJavaPath(context.config.launcher.javaPath)) {
+    const shouldRepairJavaPath = await this.shouldRepairJavaPath(context.config.launcher.javaPath);
+    if (this.shouldAutoManageJavaPath(context.config.launcher.javaPath) || shouldRepairJavaPath) {
       await this.dependencies.ensureJavaMajor(requiredJavaMajor).catch(() => null);
-      const preferredJavaPath = this.getPreferredManagedJavaPath(installedVersion);
-      if (preferredJavaPath && context.config.launcher.javaPath !== preferredJavaPath) {
+      const nextJavaPath = this.normalizeLauncherJavaPath(
+        context.config.launcher.javaPath,
+        installedVersion,
+      );
+      if (nextJavaPath && context.config.launcher.javaPath !== nextJavaPath) {
         context.config.launcher = {
           ...context.config.launcher,
-          javaPath: preferredJavaPath,
+          javaPath: nextJavaPath,
         };
         await this.saveContextConfig(context);
       }
     }
 
-    const javaRuntime = await this.inspectJavaRuntime(context.config.launcher.javaPath);
+    const launchJavaPath =
+      String(context.config.launcher.javaPath ?? "").trim() || "java";
+    const javaRuntime = await this.inspectJavaRuntime(launchJavaPath);
     if (!javaRuntime.major) {
       throw new Error(
-        `Could not determine the Java version for "${context.config.launcher.javaPath}".`,
+        `Could not determine the Java version for "${launchJavaPath}".`,
       );
     }
 
@@ -3786,7 +3856,7 @@ if (-not $sample) { exit 0 }
       args.push("--nogui");
     }
 
-    const child = spawn(context.config.launcher.javaPath, args, {
+    const child = spawn(launchJavaPath, args, {
       cwd: context.paths.serverDir,
       ...withHiddenConsole(),
     });
@@ -3801,7 +3871,7 @@ if (-not $sample) { exit 0 }
     this.appendLog(
       serverId,
       "panel",
-      `Starting Minecraft server with ${context.config.launcher.javaPath}${safeMode ? " in safe mode" : ""}.`,
+      `Starting Minecraft server with ${launchJavaPath}${safeMode ? " in safe mode" : ""}.`,
     );
 
     const handleOutput = (source, chunk) => {
