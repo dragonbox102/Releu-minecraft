@@ -67,19 +67,15 @@ internal sealed class LauncherApplicationContext : ApplicationContext
         {
             LauncherLog.Write("LaunchAsync entered.");
             UpdateStatus("Checking launcher cache...");
-            if (await MaybeHandoffToManagedLauncherAsync())
-            {
-                LauncherLog.Write("Handed off to managed launcher copy.");
-                ExitThreadSafe();
-                return;
-            }
+            var launcherTargetPath = await EnsureManagedLauncherCopyAsync();
+            LauncherLog.Write($"Using launcher update target {launcherTargetPath}.");
 
             var manifest = await PayloadManifest.LoadAsync();
             LauncherLog.Write($"Loaded payload manifest version={manifest.Version}.");
             UpdateStatus("Preparing Releu runtime...");
             var runtimeDirectory = await EnsureRuntimeAsync(manifest);
             LauncherLog.Write($"Runtime ready at {runtimeDirectory}.");
-            var launchContext = CreateLaunchContext(runtimeDirectory);
+            var launchContext = CreateLaunchContext(runtimeDirectory, launcherTargetPath);
             readyFilePath = launchContext.ReadyFilePath;
             readyToken = launchContext.ReadyToken;
 
@@ -93,64 +89,66 @@ internal sealed class LauncherApplicationContext : ApplicationContext
         }
     }
 
-    private async Task<bool> MaybeHandoffToManagedLauncherAsync()
+    private async Task<string> EnsureManagedLauncherCopyAsync()
     {
         var currentExePath = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(currentExePath))
         {
             LauncherLog.Write("Environment.ProcessPath was empty.");
-            return false;
+            return GetManagedLauncherPath();
         }
+
+        currentExePath = Path.GetFullPath(currentExePath);
 
         var managedExePath = GetManagedLauncherPath();
         if (string.Equals(
-                Path.GetFullPath(currentExePath),
+                currentExePath,
                 Path.GetFullPath(managedExePath),
                 StringComparison.OrdinalIgnoreCase))
         {
             LauncherLog.Write("Already running from managed launcher path.");
-            return false;
+            return managedExePath;
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(managedExePath)!);
-
-        var incomingVersion = ReadLauncherVersion(currentExePath);
-        var managedVersion = File.Exists(managedExePath)
-            ? ReadLauncherVersion(managedExePath)
-            : new Version(0, 0, 0, 0);
-        var shouldReplaceManaged = !File.Exists(managedExePath) ||
-            managedVersion < incomingVersion ||
-            (managedVersion == incomingVersion &&
-                !string.Equals(
-                    await ComputeFileHashAsync(currentExePath),
-                    await ComputeFileHashAsync(managedExePath),
-                    StringComparison.OrdinalIgnoreCase));
-
-        if (shouldReplaceManaged)
+        try
         {
-            LauncherLog.Write($"Copying launcher to managed path {managedExePath}.");
-            File.Copy(currentExePath, managedExePath, true);
+            Directory.CreateDirectory(Path.GetDirectoryName(managedExePath)!);
+
+            var incomingVersion = ReadLauncherVersion(currentExePath);
+            var managedVersion = File.Exists(managedExePath)
+                ? ReadLauncherVersion(managedExePath)
+                : new Version(0, 0, 0, 0);
+            var shouldReplaceManaged = !File.Exists(managedExePath) ||
+                managedVersion < incomingVersion ||
+                (managedVersion == incomingVersion &&
+                    !string.Equals(
+                        await ComputeFileHashAsync(currentExePath),
+                        await ComputeFileHashAsync(managedExePath),
+                        StringComparison.OrdinalIgnoreCase));
+
+            if (shouldReplaceManaged)
+            {
+                LauncherLog.Write($"Copying launcher to managed path {managedExePath}.");
+                File.Copy(currentExePath, managedExePath, true);
+            }
+            else
+            {
+                LauncherLog.Write("Managed launcher copy already up to date.");
+            }
         }
-        else
+        catch (Exception error)
         {
-            LauncherLog.Write("Managed launcher copy already up to date.");
+            LauncherLog.Write($"Managed launcher cache update failed. Falling back to current exe. {error}");
+            return currentExePath;
         }
 
-        var startInfo = new ProcessStartInfo
+        if (File.Exists(managedExePath))
         {
-            FileName = managedExePath,
-            WorkingDirectory = Path.GetDirectoryName(managedExePath)!,
-            UseShellExecute = true,
-        };
-        foreach (var argument in forwardedArgs)
-        {
-            startInfo.ArgumentList.Add(argument);
+            return managedExePath;
         }
-        startInfo.ArgumentList.Add("--releu-managed-launcher");
 
-        LauncherLog.Write($"Starting managed launcher {managedExePath}.");
-        Process.Start(startInfo);
-        return true;
+        LauncherLog.Write("Managed launcher copy was not available after cache update. Falling back to current exe.");
+        return currentExePath;
     }
 
     private static string GetManagedLauncherPath()
@@ -182,7 +180,7 @@ internal sealed class LauncherApplicationContext : ApplicationContext
         return Convert.ToHexString(hashBytes);
     }
 
-    private LaunchContext CreateLaunchContext(string runtimeDirectory)
+    private LaunchContext CreateLaunchContext(string runtimeDirectory, string launcherCurrentExePath)
     {
         var signalsDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -202,7 +200,7 @@ internal sealed class LauncherApplicationContext : ApplicationContext
             Path.Combine(runtimeDirectory, "Releu-minecraft.exe"),
             readyPath,
             token,
-            GetManagedLauncherPath());
+            launcherCurrentExePath);
     }
 
     private async Task<string> EnsureRuntimeAsync(PayloadManifest manifest)
