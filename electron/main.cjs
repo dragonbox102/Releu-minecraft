@@ -6,6 +6,7 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("elect
 
 let panelRuntime = null;
 let mainWindow = null;
+let startupWindow = null;
 let panelRuntimeClosePromise = null;
 let updateRestartScheduled = false;
 let keepWindowOpenOnClose = false;
@@ -59,6 +60,127 @@ async function loadPanelServer() {
   return module.startPanelServer;
 }
 
+function closeStartupWindow() {
+  if (!startupWindow || startupWindow.isDestroyed()) {
+    startupWindow = null;
+    return;
+  }
+  startupWindow.close();
+  startupWindow = null;
+}
+
+function createStartupWindow() {
+  if (startupWindow && !startupWindow.isDestroyed()) {
+    return startupWindow;
+  }
+
+  const window = new BrowserWindow({
+    width: 420,
+    height: 180,
+    show: false,
+    frame: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    backgroundColor: "#0b0d10",
+    title: "Opening Releu",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  const splashHtml = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Opening Releu</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0b0d10;
+        color: #eef2f7;
+        font-family: Inter, Segoe UI, system-ui, sans-serif;
+      }
+      .card {
+        width: calc(100% - 32px);
+        height: calc(100% - 32px);
+        box-sizing: border-box;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 18px;
+        background: #17181b;
+        display: grid;
+        place-items: center;
+        text-align: center;
+        padding: 24px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 22px;
+        font-weight: 700;
+      }
+      p {
+        margin: 0;
+        color: #94a3b8;
+        font-size: 14px;
+      }
+      .dots {
+        margin-top: 16px;
+        display: inline-flex;
+        gap: 8px;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: #2563eb;
+        animation: pulse 1.2s infinite ease-in-out;
+      }
+      .dot:nth-child(2) { animation-delay: 0.15s; }
+      .dot:nth-child(3) { animation-delay: 0.3s; }
+      @keyframes pulse {
+        0%, 80%, 100% { opacity: 0.35; transform: scale(0.85); }
+        40% { opacity: 1; transform: scale(1); }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div>
+        <h1>Opening Releu...</h1>
+        <p>Preparing the local panel. This can take a few seconds.</p>
+        <div class="dots" aria-hidden="true">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>`;
+
+  window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(splashHtml)}`);
+  window.once("ready-to-show", () => {
+    window.show();
+  });
+  window.on("closed", () => {
+    if (startupWindow === window) {
+      startupWindow = null;
+    }
+  });
+  startupWindow = window;
+  return window;
+}
+
 function createWindow(url) {
   desktopStartupLog(`Creating browser window for ${url}`);
   const window = new BrowserWindow({
@@ -67,6 +189,7 @@ function createWindow(url) {
     minWidth: 1120,
     minHeight: 760,
     autoHideMenuBar: true,
+    show: false,
     backgroundColor: "#000000",
     title: "Releu-minecraft",
     webPreferences: {
@@ -85,6 +208,10 @@ function createWindow(url) {
   window.loadURL(url);
   window.webContents.once("did-finish-load", () => {
     desktopStartupLog(`Window finished loading ${url}`);
+  });
+  window.once("ready-to-show", () => {
+    closeStartupWindow();
+    window.show();
   });
   window.webContents.once("render-process-gone", (_event, details) => {
     desktopStartupLog(`Renderer exited: ${JSON.stringify(details)}`);
@@ -433,6 +560,11 @@ if (!hasSingleInstanceLock) {
 }
 
 app.on("second-instance", () => {
+  if (startupWindow && !startupWindow.isDestroyed()) {
+    startupWindow.show();
+    startupWindow.focus();
+    return;
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) {
       mainWindow.restore();
@@ -446,6 +578,7 @@ app.on("second-instance", () => {
 
 app.whenReady().then(async () => {
   desktopStartupLog("Electron app ready.");
+  createStartupWindow();
   if (app.isPackaged) {
     process.env.RELEU_DESKTOP_PACKAGED = "true";
     desktopStartupLog("Packaged desktop mode enabled.");
@@ -464,6 +597,7 @@ app.whenReady().then(async () => {
   });
 }).catch((error) => {
   desktopStartupLog(`Fatal desktop startup error: ${error?.stack || error?.message || String(error)}`);
+  closeStartupWindow();
   console.error(error);
   app.quit();
 });
