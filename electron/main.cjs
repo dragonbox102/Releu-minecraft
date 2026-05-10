@@ -65,7 +65,7 @@ function closeStartupWindow() {
     startupWindow = null;
     return;
   }
-  startupWindow.close();
+  startupWindow.destroy();
   startupWindow = null;
 }
 
@@ -77,7 +77,7 @@ function createStartupWindow() {
   const window = new BrowserWindow({
     width: 420,
     height: 180,
-    show: false,
+    show: true,
     frame: false,
     resizable: false,
     minimizable: false,
@@ -169,9 +169,6 @@ function createStartupWindow() {
 </html>`;
 
   window.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(splashHtml)}`);
-  window.once("ready-to-show", () => {
-    window.show();
-  });
   window.on("closed", () => {
     if (startupWindow === window) {
       startupWindow = null;
@@ -208,6 +205,7 @@ function createWindow(url) {
   window.loadURL(url);
   window.webContents.once("did-finish-load", () => {
     desktopStartupLog(`Window finished loading ${url}`);
+    closeStartupWindow();
   });
   window.once("ready-to-show", () => {
     closeStartupWindow();

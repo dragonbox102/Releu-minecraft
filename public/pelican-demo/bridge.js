@@ -1214,6 +1214,9 @@ function patchServersPage() {
   const originalContent = document.querySelector(".fi-ta-content-ctn");
   const pageContent = document.querySelector(".fi-page-content") ?? document.querySelector("main");
   if (!originalContent || !pageContent) return;
+  document.querySelectorAll(".fi-tabs, .fi-ta-header-toolbar, .fi-ta-filters, .fi-ta-filters-actions-ctn").forEach((node) => {
+    node.style.display = "none";
+  });
   originalContent.style.display = "none";
   let mount = document.querySelector("[data-releu-servers-mount]");
   if (!mount) {
@@ -1596,6 +1599,9 @@ function patchServersPageExactShell() {
   const state = APP_STATE.state;
   const originalContent = document.querySelector(".fi-ta-content-ctn");
   if (!originalContent) return;
+  document.querySelectorAll(".fi-tabs, .fi-ta-header-toolbar, .fi-ta-filters, .fi-ta-filters-actions-ctn").forEach((node) => {
+    node.style.display = "none";
+  });
   document.querySelector("[data-releu-servers-mount]")?.remove();
   originalContent.style.display = "";
 
@@ -1622,7 +1628,10 @@ function patchServersPageExactShell() {
   const templateCard = originalContent.querySelector(".fi-ta-record");
   const recordsParent = templateCard?.parentElement;
   const servers = state?.servers ?? [];
-  if (!templateCard || !recordsParent) return;
+  if (!templateCard || !recordsParent) {
+    patchServersPage();
+    return;
+  }
 
   const patchProgressBlock = (block, widthPercent, labelText, fillColor) => {
     const progress = block.querySelector('[role="progressbar"]');
