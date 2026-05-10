@@ -44,6 +44,11 @@ const APP_STATE = {
       targetRestoreKey: "",
     },
   },
+  appUpdate: {
+    checkPromise: null,
+    lastRequestedAt: 0,
+    autoApplyVersion: null,
+  },
   playerInventoryModal: null,
   filesBrowser: {
     path: "",
@@ -793,6 +798,106 @@ function isDesktopApp() {
   return Boolean(window.desktop);
 }
 
+function appUpdateState() {
+  return APP_STATE.state?.appUpdate ?? null;
+}
+
+function playitLinkRequired(state = APP_STATE.state) {
+  const playit = state?.playit;
+  if (!playit) return false;
+  return !playit.secretConfigured || playit.claimWaiting || !playit.running;
+}
+
+function syncAppUpdateStatusBanner() {
+  const appUpdate = appUpdateState();
+  if (!appUpdate?.enabled) {
+    return;
+  }
+
+  if (appUpdate.applying) {
+    showStatus(
+      `Installing Releu update ${appUpdate.stagedVersion ?? appUpdate.latestVersion ?? "next"}...`,
+      "info",
+    );
+    return;
+  }
+
+  if (appUpdate.downloading) {
+    showStatus(
+      appUpdate.statusMessage ||
+        `Downloading Releu update ${appUpdate.latestVersion ?? "next"}...`,
+      "info",
+    );
+    return;
+  }
+
+  if (appUpdate.checking) {
+    showStatus("Checking GitHub for Releu updates...", "info");
+    return;
+  }
+
+  clearStatus();
+}
+
+async function maybeAutoApplyAppUpdate() {
+  const appUpdate = appUpdateState();
+  if (!isDesktopApp() || !window.desktop?.installAppUpdate) return false;
+  if (!appUpdate?.canAutoApply || !appUpdate.stagedFilePath || !appUpdate.stagedVersion) return false;
+  if (APP_STATE.appUpdate.autoApplyVersion === appUpdate.stagedVersion) return false;
+
+  APP_STATE.appUpdate.autoApplyVersion = appUpdate.stagedVersion;
+  showStatus(`Installing Releu update ${appUpdate.stagedVersion}...`, "info");
+  await api("/api/app-update/applying", { method: "POST" });
+  await window.desktop.installAppUpdate(appUpdate.stagedFilePath);
+  return true;
+}
+
+async function kickoffAppUpdateCheck({ force = false, showFeedback = false } = {}) {
+  const appUpdate = appUpdateState();
+  if (!isDesktopApp() || !appUpdate?.enabled) {
+    return APP_STATE.state;
+  }
+  if (APP_STATE.appUpdate.checkPromise) {
+    return APP_STATE.appUpdate.checkPromise;
+  }
+  if (!force && Date.now() - APP_STATE.appUpdate.lastRequestedAt < 15000) {
+    return APP_STATE.state;
+  }
+  if (!force && (appUpdate.checking || appUpdate.downloading || appUpdate.applying)) {
+    return APP_STATE.state;
+  }
+
+  APP_STATE.appUpdate.lastRequestedAt = Date.now();
+  if (showFeedback) {
+    showStatus("Checking GitHub for Releu updates...", "info");
+  }
+
+  APP_STATE.appUpdate.checkPromise = api("/api/app-update/check", { method: "POST" })
+    .then(async (payload) => {
+      APP_STATE.state = payload.state ?? APP_STATE.state;
+      updateChrome(APP_STATE.state);
+      syncAppUpdateStatusBanner();
+      await maybeAutoApplyAppUpdate();
+      return APP_STATE.state;
+    })
+    .catch((error) => {
+      if (showFeedback) {
+        showError(error);
+      } else {
+        console.error(error);
+      }
+      return APP_STATE.state;
+    })
+    .finally(() => {
+      APP_STATE.appUpdate.checkPromise = null;
+      if (PAGE === "settings.html") {
+        patchSettingsPage();
+      }
+    });
+
+  return APP_STATE.appUpdate.checkPromise;
+}
+
 async function pickLocalDirectory() {
   if (!isDesktopApp() || !window.desktop?.pickDirectory) {
     throw new Error("Folder picking is available only in the desktop app.");
@@ -1060,6 +1165,11 @@ async function refreshState(serverId = getRequestedServerId()) {
   }
   updateChrome(payload.state);
   await syncDesktopIntegration();
+  syncAppUpdateStatusBanner();
+  maybeAutoApplyAppUpdate().catch((error) => {
+    console.error(error);
+    showError(error);
+  });
   return payload.state;
 }
 
@@ -1152,6 +1262,128 @@ function getPublicAddressDescription(state, server) {
           state?.playit?.statusMessage ??
           "Link playit.gg once, then start the server to get a public join address.",
       };
+}
+
+function ensurePlayitGateStyles() {
+  if (document.getElementById("releu-playit-gate-style")) return;
+  const style = document.createElement("style");
+  style.id = "releu-playit-gate-style";
+  style.textContent = `
+    [data-releu-playit-gate]{position:fixed;inset:0;z-index:10040;background:rgba(0,0,0,.94);display:flex;flex-direction:column}
+    [data-releu-playit-gate] .rpg-header{height:64px;display:flex;align-items:center;padding:0 24px;border-bottom:1px solid #2b3642;font-size:1.25rem;font-weight:800;color:#fff;background:#000}
+    [data-releu-playit-gate] .rpg-main{flex:1;display:flex;align-items:center;justify-content:center;padding:32px}
+    [data-releu-playit-gate] .rpg-card{width:min(100%,760px);border:1px solid #2b3642;background:#14181d;padding:32px;text-align:center;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+    [data-releu-playit-gate] .rpg-kicker{margin-bottom:16px;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#71717a}
+    [data-releu-playit-gate] .rpg-title{margin:0 auto;max-width:40rem;font-size:2.25rem;font-weight:900;line-height:1.1;text-transform:uppercase;color:#fff}
+    [data-releu-playit-gate] .rpg-copy{margin:16px auto 0;max-width:42rem;font-size:.95rem;line-height:1.8;color:#a1a1aa}
+    [data-releu-playit-gate] .rpg-status{margin:32px auto 0;max-width:42rem;border:1px solid #2b3642;background:#000;padding:18px 20px;text-align:left;font-size:.9rem;color:#a1a1aa}
+    [data-releu-playit-gate] .rpg-actions{margin-top:28px;display:flex;flex-wrap:wrap;justify-content:center;gap:12px}
+  `;
+  document.head.append(style);
+}
+
+function renderPlayitGateOverlay() {
+  const playit = APP_STATE.state?.playit ?? {};
+  const waiting = Boolean(playit.claimWaiting);
+  const startingLinkedAgent = Boolean(playit.secretConfigured && !playit.running && !waiting);
+  const title = waiting
+    ? "Finish Playit Agent Link To Continue"
+    : startingLinkedAgent
+      ? "Connecting Playit Agent To Continue"
+      : "Connect Playit Agent To Continue";
+  const detail = waiting
+    ? "Complete the playit.gg browser link. Releu will move to the main menu automatically as soon as the agent is connected."
+    : startingLinkedAgent
+      ? "Releu is starting the linked playit.gg agent now. This page will continue automatically when the agent connects."
+      : "Link playit.gg once for this app. Releu will reuse that connection for every server you create on this PC.";
+  const note =
+    playit.lastError ||
+    playit.statusMessage ||
+    "You can relink or reset the agent later from Settings.";
+  const primaryAction = waiting
+    ? `<a class="fi-btn fi-btn-color-primary fi-size-md" href="${escapeHtml(playit.claimUrl ?? playit.dashboardTunnelUrl ?? "https://playit.gg/account/tunnels")}" target="_blank" rel="noreferrer" data-releu-playit-gate-link>Open Playit Link</a>`
+    : startingLinkedAgent
+      ? `<button type="button" class="fi-btn fi-btn-outline fi-size-md" data-releu-playit-gate-refresh>Refresh Status</button>`
+      : `<button type="button" class="fi-btn fi-btn-color-primary fi-size-md" data-releu-playit-gate-connect>Connect Playit Agent</button>`;
+  const secondaryAction = waiting
+    ? `<button type="button" class="fi-btn fi-btn-outline fi-size-md" data-releu-playit-gate-refresh>Refresh Status</button>`
+    : playit.dashboardTunnelUrl
+      ? `<a class="fi-btn fi-btn-outline fi-size-md" href="${escapeHtml(playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Dashboard</a>`
+      : "";
+
+  return `
+    <div data-releu-playit-gate>
+      <header class="rpg-header">Releu</header>
+      <main class="rpg-main">
+        <section class="rpg-card">
+          <p class="rpg-kicker">Playit Agent</p>
+          <h1 class="rpg-title">${escapeHtml(title)}</h1>
+          <p class="rpg-copy">${escapeHtml(detail)}</p>
+          <div class="rpg-status">
+            <div style="margin-bottom:.5rem;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#71717a;">Status</div>
+            <p style="margin:0;">${escapeHtml(note)}</p>
+          </div>
+          <div class="rpg-actions">${primaryAction}${secondaryAction}</div>
+        </section>
+      </main>
+    </div>`;
+}
+
+function syncPlayitGateOverlay() {
+  const existing = document.querySelector("[data-releu-playit-gate]");
+  if (!playitLinkRequired()) {
+    existing?.remove();
+    return;
+  }
+
+  ensurePlayitGateStyles();
+  if (existing) {
+    existing.outerHTML = renderPlayitGateOverlay();
+  } else {
+    document.body.insertAdjacentHTML("beforeend", renderPlayitGateOverlay());
+  }
+
+  const connectButton = document.querySelector("[data-releu-playit-gate-connect]");
+  if (connectButton && connectButton.dataset.releuBound !== "true") {
+    connectButton.dataset.releuBound = "true";
+    connectButton.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      try {
+        setButtonBusy(button, true, "Connecting...");
+        const payload = await api("/api/playit/connect", { method: "POST" });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        updateChrome(APP_STATE.state);
+        await patchPage();
+        syncPlayitGateOverlay();
+        if (payload.connect?.claimUrl) {
+          window.open(payload.connect.claimUrl, "_blank", "noopener,noreferrer");
+        } else if (APP_STATE.state?.playit?.dashboardTunnelUrl) {
+          window.open(APP_STATE.state.playit.dashboardTunnelUrl, "_blank", "noopener,noreferrer");
+        }
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+  }
+
+  document.querySelectorAll("[data-releu-playit-gate-refresh]").forEach((button) => {
+    if (button.dataset.releuBound === "true") return;
+    button.dataset.releuBound = "true";
+    button.addEventListener("click", async (event) => {
+      const currentButton = event.currentTarget;
+      try {
+        setButtonBusy(currentButton, true, "Refreshing...");
+        await refreshState(activeServerId());
+        await patchPage();
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(currentButton, false);
+      }
+    });
+  });
 }
 
 async function normalizeServerIconUpload(file) {
@@ -7531,6 +7763,134 @@ function patchCloudBackupPage() {
   });
 }
 
+function renderUpdaterSection() {
+  const mount = document.querySelector(".fi-page-content");
+  const state = APP_STATE.state;
+  const appUpdate = appUpdateState();
+  if (!mount || !state || !appUpdate) return;
+
+  let section = mount.querySelector("[data-releu-updater-section]");
+  if (!section) {
+    section = document.createElement("section");
+    section.className = "fi-section mt-6";
+    section.dataset.releuUpdaterSection = "true";
+    mount.append(section);
+  }
+
+  const statusMessage =
+    appUpdate.statusMessage ||
+    (appUpdate.updateReady
+      ? `Releu update ${appUpdate.stagedVersion ?? appUpdate.latestVersion ?? "next"} is ready.`
+      : appUpdate.available
+        ? `Releu update ${appUpdate.latestVersion ?? "next"} is available.`
+        : `Releu is on ${appUpdate.currentVersion ?? "unknown"}.`);
+
+  section.innerHTML = `
+    <header class="fi-section-header">
+      <div>
+        <h2 class="fi-section-header-heading">
+          <span class="releu-panel-title">
+            <svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span>App Updates</span>
+          </span>
+        </h2>
+        <p class="fi-section-header-description">GitHub update checks, staged downloads, and desktop self-update for this platform.</p>
+      </div>
+    </header>
+    <div class="fi-section-content" style="display:grid;gap:1rem;">
+      <div class="cb-status">Automatic updates are always enabled in Releu. The app keeps checking GitHub and auto-applies staged updates when it is safe to restart.</div>
+      <div style="display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));">
+        <label class="cb-field">
+          <span class="cb-field-label">Check Interval (hours)</span>
+          <input class="cb-plain-input" data-releu-updater-interval type="number" min="1" value="${escapeHtml(state.updaterSettings?.checkIntervalHours ?? 6)}">
+        </label>
+        <label style="display:flex;align-items:center;gap:.75rem;">
+          <input type="checkbox" data-releu-updater-prerelease ${state.updaterSettings?.allowPrerelease ? "checked" : ""}>
+          <span>Allow prerelease builds</span>
+        </label>
+      </div>
+      <div class="cb-chips">
+        <div class="cb-chip">Current: ${escapeHtml(appUpdate.currentVersion ?? "unknown")}</div>
+        <div class="cb-chip">Latest: ${escapeHtml(appUpdate.latestVersion ?? "Not checked")}</div>
+        <div class="cb-chip">Asset: ${escapeHtml(appUpdate.assetName ?? state.updaterSettings?.assetName ?? "Unknown")}</div>
+        <div class="cb-chip">Last checked: ${escapeHtml(appUpdate.lastCheckedAt ? formatDate(appUpdate.lastCheckedAt) : "Never")}</div>
+      </div>
+      <div class="cb-status">${escapeHtml(statusMessage)}</div>
+      <div class="cb-actions">
+        <button type="button" class="cb-btn" data-releu-updater-save>Save Update Settings</button>
+        <button type="button" class="cb-btn is-primary" data-releu-updater-check>Check GitHub Now</button>
+        ${isDesktopApp() && appUpdate.updateReady && appUpdate.stagedFilePath ? `<button type="button" class="cb-btn" data-releu-updater-apply>Apply Update</button>` : ""}
+        ${appUpdate.releasePageUrl ? `<a class="cb-btn" href="${escapeHtml(appUpdate.releasePageUrl)}" target="_blank" rel="noreferrer">Open Release Page</a>` : ""}
+      </div>
+    </div>`;
+
+  const saveButton = section.querySelector("[data-releu-updater-save]");
+  const checkButton = section.querySelector("[data-releu-updater-check]");
+  const applyButton = section.querySelector("[data-releu-updater-apply]");
+
+  if (saveButton && saveButton.dataset.releuBound !== "true") {
+    saveButton.dataset.releuBound = "true";
+    saveButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(saveButton, true, "Saving...");
+        const payload = await api("/api/settings/updater", {
+          method: "POST",
+          body: {
+            checkIntervalHours: Number(section.querySelector("[data-releu-updater-interval]")?.value) || 6,
+            allowPrerelease: Boolean(section.querySelector("[data-releu-updater-prerelease]")?.checked),
+          },
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        updateChrome(APP_STATE.state);
+        renderUpdaterSection();
+        showStatus("Update settings saved.", "success");
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(saveButton, false);
+      }
+    });
+  }
+
+  if (checkButton && checkButton.dataset.releuBound !== "true") {
+    checkButton.dataset.releuBound = "true";
+    checkButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(checkButton, true, "Checking...");
+        await kickoffAppUpdateCheck({ force: true, showFeedback: true });
+        await refreshState(activeServerId());
+        renderUpdaterSection();
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(checkButton, false);
+      }
+    });
+  }
+
+  if (applyButton && applyButton.dataset.releuBound !== "true") {
+    applyButton.dataset.releuBound = "true";
+    applyButton.addEventListener("click", async () => {
+      try {
+        setButtonBusy(applyButton, true, "Applying...");
+        const currentUpdate = appUpdateState();
+        if (!isDesktopApp() || !window.desktop?.installAppUpdate) {
+          throw new Error("App self-update is available only in the desktop build.");
+        }
+        if (!currentUpdate?.stagedFilePath) {
+          throw new Error("No downloaded Releu update is ready yet.");
+        }
+        await api("/api/app-update/applying", { method: "POST" });
+        await window.desktop.installAppUpdate(currentUpdate.stagedFilePath);
+      } catch (error) {
+        showError(error);
+      } finally {
+        setButtonBusy(applyButton, false);
+      }
+    });
+  }
+}
+
 function patchSettingsPage() {
   const state = APP_STATE.state;
   const server = activeServer();
@@ -7862,6 +8222,8 @@ function patchSettingsPage() {
       });
     }
   }
+
+  renderUpdaterSection();
 }
 
 async function patchPage() {
@@ -7878,6 +8240,8 @@ async function patchPage() {
   if (PAGE === "files.html") patchFilesPage();
   if (PAGE === "misc.html") patchMiscPage();
   if (PAGE === "settings.html") patchSettingsPage();
+  syncPlayitGateOverlay();
+  syncAppUpdateStatusBanner();
   APP_STATE.quickConsole.open = false;
   renderQuickConsoleOverlay();
 }
@@ -7885,6 +8249,11 @@ async function patchPage() {
 async function pollCurrentPage() {
   if (document.visibilityState === "hidden") return;
   await refreshState(activeServerId());
+  if (isDesktopApp()) {
+    kickoffAppUpdateCheck().catch((error) => {
+      console.error(error);
+    });
+  }
   if (PAGE === "players.html") {
     patchPlayersPage();
     return;
@@ -7901,13 +8270,21 @@ async function boot() {
   suppressSavedShellBehavior();
   showStatus("Loading Releu...");
   await refreshState();
+  if (isDesktopApp()) {
+    kickoffAppUpdateCheck().catch((error) => {
+      console.error(error);
+    });
+  }
   await refreshLogs().catch(() => []);
   await patchPage();
   stripReleaseBranding();
   finishShellEnter();
-  clearStatus();
-  if (PAGE !== "servers.html" && PAGE !== "create-server.html") {
-    const refreshIntervalMs = PAGE === "misc.html" || PAGE === "players.html" ? 1000 : 4000;
+  if (!appUpdateState()?.checking && !appUpdateState()?.downloading && !appUpdateState()?.applying) {
+    clearStatus();
+  }
+  if (PAGE !== "create-server.html") {
+    const refreshIntervalMs =
+      PAGE === "misc.html" || PAGE === "players.html" ? 1000 : playitLinkRequired() ? 2000 : 4000;
     setInterval(async () => {
       try {
         await pollCurrentPage();

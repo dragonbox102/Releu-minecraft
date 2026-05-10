@@ -148,8 +148,8 @@ function isObject(value) {
 
 function normalizeUpdaterConfig(config, storedConfig = null) {
   const merged = deepMerge(defaultConfig.updater, config ?? {});
-  merged.enabled = Boolean(merged.enabled);
-  merged.autoInstall = Boolean(merged.autoInstall);
+  merged.enabled = true;
+  merged.autoInstall = true;
   merged.checkIntervalHours = Math.max(1, Number(merged.checkIntervalHours ?? 6) || 6);
   merged.githubOwner = lockedUpdaterSource.githubOwner;
   merged.githubRepo = lockedUpdaterSource.githubRepo;

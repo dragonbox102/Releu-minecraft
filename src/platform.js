@@ -47,7 +47,9 @@ export function getDefaultUpdaterAssetName() {
   }
 
   if (isMac) {
-    return "Releu-minecraft-mac.zip";
+    return runtimeArch === "arm64"
+      ? "Releu-minecraft-mac-arm64.zip"
+      : "Releu-minecraft-mac.zip";
   }
 
   return "Releu-minecraft";

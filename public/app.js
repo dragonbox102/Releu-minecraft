@@ -22,6 +22,11 @@ let playitGateConnectPromise = null;
 let logsPollTimer = null;
 let statePollTimer = null;
 let miscAutosaveTimer = null;
+const startup = {
+  redirectReady: false,
+  dependenciesReady: false,
+  dependencyPromise: null,
+};
 const ui = {
   bootstrap: {
     active: true,
@@ -138,6 +143,9 @@ function buildPelicanShellUrl(serverId = activeServer()?.id ?? runtime.data?.act
 }
 
 function maybeRedirectToPreferredUi() {
+  if (!startup.redirectReady) {
+    return false;
+  }
   const uiSettings = currentUiSettings();
   if (!uiSettings.hasChosenVariant || uiSettings.variant !== UI_VARIANT_PELICAN_BLUEPRINT) {
     return false;
@@ -2710,18 +2718,13 @@ function renderSettingsSection(server) {
           <h2 class="text-xl font-semibold uppercase tracking-[0.12em] text-white">Releu Updates</h2>
         </div>
         <form data-form="app-update-settings" class="space-y-4">
-          <label class="flex items-center gap-3">
-            <input name="enabled" type="checkbox" class="h-4 w-4 accent-white" ${appUpdate?.enabled ? "checked" : ""} />
-            <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Enable App Updates</span>
-          </label>
-          <label class="flex items-center gap-3">
-            <input name="autoInstall" type="checkbox" class="h-4 w-4 accent-white" ${appUpdate?.autoInstall ? "checked" : ""} />
-            <span class="text-[11px] font-bold uppercase tracking-[0.18em] text-white">Auto Install And Restart</span>
-          </label>
+          <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
+            Automatic updates are always enabled in Releu. The app will keep checking GitHub and auto-apply staged updates when it is safe to restart.
+          </div>
           <div class="rounded-sm border border-outline bg-black px-4 py-3 text-sm text-zinc-400">
             <div>Update source: <span class="font-mono text-zinc-200">${escapeHtml(`${appUpdate?.githubOwner ?? runtime.data.updaterSettings?.githubOwner ?? "dragonbox102"}/${appUpdate?.githubRepo ?? runtime.data.updaterSettings?.githubRepo ?? "Releu-minecraft"}`)}</span></div>
             <div class="mt-1">Locked release asset: <span class="font-mono text-zinc-200">${escapeHtml(appUpdate?.assetName ?? runtime.data.updaterSettings?.assetName ?? "Releu-minecraft.exe")}</span></div>
-            <div class="mt-1">This source is locked by Releu and cannot be changed from the panel.</div>
+            <div class="mt-1">This source and the auto-update behavior are locked by Releu and cannot be disabled from the panel.</div>
           </div>
           <label class="block">
             <span class="${C.label} mb-2 block">Check Interval (Hours)</span>
@@ -2999,6 +3002,30 @@ async function ensureDependenciesReady() {
   }
 }
 
+async function ensureDependenciesReadyOnce() {
+  if (startup.dependenciesReady) {
+    return runtime.data?.dependencies ?? null;
+  }
+  if (startup.dependencyPromise) {
+    return startup.dependencyPromise;
+  }
+
+  startup.dependencyPromise = (async () => {
+    const dependencies = await ensureDependenciesReady();
+    startup.dependenciesReady = true;
+    startup.redirectReady = true;
+    runStartupAppUpdateCheck().catch((error) => {
+      console.error(error);
+    });
+    await refreshState();
+    return dependencies;
+  })().finally(() => {
+    startup.dependencyPromise = null;
+  });
+
+  return startup.dependencyPromise;
+}
+
 async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? null) {
   const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
   const payload = await api(`/api/state${query}`);
@@ -3010,6 +3037,12 @@ async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activ
   syncPlayerDrafts();
   syncInstallDraft();
   if (ui.installDraft?.software) await ensureVersions(ui.installDraft.software);
+  if (!startup.dependenciesReady && !ui.bootstrap.active && !playitLinkRequired()) {
+    ensureDependenciesReadyOnce().catch((error) => {
+      console.error(error);
+      showError(error);
+    });
+  }
   const handledAppUpdate = await maybeAutoApplyAppUpdate();
   if (!handledAppUpdate) {
     if (ui.bootstrap.stage.startsWith("app-update-") && !appUpdateState()?.downloading) {
@@ -3950,8 +3983,6 @@ async function handleSubmit(event) {
         const payload = await api("/api/settings/updater", {
           method: "POST",
           body: {
-            enabled: form.elements.enabled.checked,
-            autoInstall: form.elements.autoInstall.checked,
             checkIntervalHours: Number(form.elements.checkIntervalHours.value) || 6,
           },
         });
@@ -4094,12 +4125,15 @@ async function boot() {
   document.addEventListener("keydown", handleKeydown);
   render();
   await sleep(25);
-  const dependencyPromise = ensureDependenciesReady();
   await refreshState();
   scheduleLogsPolling();
   scheduleStatePolling();
-  await dependencyPromise;
-  await runStartupAppUpdateCheck();
+  if (playitLinkRequired()) {
+    ui.bootstrap.active = false;
+    render();
+    return;
+  }
+  await ensureDependenciesReadyOnce();
 }
 
 boot().catch((error) => {

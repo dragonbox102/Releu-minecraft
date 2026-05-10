@@ -2338,8 +2338,8 @@ if (-not $sample) { exit 0 }
   async updateUpdaterSettings(payload) {
     this.panelConfig.updater = {
       ...this.panelConfig.updater,
-      enabled: Boolean(payload.enabled ?? this.panelConfig.updater.enabled),
-      autoInstall: Boolean(payload.autoInstall ?? this.panelConfig.updater.autoInstall),
+      enabled: true,
+      autoInstall: true,
       checkIntervalHours: Math.max(
         1,
         Number(payload.checkIntervalHours ?? this.panelConfig.updater.checkIntervalHours ?? 6) || 6,
