@@ -4062,7 +4062,7 @@ function renderCatalogCard(kind, result) {
       ? `<select class="pm-filter-select" data-install-version style="min-width:170px">${result.availableVersions
           .map(
             (entry) =>
-              `<option value="${escapeHtml(entry.id)}">${escapeHtml(entry.versionNumber ?? entry.name ?? "version")}</option>`,
+              `<option value="${escapeHtml(entry.id)}" data-version-compatible="${entry.compatible ? "true" : "false"}">${escapeHtml(`${entry.versionNumber ?? entry.name ?? "version"}${entry.compatible ? "" : " (other MC version)"}`)}</option>`,
           )
           .join("")}</select>`
       : "";
@@ -4584,6 +4584,17 @@ async function patchAddonsPage() {
           return;
         }
         const row = button.closest("[data-pm-card]");
+        const selectedVersionOption =
+          row?.querySelector("[data-install-version]")?.selectedOptions?.[0] ?? null;
+        if (
+          button.dataset.installKind === "mod" &&
+          selectedVersionOption?.dataset.versionCompatible === "false" &&
+          !window.confirm(
+            `That mod version does not match this server's selected Minecraft version.\n\nContinue installing it anyway?`,
+          )
+        ) {
+          return;
+        }
         const versionId = row?.querySelector("[data-install-version]")?.value ?? "";
         const isResourcePackInstall = button.dataset.installKind === "resourcepack";
         const resourceStatus = resourcePane?.querySelector("[data-pm-rp-status]");

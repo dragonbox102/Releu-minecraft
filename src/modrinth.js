@@ -268,7 +268,10 @@ export async function searchCatalogProjects({
             serverSide: projectInfo.server_side ?? entry.serverSide ?? "unknown",
             compatibleVersionNumber: selectedVersion.version_number ?? null,
             compatibleGameVersions: selectedVersion.game_versions ?? [],
-            availableVersions: listCompatibleVersions(versions, gameVersion).slice(0, 12),
+            availableVersions:
+              kind === "mod"
+                ? listProjectVersions(versions, gameVersion, { includeIncompatible: true })
+                : listProjectVersions(versions, gameVersion).slice(0, 12),
           };
         } catch {
           return null;
@@ -302,15 +305,30 @@ function sortVersionsDescending(left, right) {
   return Date.parse(right.date_published ?? 0) - Date.parse(left.date_published ?? 0);
 }
 
+function versionMatchesGameVersion(entry, gameVersion) {
+  const normalized = String(gameVersion ?? "").trim();
+  if (!normalized) {
+    return true;
+  }
+
+  if ((entry.game_versions ?? []).includes(normalized)) {
+    return true;
+  }
+
+  const relaxedPrefix =
+    normalized.includes(".") ? normalized.split(".").slice(0, -1).join(".") : normalized;
+  return (entry.game_versions ?? []).some((value) =>
+    String(value).startsWith(relaxedPrefix),
+  );
+}
+
 function filterVersionsForGameVersion(versions, gameVersion) {
   const normalized = String(gameVersion ?? "").trim();
   if (!normalized) {
     return [...versions];
   }
 
-  const exactMatches = versions.filter((entry) =>
-    (entry.game_versions ?? []).includes(normalized),
-  );
+  const exactMatches = versions.filter((entry) => versionMatchesGameVersion(entry, normalized));
   if (exactMatches.length) {
     return exactMatches;
   }
@@ -331,11 +349,12 @@ function selectCompatibleVersion(versions, gameVersion) {
   return candidates.find((entry) => pickPrimaryFile(entry)) ?? null;
 }
 
-function listCompatibleVersions(versions, gameVersion) {
-  return filterVersionsForGameVersion(versions, gameVersion)
+function listProjectVersions(versions, gameVersion, { includeIncompatible = false } = {}) {
+  return versions
     .filter((entry) => entry.status === "listed" || entry.status === "archived" || !entry.status)
     .sort(sortVersionsDescending)
     .filter((entry) => pickPrimaryFile(entry))
+    .filter((entry) => includeIncompatible || versionMatchesGameVersion(entry, gameVersion))
     .map((entry) => ({
       id: entry.id,
       versionNumber: entry.version_number ?? null,
@@ -343,6 +362,7 @@ function listCompatibleVersions(versions, gameVersion) {
       gameVersions: entry.game_versions ?? [],
       publishedAt: entry.date_published ?? null,
       fileName: pickPrimaryFile(entry)?.filename ?? null,
+      compatible: versionMatchesGameVersion(entry, gameVersion),
     }));
 }
 
