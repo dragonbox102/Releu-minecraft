@@ -19,7 +19,16 @@ jobs:
           - os: ubuntu-latest
             build_script: build:linux
             artifact_name: releu-linux-appimage
-            artifact_path: dist/*.AppImage
+            artifact_path: |
+              dist/*.AppImage
+              dist/latest-linux.yml
+          - os: macos-13
+            build_script: build:mac
+            artifact_name: releu-macos-package
+            artifact_path: |
+              dist/*.dmg
+              dist/*.zip
+              dist/latest-mac.yml
 
     runs-on: ${{ matrix.os }}
 

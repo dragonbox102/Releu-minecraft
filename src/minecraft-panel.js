@@ -136,6 +136,13 @@ const playerInventorySlots = [
   ...hotbarInventorySlots,
 ];
 const inventorySlotById = new Map(playerInventorySlots.map((slot) => [slot.slotId, slot]));
+const equipmentInventorySlots = [
+  { equipmentKey: "head", definition: armorInventorySlots[0] },
+  { equipmentKey: "chest", definition: armorInventorySlots[1] },
+  { equipmentKey: "legs", definition: armorInventorySlots[2] },
+  { equipmentKey: "feet", definition: armorInventorySlots[3] },
+  { equipmentKey: "offhand", definition: offhandInventorySlot },
+];
 
 async function ensureJsonFile(targetPath, defaultValue) {
   if (await fileExists(targetPath)) {
@@ -294,11 +301,13 @@ function scoreItemCatalogEntry(entry, query) {
   return 0;
 }
 
-function buildInventoryItemView(rawItem, catalogEntry = null) {
+function buildInventoryItemView(rawItem, catalogEntry = null, slotIdOverride = null) {
   if (!rawItem) {
     return null;
   }
-  const slotId = normalizeInventorySlotValue(rawItem.Slot);
+  const slotId = normalizeInventorySlotValue(
+    slotIdOverride ?? rawItem?.Slot?.value ?? rawItem?.Slot,
+  );
   return {
     slotId,
     id: inventoryItemId(rawItem),
@@ -312,7 +321,49 @@ function buildInventoryItemView(rawItem, catalogEntry = null) {
   };
 }
 
-function buildInventoryView(rawItems, selectedHotbarSlot, itemCatalogById) {
+function resolvePlayerEquipment(root = {}) {
+  const directEquipment = root?.equipment;
+  if (directEquipment && typeof directEquipment === "object" && !Array.isArray(directEquipment)) {
+    return directEquipment;
+  }
+
+  const legacyEquipment = {};
+  const armorItems = Array.isArray(root?.ArmorItems) ? root.ArmorItems : [];
+  if (armorItems[3]) legacyEquipment.head = armorItems[3];
+  if (armorItems[2]) legacyEquipment.chest = armorItems[2];
+  if (armorItems[1]) legacyEquipment.legs = armorItems[1];
+  if (armorItems[0]) legacyEquipment.feet = armorItems[0];
+
+  const handItems = Array.isArray(root?.HandItems) ? root.HandItems : [];
+  if (handItems[1]) legacyEquipment.offhand = handItems[1];
+
+  return legacyEquipment;
+}
+
+function applyEquipmentInventoryItems(slotItems, equipment, itemCatalogById) {
+  if (!equipment || typeof equipment !== "object") {
+    return;
+  }
+
+  for (const { equipmentKey, definition } of equipmentInventorySlots) {
+    const rawItem = equipment[equipmentKey];
+    const itemId = inventoryItemId(rawItem);
+    if (!itemId) {
+      continue;
+    }
+
+    slotItems.set(
+      definition.slotId,
+      buildInventoryItemView(
+        rawItem,
+        itemCatalogById.get(itemId),
+        definition.slotId,
+      ),
+    );
+  }
+}
+
+function buildInventoryView(rawItems, selectedHotbarSlot, itemCatalogById, equipment = null) {
   const slotItems = new Map();
   for (const item of rawItems ?? []) {
     const slotId = normalizeInventorySlotValue(item?.Slot);
@@ -325,6 +376,7 @@ function buildInventoryView(rawItems, selectedHotbarSlot, itemCatalogById) {
       buildInventoryItemView(item, itemCatalogById.get(inventoryItemId(item))),
     );
   }
+  applyEquipmentInventoryItems(slotItems, equipment, itemCatalogById);
 
   const withItems = (definitions) =>
     definitions.map((definition) =>
@@ -5083,9 +5135,15 @@ if (-not $sample) { exit 0 }
     const root = await this.readPlayerDataRoot(playerDataPath);
     const simplified = nbt.simplify(root);
     const inventoryItems = Array.isArray(simplified.Inventory) ? simplified.Inventory : [];
+    const equipment = resolvePlayerEquipment(simplified);
     const selectedHotbarSlot = Number(simplified.SelectedItemSlot ?? 0) || 0;
     const catalog = this.getInventoryCatalog(serverId);
-    const layout = buildInventoryView(inventoryItems, selectedHotbarSlot, catalog.byId);
+    const layout = buildInventoryView(
+      inventoryItems,
+      selectedHotbarSlot,
+      catalog.byId,
+      equipment,
+    );
 
     return {
       player: {
