@@ -1,0 +1,123 @@
+workflows:
+  releu-macos-artifacts:
+    name: Releu macOS Artifacts
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      node: v22.11.0
+      npm: default
+      vars:
+        CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        GH_REPO: "dragonbox102/Releu-minecraft"
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+    scripts:
+      - name: Install dependencies
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          npm ci
+      - name: Run syntax checks
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          npm test
+      - name: Build macOS artifacts
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export CSC_IDENTITY_AUTO_DISCOVERY=false
+          npm run build:mac
+      - name: Show built macOS artifacts
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ls -lah dist
+    artifacts:
+      - dist/Releu-minecraft-mac.zip
+      - dist/Releu-minecraft-mac-arm64.zip
+      - dist/Releu-minecraft-mac.dmg
+      - dist/Releu-minecraft-mac-arm64.dmg
+
+  releu-macos-release:
+    name: Releu macOS Release
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      node: v22.11.0
+      npm: default
+      groups:
+        - github_release
+      vars:
+        CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        GH_REPO: "dragonbox102/Releu-minecraft"
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+    triggering:
+      events:
+        - tag
+    scripts:
+      - name: Install dependencies
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          npm ci
+      - name: Run syntax checks
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          npm test
+      - name: Build macOS artifacts
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          export CSC_IDENTITY_AUTO_DISCOVERY=false
+          npm run build:mac
+      - name: Show built macOS artifacts
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ls -lah dist
+      - name: Publish macOS assets to GitHub release
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          if [[ -z "${CM_TAG:-}" ]]; then
+            echo "Not a tag build. Skipping GitHub release upload."
+            exit 0
+          fi
+
+          if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+            echo "GITHUB_TOKEN is not configured in the github_release group."
+            exit 1
+          fi
+
+          export GH_TOKEN="${GITHUB_TOKEN}"
+
+          if ! command -v gh >/dev/null 2>&1; then
+            brew install gh
+          fi
+
+          gh release view "${CM_TAG}" --repo "${GH_REPO}" >/dev/null 2>&1 || \
+            gh release create "${CM_TAG}" --repo "${GH_REPO}" --title "${CM_TAG}" --notes ""
+
+          mapfile -t release_files < <(
+            find dist -maxdepth 1 -type f \
+              \( \
+                -name 'Releu-minecraft-mac.zip' -o \
+                -name 'Releu-minecraft-mac-arm64.zip' -o \
+                -name 'Releu-minecraft-mac.dmg' -o \
+                -name 'Releu-minecraft-mac-arm64.dmg' \
+              \) | sort
+          )
+
+          if [[ "${#release_files[@]}" -eq 0 ]]; then
+            echo "No macOS release artifacts were found in dist/."
+            exit 1
+          fi
+
+          gh release upload "${CM_TAG}" "${release_files[@]}" --clobber --repo "${GH_REPO}"
+    artifacts:
+      - dist/Releu-minecraft-mac.zip
+      - dist/Releu-minecraft-mac-arm64.zip
+      - dist/Releu-minecraft-mac.dmg
+      - dist/Releu-minecraft-mac-arm64.dmg
