@@ -12,9 +12,7 @@ const staleArtifacts = [
   path.join(projectRoot, "Releu-minecraft-pelican.zip"),
   path.join(projectRoot, "Releu-minecraft-portable.exe"),
   path.join(projectRoot, "Releu-minecraft-pelican-portable.exe"),
-  path.join(projectRoot, "Releu-minecraft-mac.dmg"),
   path.join(projectRoot, "Releu-minecraft-mac.zip"),
-  path.join(projectRoot, "Releu-minecraft-mac-arm64.dmg"),
   path.join(projectRoot, "Releu-minecraft-mac-arm64.zip"),
   path.join(projectRoot, "latest-linux.yml"),
   path.join(projectRoot, "latest-mac.yml"),
@@ -85,16 +83,8 @@ async function main() {
 
   if (mode === "mac") {
     await copyIfPresent(
-      path.join(distDir, "Releu-minecraft-mac.dmg"),
-      path.join(projectRoot, "Releu-minecraft-mac.dmg"),
-    );
-    await copyIfPresent(
       path.join(distDir, "Releu-minecraft-mac.zip"),
       path.join(projectRoot, "Releu-minecraft-mac.zip"),
-    );
-    await copyIfPresent(
-      path.join(distDir, "Releu-minecraft-mac-arm64.dmg"),
-      path.join(projectRoot, "Releu-minecraft-mac-arm64.dmg"),
     );
     await copyIfPresent(
       path.join(distDir, "Releu-minecraft-mac-arm64.zip"),

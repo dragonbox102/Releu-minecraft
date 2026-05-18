@@ -34,8 +34,6 @@ workflows:
     artifacts:
       - dist/Releu-minecraft-mac.zip
       - dist/Releu-minecraft-mac-arm64.zip
-      - dist/Releu-minecraft-mac.dmg
-      - dist/Releu-minecraft-mac-arm64.dmg
 
   releu-macos-release:
     name: Releu macOS Release
@@ -102,9 +100,7 @@ workflows:
             find dist -maxdepth 1 -type f \
               \( \
                 -name 'Releu-minecraft-mac.zip' -o \
-                -name 'Releu-minecraft-mac-arm64.zip' -o \
-                -name 'Releu-minecraft-mac.dmg' -o \
-                -name 'Releu-minecraft-mac-arm64.dmg' \
+                -name 'Releu-minecraft-mac-arm64.zip' \
               \) | sort
           )
 
@@ -117,5 +113,3 @@ workflows:
     artifacts:
       - dist/Releu-minecraft-mac.zip
       - dist/Releu-minecraft-mac-arm64.zip
-      - dist/Releu-minecraft-mac.dmg
-      - dist/Releu-minecraft-mac-arm64.dmg
