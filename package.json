@@ -8,9 +8,9 @@
     "start": "node src/app.js",
     "start:desktop": "node scripts/start-desktop.cjs",
     "test": "node --check src/app.js && node --check public/app.js && node --check electron/main.cjs && node --check electron/preload.cjs",
-    "build:exe": "electron-builder --win dir && node scripts/sync-desktop-runtime.cjs && node scripts/build-launcher-exe.cjs && node scripts/sync-release-assets.cjs win",
-    "build:linux": "electron-builder --linux AppImage && node scripts/sync-release-assets.cjs linux",
-    "build:mac": "electron-builder --mac zip --arm64 && electron-builder --mac zip --x64 && node scripts/sync-release-assets.cjs mac"
+    "build:exe": "electron-builder --win dir --publish never && node scripts/sync-desktop-runtime.cjs && node scripts/build-launcher-exe.cjs && node scripts/sync-release-assets.cjs win",
+    "build:linux": "electron-builder --linux AppImage --publish never && node scripts/sync-release-assets.cjs linux",
+    "build:mac": "electron-builder --mac zip --arm64 --publish never && electron-builder --mac zip --x64 --publish never && node scripts/sync-release-assets.cjs mac"
   },
   "keywords": [],
   "author": "",
