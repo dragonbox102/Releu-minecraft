@@ -141,6 +141,19 @@ function maybeExtractClaimUrl(rawLine) {
   return match?.[0] ?? null;
 }
 
+function maybeExtractClaimCode(rawLine) {
+  const message = extractUiMessage(rawLine);
+  if (!message) {
+    return null;
+  }
+
+  if (/^[A-Za-z0-9._-]{8,}$/.test(message)) {
+    return message;
+  }
+
+  return null;
+}
+
 function getTunnelFieldValue(fields, name) {
   return (
     fields?.find(
@@ -262,12 +275,22 @@ export class PlayitManager {
     const claimInfo = await readJsonFile(paths.claimInfoFile, {});
     this.state.claimCode = claimInfo.claimCode ?? null;
     this.state.claimUrl = claimInfo.claimUrl ?? null;
-    this.state.claimWaiting = false;
+    this.state.claimWaiting = Boolean(
+      !this.state.secretConfigured && (this.state.claimCode || this.state.claimUrl),
+    );
     this.state.status = this.state.installed
       ? this.state.secretConfigured
         ? "ready"
-        : "needs-claim"
+        : this.state.claimWaiting
+          ? "waiting-for-claim"
+          : "needs-claim"
       : "not-installed";
+    if (this.state.claimWaiting) {
+      this.state.statusMessage = "Playit setup is waiting for you to finish the browser link.";
+      if (this.state.claimCode) {
+        this.startClaimExchange(this.state.claimCode);
+      }
+    }
     if (this.state.secretConfigured) {
       this.state.checkingTunnelStatus = true;
       this.state.statusMessage = "Checking linked playit agent and tunnel status.";
@@ -944,18 +967,36 @@ export class PlayitManager {
 
   async generateClaim(_agentName) {
     await this.ensureBinary();
-    await this.startAgent({ allowSetup: true });
 
-    const deadline = Date.now() + 12000;
-    while (Date.now() < deadline) {
-      if (this.state.claimUrl) {
-        this.appendLog("playit", `Generated playit claim URL: ${this.state.claimUrl}`);
-        return this.snapshot();
-      }
-      await wait(250);
+    if (this.state.claimWaiting && this.state.claimCode && this.state.claimUrl) {
+      this.startClaimExchange(this.state.claimCode);
+      this.appendLog("playit", `Reusing pending playit claim URL: ${this.state.claimUrl}`);
+      return this.snapshot();
     }
 
-    throw new Error("playit did not provide a claim link in time.");
+    await fs.mkdir(paths.playitDataDir, { recursive: true });
+
+    const claimCodeResult = await this.runCommand(["claim", "generate"], {
+      timeoutMs: 15000,
+    });
+    const claimCode = maybeExtractClaimCode(claimCodeResult.stdout);
+    if (!claimCode) {
+      throw new Error("playit did not return a valid claim code.");
+    }
+
+    const claimUrlResult = await this.runCommand(
+      ["claim", "url", claimCode, "--name", _agentName || "Minecraft Panel Host", "--type", "self-managed"],
+      { timeoutMs: 15000 },
+    );
+    const claimUrl = maybeExtractClaimUrl(claimUrlResult.stdout);
+    if (!claimUrl) {
+      throw new Error("playit did not return a valid claim link.");
+    }
+
+    await this.persistClaimInfo(claimUrl);
+    this.startClaimExchange(claimCode);
+    this.appendLog("playit", `Generated playit claim URL: ${claimUrl}`);
+    return this.snapshot();
   }
 
   startClaimExchange(claimCode) {
