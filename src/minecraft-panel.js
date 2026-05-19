@@ -1012,6 +1012,7 @@ export class MinecraftPanelService {
     this.playit = new PlayitManager({
       appendLog: (source, line, level = "info") => this.appendLog(null, source, line, level),
       getServerPort: () => this.getRecommendedTunnelPort(),
+      getAgentName: () => this.panelConfig?.playit?.agentName ?? "Minecraft Panel Host",
       getDownloadUrlOverride: () =>
         String(this.panelConfig?.playit?.macDownloadUrl ?? "").trim() || null,
     });
@@ -2951,6 +2952,19 @@ if (-not $sample) { exit 0 }
     }
 
     const playitState = await this.playit.startAgent();
+    if (!playitState.secretConfigured) {
+      const relinkState = await this.playit.generateClaim(this.panelConfig.playit.agentName);
+      this.appendLog(
+        null,
+        "panel",
+        "Saved playit link was invalid. Generated a fresh playit claim link.",
+      );
+      return {
+        action: "claim",
+        claimUrl: relinkState.claimUrl,
+        playit: relinkState,
+      };
+    }
     this.appendLog(null, "panel", "Started playit agent from simplified connect flow.");
     return {
       action: playitState.needsWebSetup ? "dashboard" : "started",

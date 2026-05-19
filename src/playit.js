@@ -216,10 +216,16 @@ function normalizeApiTunnel(accountTunnel, agentTunnel = null) {
 }
 
 export class PlayitManager {
-  constructor({ appendLog, getServerPort, getDownloadUrlOverride = null }) {
+  constructor({
+    appendLog,
+    getServerPort,
+    getDownloadUrlOverride = null,
+    getAgentName = null,
+  }) {
     this.appendLog = appendLog;
     this.getServerPort = getServerPort;
     this.getDownloadUrlOverride = getDownloadUrlOverride;
+    this.getAgentName = getAgentName;
     this.agentProcess = null;
     this.exchangeProcess = null;
     this.probeProcess = null;
@@ -252,11 +258,18 @@ export class PlayitManager {
       lastExitedAt: null,
       lastRefreshAt: null,
       lastProbeAt: null,
+      agentName: this.currentAgentName(),
       recommendedTunnelTarget: `127.0.0.1:${this.getServerPort()}`,
     };
     this.lastRefreshAtMs = 0;
     this.lastProbeAtMs = 0;
     this.installPromise = null;
+  }
+
+  currentAgentName() {
+    const configuredName =
+      typeof this.getAgentName === "function" ? this.getAgentName() : null;
+    return String(configuredName ?? "").trim() || "Minecraft Panel Host";
   }
 
   async init() {
@@ -304,6 +317,7 @@ export class PlayitManager {
   snapshot() {
     return {
       ...this.state,
+      agentName: this.currentAgentName(),
       recommendedTunnelTarget: `127.0.0.1:${this.getServerPort()}`,
     };
   }
@@ -356,9 +370,37 @@ export class PlayitManager {
     this.state.claimWaiting = false;
     this.state.status = this.state.running ? "running" : "ready";
     this.state.lastError = null;
-    this.state.statusMessage = "Playit agent linked successfully.";
+    this.state.statusMessage = `Playit agent "${this.currentAgentName()}" linked successfully.`;
     this.appendLog("playit", "Stored playit secret locally from playit setup.");
     return true;
+  }
+
+  async markInvalidSecret(reason = "Saved playit link was rejected by playit. Reconnect the agent.") {
+    await Promise.all([
+      fs.rm(paths.playitSecretFile, { force: true }).catch(() => {}),
+      fs.rm(paths.claimInfoFile, { force: true }).catch(() => {}),
+    ]);
+
+    if (this.agentProcess) {
+      this.agentProcess.kill();
+      this.agentProcess = null;
+    }
+
+    this.state.running = false;
+    this.state.secretConfigured = false;
+    this.state.claimCode = null;
+    this.state.claimUrl = null;
+    this.state.claimWaiting = false;
+    this.state.tunnels = [];
+    this.state.configuredTunnelCount = 0;
+    this.state.detectedTunnelCount = 0;
+    this.state.checkingTunnelStatus = false;
+    this.state.needsWebSetup = false;
+    this.state.status = this.state.installed ? "needs-claim" : "not-installed";
+    this.state.lastError = reason;
+    this.state.statusMessage = reason;
+    this.lastAnnouncedPublicAddress = null;
+    this.lastAnnouncedTunnelState = null;
   }
 
   async readSecret() {
@@ -456,7 +498,7 @@ export class PlayitManager {
     let statusMessage = null;
     let needsWebSetup = false;
     if (matchedPublicTunnel?.publicAddress) {
-      statusMessage = `Detected ${tunnels.length} playit tunnel(s). Public address: ${matchedPublicTunnel.publicAddress}`;
+      statusMessage = `${this.currentAgentName()} detected ${tunnels.length} playit tunnel(s). Public address: ${matchedPublicTunnel.publicAddress}`;
     } else if (configuredTunnelCount === 0) {
       statusMessage = this.describeMissingTunnel();
     } else {
@@ -474,11 +516,11 @@ export class PlayitManager {
   }
 
   describeMissingTunnel() {
-    return `No playit tunnel is assigned to this agent yet. Create or assign a Minecraft Java tunnel for 127.0.0.1:${this.getServerPort()} in the playit dashboard.`;
+    return `No playit tunnel is assigned to ${this.currentAgentName()} yet. Create or assign a Minecraft Java tunnel for 127.0.0.1:${this.getServerPort()} in the playit dashboard.`;
   }
 
   describeUnreadyTunnel() {
-    return `Playit found a tunnel for this agent, but it has not finished setup yet, so no public join address is available. Open the playit dashboard and finish assigning or configuring the tunnel for 127.0.0.1:${this.getServerPort()}.`;
+    return `Playit found a tunnel for ${this.currentAgentName()}, but it has not finished setup yet, so no public join address is available. Open the playit dashboard and finish assigning or configuring the tunnel for 127.0.0.1:${this.getServerPort()}.`;
   }
 
   announceTunnelState() {
@@ -511,6 +553,30 @@ export class PlayitManager {
       return;
     }
 
+    if (cleaned.includes("checking if secret key is valid")) {
+      this.state.running = false;
+      this.state.checkingTunnelStatus = true;
+      this.state.statusMessage = `Validating saved playit agent link for ${this.currentAgentName()}.`;
+    }
+
+    if (cleaned.includes("Invalid secret")) {
+      void this.markInvalidSecret();
+      return;
+    }
+
+    if (cleaned.includes("AgentDisabledOverLimit")) {
+      this.state.running = false;
+      this.state.status = "ready";
+      this.state.checkingTunnelStatus = false;
+      this.state.lastError =
+        "This playit account has too many linked agents for its limit. Remove an old playit agent from the playit dashboard or upgrade the account, then reconnect this server.";
+      this.state.statusMessage = this.state.lastError;
+      if (this.agentProcess) {
+        this.agentProcess.kill();
+      }
+      return;
+    }
+
     const claimUrl = maybeExtractClaimUrl(cleaned);
     if (claimUrl) {
       void this.persistClaimInfo(claimUrl);
@@ -536,8 +602,8 @@ export class PlayitManager {
       this.state.needsWebSetup = false;
       this.state.statusMessage =
         tunnel.publicAddress
-          ? `Detected ${this.state.tunnels.length} playit tunnel(s). Public address: ${tunnel.publicAddress}`
-          : `Detected ${this.state.tunnels.length} playit tunnel(s).`;
+          ? `${this.currentAgentName()} detected ${this.state.tunnels.length} playit tunnel(s). Public address: ${tunnel.publicAddress}`
+          : `${this.currentAgentName()} detected ${this.state.tunnels.length} playit tunnel(s).`;
       this.announceTunnelState();
     }
 
@@ -567,6 +633,7 @@ export class PlayitManager {
     }
 
     if (cleaned.includes("secret key valid")) {
+      this.state.running = true;
       this.state.secretConfigured = true;
       this.state.claimWaiting = false;
       this.state.status = this.state.running ? "running" : "ready";
@@ -578,6 +645,7 @@ export class PlayitManager {
     }
 
     if (cleaned.includes("tunnel running")) {
+      this.state.running = true;
       this.state.checkingTunnelStatus = false;
       this.state.statusMessage =
         this.state.needsWebSetup
@@ -585,8 +653,8 @@ export class PlayitManager {
           : this.state.configuredTunnelCount > 0 && !this.state.tunnels.length
           ? this.describeUnreadyTunnel()
           : this.state.configuredTunnelCount > 0
-            ? `Playit is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
-            : "Playit is online.";
+            ? `${this.currentAgentName()} is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
+            : `${this.currentAgentName()} is online.`;
       this.announceTunnelState();
     }
   }
@@ -1095,11 +1163,11 @@ export class PlayitManager {
     );
 
     this.agentProcess = child;
-    this.state.running = true;
-    this.state.status = secretConfigured ? "running" : "waiting-for-claim";
+    this.state.running = false;
+    this.state.status = secretConfigured ? "ready" : "waiting-for-claim";
     this.state.checkingTunnelStatus = true;
     this.state.statusMessage = secretConfigured
-      ? "Checking linked playit agent and tunnel status."
+      ? "Starting linked playit agent and validating the saved link."
       : "Starting playit setup and waiting for the claim link.";
     this.state.lastStartedAt = currentTimestamp();
     this.state.lastError = null;
@@ -1156,6 +1224,14 @@ export class PlayitManager {
     }
 
     if (code === 1) {
+      if (this.state.lastError) {
+        return;
+      }
+
+      if (!this.state.secretConfigured && !this.state.claimWaiting && this.state.lastError) {
+        return;
+      }
+
       this.state.lastError = null;
       this.state.statusMessage = this.state.claimWaiting
         ? "Playit stopped while waiting for the claim link. Reopen the claim page or reconnect the agent."
@@ -1167,8 +1243,8 @@ export class PlayitManager {
           this.state.statusMessage = this.state.needsWebSetup
             ? this.describeUnreadyTunnel()
             : this.state.configuredTunnelCount > 0
-              ? `Playit is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
-              : "Playit is online.";
+              ? `${this.currentAgentName()} is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
+              : `${this.currentAgentName()} is online.`;
           return;
         }
       } catch (error) {

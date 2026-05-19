@@ -560,7 +560,8 @@ function appUpdateState() {
 function playitLinkRequired() {
   const playit = runtime.data?.playit;
   if (!playit) return false;
-  return !playit.secretConfigured || playit.claimWaiting || !playit.running;
+  if (!playit.secretConfigured) return true;
+  return Boolean(playit.claimWaiting);
 }
 
 function dependencyMissingLabels(dependencies) {
@@ -1186,7 +1187,15 @@ function maybeKickoffPlayitGateConnection() {
   const playit = runtime.data?.playit;
   if (!playit || playitGateConnectPromise) return;
   if (playit.claimWaiting) return;
-  if (playit.secretConfigured && playit.running) return;
+  const hasPublicTunnel = Array.isArray(playit.tunnels)
+    && playit.tunnels.some((entry) => entry?.publicAddress);
+  const hasUsableTunnel = Boolean(
+    playit.secretConfigured
+      && !playit.needsWebSetup
+      && !playit.claimWaiting
+      && (hasPublicTunnel || Number(playit.configuredTunnelCount || 0) > 0),
+  );
+  if (hasUsableTunnel) return;
 
   playitGateConnectPromise = api("/api/playit/connect", { method: "POST" })
     .then((payload) => {
@@ -1955,6 +1964,7 @@ function renderPlayitGateScreen() {
   const playit = runtime.data?.playit ?? {};
   const waiting = Boolean(playit.claimWaiting);
   const startingLinkedAgent = Boolean(playit.secretConfigured && !playit.running && !waiting);
+  const agentName = String(playit.agentName ?? "").trim();
   const title = waiting
     ? "Finish Playit Agent Link To Continue"
     : startingLinkedAgent
@@ -1981,7 +1991,7 @@ function renderPlayitGateScreen() {
   const secondaryAction = waiting
     ? `<button type="button" class="${secondaryButtonClass}" data-action="refresh-playit-gate">Refresh Status</button>`
     : "";
-  return `<div class="releu-screen min-h-screen bg-black text-white"><header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-zinc-900 bg-black px-6"><div class="text-xl font-black tracking-tight text-white">Releu</div></header><main class="mx-auto flex min-h-[calc(100vh-64px)] max-w-3xl items-center justify-center p-8"><section class="w-full border border-zinc-900 bg-black p-8 text-center shadow-[0_24px_60px_rgba(0,0,0,0.45)]"><p class="${C.label} mb-4">Playit Agent</p><h1 class="mx-auto max-w-2xl text-4xl font-black uppercase tracking-tight text-white">${escapeHtml(title)}</h1><p class="mx-auto mt-4 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(detail)}</p><div class="mx-auto mt-8 max-w-2xl border border-zinc-900 bg-black px-5 py-4 text-left text-sm text-zinc-400"><div class="${C.label} mb-2">Status</div><p>${escapeHtml(note)}</p></div>${renderPlayitTunnelTargetsHtml()}<p class="mx-auto mt-4 max-w-2xl text-xs leading-6 text-zinc-500">${escapeHtml(playitTunnelGuidance())}</p><div class="mt-8 flex flex-wrap justify-center gap-3">${primaryAction}${secondaryAction}</div></section></main></div>`;
+  return `<div class="releu-screen min-h-screen bg-black text-white"><header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-zinc-900 bg-black px-6"><div class="text-xl font-black tracking-tight text-white">Releu</div></header><main class="mx-auto flex min-h-[calc(100vh-64px)] max-w-3xl items-center justify-center p-8"><section class="w-full border border-zinc-900 bg-black p-8 text-center shadow-[0_24px_60px_rgba(0,0,0,0.45)]"><p class="${C.label} mb-4">Playit Agent</p><h1 class="mx-auto max-w-2xl text-4xl font-black uppercase tracking-tight text-white">${escapeHtml(title)}</h1><p class="mx-auto mt-4 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(detail)}</p><div class="mx-auto mt-8 max-w-2xl border border-zinc-900 bg-black px-5 py-4 text-left text-sm text-zinc-400"><div class="${C.label} mb-2">Status</div>${agentName ? `<p class="mb-2 text-xs uppercase tracking-[0.16em] text-zinc-500">Agent Name: <span class="font-mono text-zinc-300 normal-case tracking-normal">${escapeHtml(agentName)}</span></p>` : ""}<p>${escapeHtml(note)}</p></div>${renderPlayitTunnelTargetsHtml()}<p class="mx-auto mt-4 max-w-2xl text-xs leading-6 text-zinc-500">${escapeHtml(playitTunnelGuidance())}</p><div class="mt-8 flex flex-wrap justify-center gap-3">${primaryAction}${secondaryAction}</div></section></main></div>`;
 }
 
 function renderBootstrapScreen() {
