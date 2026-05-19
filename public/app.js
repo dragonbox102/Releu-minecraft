@@ -2994,12 +2994,9 @@ function render() {
   if (playitLinkRequired()) {
     maybeKickoffPlayitGateConnection();
     startPlayitGatePolling();
-    syncRootBackdrop("playit-gate");
-    app.innerHTML = `${renderPlayitGateScreen()}${renderModal()}`;
-    restoreEditableFocus(focusSnapshot);
-    return;
+  } else {
+    stopPlayitGatePolling();
   }
-  stopPlayitGatePolling();
   syncRootBackdrop("default");
   const server = activeServer();
   if (ui.screen === "create-server") {

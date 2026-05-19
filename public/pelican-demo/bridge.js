@@ -833,7 +833,8 @@ function appUpdateState() {
 function playitLinkRequired(state = APP_STATE.state) {
   const playit = state?.playit;
   if (!playit) return false;
-  return !playit.secretConfigured || playit.claimWaiting || !playit.running;
+  if (!playit.secretConfigured) return true;
+  return Boolean(playit.claimWaiting);
 }
 
 function syncAppUpdateStatusBanner() {
@@ -2182,6 +2183,19 @@ function softwareIdFromLabel(label) {
   if (normalized === "neoforge") return "neoforge";
   if (normalized.includes("forge") && normalized.includes("neo")) return "forge-family";
   return "purpur";
+}
+
+function orderedSoftwareOptions() {
+  const preferredOrder = ["vanilla", "paper", "purpur", "fabric", "forge", "neoforge"];
+  const options = APP_STATE.state?.softwareOptions ?? [];
+  return [...options].sort((left, right) => {
+    const leftIndex = preferredOrder.indexOf(left.id);
+    const rightIndex = preferredOrder.indexOf(right.id);
+    const normalizedLeft = leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex;
+    const normalizedRight = rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex;
+    if (normalizedLeft !== normalizedRight) return normalizedLeft - normalizedRight;
+    return String(left.name ?? left.id).localeCompare(String(right.name ?? right.id));
+  });
 }
 
 async function populateVersionSelect(select, softwareId, selectedVersion = "latest") {
@@ -3720,29 +3734,32 @@ async function patchSoftwarePage() {
   const cards = [...document.querySelectorAll(".psw-card")];
   const softwareCard = cards[0] ?? null;
   const runtimeCard = cards[1] ?? null;
+  const loaderGrid = softwareCard?.querySelector(".psw-loader-grid") ?? null;
   const versionSelect = softwareCard?.querySelector(".psw-select") ?? null;
-  const loaderCards = [...(softwareCard?.querySelectorAll(".psw-loader-btn") ?? [])];
   const ranges = [...document.querySelectorAll(".psw-range")];
   const javaInput = runtimeCard?.querySelector(".psw-input") ?? null;
   const installedSoftware = server.install?.installedSoftware ?? server.install?.software ?? selectedSoftware;
   const installedVersion = server.install?.installedVersion ?? server.install?.requestedVersion ?? selectedVersion ?? "latest";
   const installedBuild = server.install?.installedBuild ?? null;
+  const softwareOptions = orderedSoftwareOptions();
+  if (loaderGrid) {
+    loaderGrid.innerHTML = softwareOptions.map((option) => {
+      const isActive = option.id === selectedSoftware;
+      const versionLabel = option.id === installedSoftware
+        ? `${installedVersion}${installedBuild && option.id === "fabric" ? ` / ${installedBuild}` : ""}`
+        : "Version Catalog";
+      return `<button class="psw-loader-btn${isActive ? " active" : ""}" type="button" data-software-id="${escapeHtml(option.id)}"><div class="psw-loader-label">${escapeHtml(option.name)}</div><div class="psw-loader-version">${escapeHtml(versionLabel)}</div></button>`;
+    }).join("");
+  }
+  const loaderCards = [...(softwareCard?.querySelectorAll(".psw-loader-btn") ?? [])];
   loaderCards.forEach((card) => {
     const labelNode = card.querySelector(".psw-loader-label");
     const versionNode = card.querySelector(".psw-loader-version");
-    const softwareId = softwareIdFromLabel(labelNode?.textContent);
-    const isForgeFamily = softwareId === "forge-family";
-    const isActive = isForgeFamily
-      ? ["forge", "neoforge"].includes(selectedSoftware)
-      : softwareId === selectedSoftware;
+    const softwareId = card.dataset.softwareId ?? softwareIdFromLabel(labelNode?.textContent);
+    const isActive = softwareId === selectedSoftware;
     card.classList.toggle("active", isActive);
     if (versionNode) {
-      if (isForgeFamily) {
-        labelNode.textContent = selectedSoftware === "neoforge" ? "NeoForge" : "Forge";
-        versionNode.textContent = isActive
-          ? `${installedVersion}${installedBuild ? ` / ${installedBuild}` : ""}`
-          : "Version Catalog";
-      } else if (softwareId === installedSoftware) {
+      if (softwareId === installedSoftware) {
         versionNode.textContent = `${installedVersion}${installedBuild && softwareId === "fabric" ? ` / ${installedBuild}` : ""}`;
       } else {
         versionNode.textContent = "Version Catalog";
@@ -3763,11 +3780,9 @@ async function patchSoftwarePage() {
     card.dataset.releuBound = "true";
     card.addEventListener("click", async () => {
       loaderCards.forEach((entry) => entry.classList.toggle("active", entry === card));
-      const clickedSoftware = softwareIdFromLabel(card.querySelector(".psw-loader-label")?.textContent);
-      draft.software =
-        clickedSoftware === "forge-family"
-          ? (draft.software === "neoforge" ? "neoforge" : "forge")
-          : clickedSoftware;
+      const clickedSoftware =
+        card.dataset.softwareId ?? softwareIdFromLabel(card.querySelector(".psw-loader-label")?.textContent);
+      draft.software = clickedSoftware;
       draft.version = "latest";
       await populateVersionSelect(versionSelect, draft.software, "latest");
       draft.version = versionSelect?.value ?? "latest";
