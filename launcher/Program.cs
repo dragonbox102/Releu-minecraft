@@ -21,8 +21,14 @@ internal static class Program
 
 internal sealed class LauncherApplicationContext : ApplicationContext
 {
+    private const string GitHubOwner = "dragonbox102";
+    private const string GitHubRepo = "Releu-minecraft";
+    private const string LauncherAssetName = "Releu-minecraft.exe";
+    private const string SkipLauncherUpdateEnv = "RELEU_SKIP_LAUNCHER_UPDATE";
+    private static readonly HttpClient GitHubClient = CreateGitHubClient();
     private readonly string[] forwardedArgs;
     private readonly System.Windows.Forms.Timer pollTimer;
+    private readonly bool skipLauncherUpdate;
     private SplashForm? splashForm;
     private Process? childProcess;
     private string? readyFilePath;
@@ -31,6 +37,10 @@ internal sealed class LauncherApplicationContext : ApplicationContext
 
     public LauncherApplicationContext(string[] args)
     {
+        skipLauncherUpdate = string.Equals(
+            Environment.GetEnvironmentVariable(SkipLauncherUpdateEnv),
+            "1",
+            StringComparison.OrdinalIgnoreCase);
         forwardedArgs = args
             .Where((arg) => !string.Equals(arg, "--releu-managed-launcher", StringComparison.OrdinalIgnoreCase))
             .ToArray();
@@ -66,6 +76,11 @@ internal sealed class LauncherApplicationContext : ApplicationContext
         try
         {
             LauncherLog.Write("LaunchAsync entered.");
+            if (await TryLaunchUpdatedLauncherAsync())
+            {
+                return;
+            }
+
             UpdateStatus("Checking launcher cache...");
             var launcherTargetPath = await EnsureManagedLauncherCopyAsync();
             LauncherLog.Write($"Using launcher update target {launcherTargetPath}.");
@@ -87,6 +102,83 @@ internal sealed class LauncherApplicationContext : ApplicationContext
             LauncherLog.Write($"LaunchAsync failed: {error}");
             ShowFatalError(error);
         }
+    }
+
+    private async Task<bool> TryLaunchUpdatedLauncherAsync()
+    {
+        if (skipLauncherUpdate)
+        {
+            LauncherLog.Write("Launcher update check skipped for this launch.");
+            return false;
+        }
+
+        try
+        {
+            var currentExePath = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(currentExePath))
+            {
+                LauncherLog.Write("Environment.ProcessPath was empty for launcher update check.");
+                return false;
+            }
+
+            currentExePath = Path.GetFullPath(currentExePath);
+            var currentVersion = ReadLauncherVersion(currentExePath);
+
+            var pendingUpdate = await RestorePendingLauncherUpdateAsync(currentVersion);
+            if (pendingUpdate is not null)
+            {
+                LauncherLog.Write($"Found pending launcher update {pendingUpdate.Version} at {pendingUpdate.FilePath}.");
+                UpdateStatus($"Launching updated Releu {pendingUpdate.Version}...");
+                if (StartReplacementLauncher(pendingUpdate.FilePath))
+                {
+                    completed = true;
+                    ExitThreadSafe();
+                    return true;
+                }
+            }
+
+            UpdateStatus("Checking GitHub for launcher updates...");
+            var release = await FetchLatestLauncherReleaseAsync();
+            if (release is null)
+            {
+                return false;
+            }
+
+            if (release.Version.CompareTo(currentVersion) <= 0)
+            {
+                LauncherLog.Write($"Launcher is already current on {currentVersion}.");
+                return false;
+            }
+
+            var asset = PickReleaseAsset(release, LauncherAssetName);
+            if (asset is null)
+            {
+                LauncherLog.Write($"GitHub release {release.Version} did not include {LauncherAssetName}.");
+                return false;
+            }
+
+            UpdateStatus($"Downloading launcher update {release.Version}...");
+            var stagedPath = await DownloadLauncherUpdateAsync(asset, release.Version);
+            if (!File.Exists(stagedPath))
+            {
+                LauncherLog.Write("Downloaded launcher update path was not created.");
+                return false;
+            }
+
+            UpdateStatus($"Launching updated Releu {release.Version}...");
+            if (StartReplacementLauncher(stagedPath))
+            {
+                completed = true;
+                ExitThreadSafe();
+                return true;
+            }
+        }
+        catch (Exception error)
+        {
+            LauncherLog.Write($"Launcher update check failed. Continuing with normal launch. {error}");
+        }
+
+        return false;
     }
 
     private async Task<string> EnsureManagedLauncherCopyAsync()
@@ -151,6 +243,234 @@ internal sealed class LauncherApplicationContext : ApplicationContext
         return currentExePath;
     }
 
+    private static async Task<LauncherReleaseResponse?> FetchLatestLauncherReleaseAsync()
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"https://api.github.com/repos/{GitHubOwner}/{GitHubRepo}/releases/latest");
+        request.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+        request.Headers.TryAddWithoutValidation("User-Agent", "releu-launcher");
+        request.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
+
+        using var response = await GitHubClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(
+                $"Unable to check GitHub releases ({(int)response.StatusCode}).");
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        var release = await JsonSerializer.DeserializeAsync<LauncherReleaseResponse>(stream);
+        if (release is null)
+        {
+            throw new InvalidOperationException("GitHub release payload was empty.");
+        }
+
+        return release;
+    }
+
+    private static LauncherReleaseAsset? PickReleaseAsset(
+        LauncherReleaseResponse release,
+        string preferredAssetName)
+    {
+        var assets = release.Assets ?? Array.Empty<LauncherReleaseAsset>();
+        var preferred = assets.FirstOrDefault((asset) =>
+            StringComparer.OrdinalIgnoreCase.Equals(asset.Name, preferredAssetName));
+        if (preferred is not null)
+        {
+            return preferred;
+        }
+
+        return assets.FirstOrDefault((asset) =>
+            asset.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private Task<LauncherUpdateCandidate?> RestorePendingLauncherUpdateAsync(Version currentVersion)
+    {
+        var pendingDir = GetLauncherUpdatePendingDirectory();
+        Directory.CreateDirectory(pendingDir);
+
+        LauncherUpdateCandidate? bestCandidate = null;
+        foreach (var entry in Directory.EnumerateFiles(
+                     pendingDir,
+                     $"*-{LauncherAssetName}",
+                     SearchOption.TopDirectoryOnly))
+        {
+            var fileName = Path.GetFileName(entry);
+            var version = ParsePendingLauncherUpdateVersion(fileName);
+            if (version is null)
+            {
+                continue;
+            }
+
+            if (version.CompareTo(currentVersion) <= 0)
+            {
+                try
+                {
+                    File.Delete(entry);
+                }
+                catch
+                {
+                }
+                continue;
+            }
+
+            if (bestCandidate is null || version.CompareTo(bestCandidate.Version) > 0)
+            {
+                bestCandidate = new LauncherUpdateCandidate(version, entry);
+            }
+        }
+
+        return Task.FromResult(bestCandidate);
+    }
+
+    private async Task<string> DownloadLauncherUpdateAsync(LauncherReleaseAsset asset, Version version)
+    {
+        var pendingDir = GetLauncherUpdatePendingDirectory();
+        Directory.CreateDirectory(pendingDir);
+
+        var finalName = $"{version}-{Path.GetFileName(asset.Name)}";
+        var finalPath = Path.Combine(pendingDir, finalName);
+        if (File.Exists(finalPath))
+        {
+            return finalPath;
+        }
+
+        var tempPath = $"{finalPath}.download";
+        if (File.Exists(tempPath))
+        {
+            File.Delete(tempPath);
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, asset.BrowserDownloadUrl);
+        request.Headers.TryAddWithoutValidation("Accept", "application/octet-stream");
+        request.Headers.TryAddWithoutValidation("User-Agent", "releu-launcher");
+
+        using var response = await GitHubClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(
+                $"Unable to download Releu launcher update ({(int)response.StatusCode}).");
+        }
+
+        await using var responseStream = await response.Content.ReadAsStreamAsync();
+        await using var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        await responseStream.CopyToAsync(fileStream);
+        await fileStream.FlushAsync();
+
+        if (File.Exists(finalPath))
+        {
+            File.Delete(finalPath);
+        }
+
+        await MoveFileWithRetryAsync(tempPath, finalPath);
+        LauncherLog.Write($"Downloaded launcher update {version} to {finalPath}.");
+        return finalPath;
+    }
+
+    private static async Task MoveFileWithRetryAsync(string sourcePath, string destinationPath)
+    {
+        const int maxAttempts = 6;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                if (File.Exists(destinationPath))
+                {
+                    File.Delete(destinationPath);
+                }
+
+                File.Move(sourcePath, destinationPath);
+                return;
+            }
+            catch (IOException) when (attempt < maxAttempts)
+            {
+                await Task.Delay(250 * attempt);
+            }
+            catch (UnauthorizedAccessException) when (attempt < maxAttempts)
+            {
+                await Task.Delay(250 * attempt);
+            }
+        }
+
+        if (File.Exists(destinationPath))
+        {
+            File.Delete(destinationPath);
+        }
+
+        File.Move(sourcePath, destinationPath);
+    }
+
+    private bool StartReplacementLauncher(string launcherPath)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(launcherPath);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = fullPath,
+                WorkingDirectory = Path.GetDirectoryName(fullPath) ?? Environment.CurrentDirectory,
+                UseShellExecute = false,
+            };
+
+            foreach (var arg in forwardedArgs)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+
+            startInfo.Environment[SkipLauncherUpdateEnv] = "1";
+            var process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("Updated launcher process was not created.");
+            process.Dispose();
+            return true;
+        }
+        catch (Exception error)
+        {
+            LauncherLog.Write($"Failed to start replacement launcher: {error}");
+            return false;
+        }
+    }
+
+    private static string GetLauncherUpdatePendingDirectory()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Releu",
+            "launcher",
+            "updates",
+            "pending");
+    }
+
+    private static Version? ParsePendingLauncherUpdateVersion(string fileName)
+    {
+        var normalizedFileName = String.IsNullOrWhiteSpace(fileName) ? string.Empty : fileName.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedFileName))
+        {
+            return null;
+        }
+
+        var suffix = $"-{LauncherAssetName}";
+        if (!normalizedFileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var versionText = normalizedFileName[..^suffix.Length];
+        return Version.TryParse(versionText, out var parsed) ? parsed : null;
+    }
+
+    private static HttpClient CreateGitHubClient()
+    {
+        return new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(8),
+        };
+    }
+
     private static string GetManagedLauncherPath()
     {
         return Path.Combine(
@@ -209,7 +529,7 @@ internal sealed class LauncherApplicationContext : ApplicationContext
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Releu",
             "runtime");
-        var runtimeDirectory = Path.Combine(runtimeRoot, manifest.Version);
+        var runtimeDirectory = Path.Combine(runtimeRoot, GetRuntimeDirectoryName(manifest));
         var sentinelPath = Path.Combine(runtimeDirectory, ".payload-manifest.json");
 
         if (RuntimeMatchesManifest(sentinelPath, manifest))
@@ -234,12 +554,6 @@ internal sealed class LauncherApplicationContext : ApplicationContext
                 Path.Combine(stagingDirectory, ".payload-manifest.json"),
                 JsonSerializer.Serialize(manifest));
 
-            if (Directory.Exists(runtimeDirectory))
-            {
-                LauncherLog.Write($"Deleting stale runtime directory {runtimeDirectory}.");
-                Directory.Delete(runtimeDirectory, true);
-            }
-
             Directory.Move(stagingDirectory, runtimeDirectory);
             LauncherLog.Write("Runtime extraction complete.");
             return runtimeDirectory;
@@ -253,6 +567,19 @@ internal sealed class LauncherApplicationContext : ApplicationContext
             }
             throw;
         }
+    }
+
+    private static string GetRuntimeDirectoryName(PayloadManifest manifest)
+    {
+        var safeVersion = string.IsNullOrWhiteSpace(manifest.Version)
+            ? "runtime"
+            : string.Concat(
+                manifest.Version.Trim().Select((ch) =>
+                    char.IsLetterOrDigit(ch) || ch is '.' or '-' or '_' ? ch : '-'));
+        var hashSegment = string.IsNullOrWhiteSpace(manifest.Sha256)
+            ? "payload"
+            : manifest.Sha256.Trim().ToLowerInvariant()[..Math.Min(12, manifest.Sha256.Trim().Length)];
+        return $"{safeVersion}-{hashSegment}";
     }
 
     private static bool RuntimeMatchesManifest(string sentinelPath, PayloadManifest expectedManifest)
@@ -339,6 +666,15 @@ internal sealed class LauncherApplicationContext : ApplicationContext
         {
             if (completed)
             {
+                return;
+            }
+
+            if (childProcess?.ExitCode == 0)
+            {
+                completed = true;
+                TryDeleteSignalFile();
+                LauncherLog.Write("Inner Releu runtime exited cleanly before ready signal. Treating as existing-instance handoff.");
+                ExitThreadSafe();
                 return;
             }
 
@@ -466,6 +802,24 @@ internal sealed record LaunchContext(
     string ReadyToken,
     string ManagedLauncherPath);
 
+internal sealed record LauncherUpdateCandidate(Version Version, string FilePath);
+
+internal sealed record LauncherReleaseAsset(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("browser_download_url")] string BrowserDownloadUrl);
+
+internal sealed record LauncherReleaseResponse(
+    [property: JsonPropertyName("tag_name")] string TagName,
+    [property: JsonPropertyName("html_url")] string HtmlUrl,
+    [property: JsonPropertyName("assets")] LauncherReleaseAsset[]? Assets)
+{
+    public System.Version Version => System.Version.TryParse(
+        string.IsNullOrWhiteSpace(TagName) ? "0.0.0" : TagName.Trim().TrimStart('v', 'V'),
+        out var parsed)
+        ? parsed
+        : new System.Version(0, 0, 0, 0);
+}
+
 internal sealed record PayloadManifest(
     [property: JsonPropertyName("version")] string Version,
     [property: JsonPropertyName("sha256")] string Sha256)
@@ -547,7 +901,7 @@ internal sealed class SplashForm : Form
             Height = 26,
             Font = new Font("Inter", 8.5f, FontStyle.Regular, GraphicsUnit.Point),
             ForeColor = Color.FromArgb(107, 114, 128),
-            Text = "Checking Java runtimes and playit.gg tools.",
+            Text = "Checking launcher updates, Java runtimes, and playit.gg tools.",
             TextAlign = ContentAlignment.MiddleCenter,
             Padding = new Padding(0, 10, 0, 0),
         };

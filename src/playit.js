@@ -1095,9 +1095,7 @@ export class PlayitManager {
           : "ready"
         : "needs-claim";
       this.state.lastExitedAt = currentTimestamp();
-      if (code && code !== 0) {
-        this.state.lastError = `playit exited with code ${code}.`;
-      }
+      void this.handleAgentExit(code);
     });
 
     await wait(1200);
@@ -1109,6 +1107,39 @@ export class PlayitManager {
       }
     }
     return this.snapshot();
+  }
+
+  async handleAgentExit(code) {
+    if (!code || code === 0) {
+      return;
+    }
+
+    if (code === 1) {
+      this.state.lastError = null;
+      this.state.statusMessage = this.state.claimWaiting
+        ? "Playit stopped while waiting for the claim link. Reopen the claim page or reconnect the agent."
+        : "Playit exited with code 1. Re-checking tunnel status.";
+
+      try {
+        await this.refreshTunnels({ force: true });
+        if (this.state.tunnels.length || Number(this.state.configuredTunnelCount ?? 0) > 0) {
+          this.state.statusMessage = this.state.needsWebSetup
+            ? this.describeUnreadyTunnel()
+            : this.state.configuredTunnelCount > 0
+              ? `Playit is online and reports ${this.state.configuredTunnelCount} configured tunnel(s).`
+              : "Playit is online.";
+          return;
+        }
+      } catch (error) {
+        this.appendLog("playit", `Code 1 exit recheck failed: ${error.message}`, "warn");
+        this.state.statusMessage = this.state.claimWaiting
+          ? "Playit stopped while waiting for the claim link. Reopen the claim page or reconnect the agent."
+          : "Playit exited with code 1. Re-checking tunnel status.";
+        return;
+      }
+    }
+
+    this.state.lastError = `playit exited with code ${code}.`;
   }
 
   async stopAgent() {

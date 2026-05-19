@@ -69,11 +69,28 @@ const APP_STATE = {
     rowDrafts: {},
     renderSignature: "",
   },
+  addonsPage: {
+    search: "",
+    filterValues: {},
+    installVersions: {},
+    resourcePack: {
+      url: "",
+      sha1: "",
+      require: false,
+      prompt: "",
+    },
+  },
   backupsPage: {
     serverId: "",
     autoBackups: null,
     backupIntervalMinutes: null,
     maxBackupStorageGb: null,
+  },
+  worldsPage: {
+    selectedWorld: "",
+    seed: "",
+    folderPath: "",
+    folderName: "",
   },
   consoleDraft: "",
   consoleHelpOpen: false,
@@ -821,7 +838,7 @@ function playitLinkRequired(state = APP_STATE.state) {
 
 function syncAppUpdateStatusBanner() {
   const appUpdate = appUpdateState();
-  if (!appUpdate?.enabled) {
+  if (!appUpdate?.supported || !appUpdate?.enabled) {
     return;
   }
 
@@ -852,7 +869,7 @@ function syncAppUpdateStatusBanner() {
 
 async function maybeAutoApplyAppUpdate() {
   const appUpdate = appUpdateState();
-  if (!isDesktopApp() || !window.desktop?.installAppUpdate) return false;
+  if (!appUpdate?.supported || !isDesktopApp() || !window.desktop?.installAppUpdate) return false;
   if (!appUpdate?.canAutoApply || !appUpdate.stagedFilePath || !appUpdate.stagedVersion) return false;
   if (APP_STATE.appUpdate.autoApplyVersion === appUpdate.stagedVersion) return false;
 
@@ -865,7 +882,7 @@ async function maybeAutoApplyAppUpdate() {
 
 async function kickoffAppUpdateCheck({ force = false, showFeedback = false } = {}) {
   const appUpdate = appUpdateState();
-  if (!isDesktopApp() || !appUpdate?.enabled) {
+  if (!appUpdate?.supported || !isDesktopApp() || !appUpdate?.enabled) {
     return APP_STATE.state;
   }
   if (APP_STATE.appUpdate.checkPromise) {
@@ -1256,6 +1273,28 @@ function getPublicAddress(state, server) {
   return getMatchingTunnel(state, port)?.publicAddress ?? null;
 }
 
+function getPlayitTunnelTargets(server = activeServer()) {
+  return {
+    java: `127.0.0.1:${Number(server?.server?.properties?.["server-port"] ?? server?.port ?? 25565)}`,
+    bedrock: "127.0.0.1:19132",
+  };
+}
+
+function getPlayitTunnelGuidance(server = activeServer()) {
+  const targets = getPlayitTunnelTargets(server);
+  return `Required target: Java TCP ${targets.java}. If this server uses Geyser Bedrock crossplay, also add a second UDP tunnel for ${targets.bedrock}.`;
+}
+
+function renderPlayitTunnelTargetsHtml(server = activeServer()) {
+  const targets = getPlayitTunnelTargets(server);
+  return `
+    <div class="rpg-status">
+      <div style="margin-bottom:.5rem;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#71717a;">Required Tunnel Targets</div>
+      <p style="margin:0;">Java TCP: <span style="font-family:ui-monospace,monospace;color:#fff;">${escapeHtml(targets.java)}</span></p>
+      <p style="margin:.6rem 0 0;">Bedrock UDP (only if you use Geyser): <span style="font-family:ui-monospace,monospace;color:#fff;">${escapeHtml(targets.bedrock)}</span></p>
+    </div>`;
+}
+
 function resolvedServerIconUrl(server) {
   if (server?.iconUrl) return server.iconUrl;
   const active = activeServer();
@@ -1280,15 +1319,19 @@ function ensurePlayitGateStyles() {
   const style = document.createElement("style");
   style.id = "releu-playit-gate-style";
   style.textContent = `
-    [data-releu-playit-gate]{position:fixed;inset:0;z-index:10040;background:rgba(0,0,0,.94);display:flex;flex-direction:column}
-    [data-releu-playit-gate] .rpg-header{height:64px;display:flex;align-items:center;padding:0 24px;border-bottom:1px solid #2b3642;font-size:1.25rem;font-weight:800;color:#fff;background:#000}
+    [data-releu-playit-gate]{position:fixed;inset:0;z-index:10040;background:#000;display:flex;flex-direction:column}
+    [data-releu-playit-gate] .rpg-header{height:64px;display:flex;align-items:center;padding:0 24px;border-bottom:1px solid #232323;font-size:1.25rem;font-weight:800;color:#fff;background:#000}
     [data-releu-playit-gate] .rpg-main{flex:1;display:flex;align-items:center;justify-content:center;padding:32px}
-    [data-releu-playit-gate] .rpg-card{width:min(100%,760px);border:1px solid #2b3642;background:#14181d;padding:32px;text-align:center;box-shadow:0 24px 60px rgba(0,0,0,.45)}
-    [data-releu-playit-gate] .rpg-kicker{margin-bottom:16px;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#71717a}
+    [data-releu-playit-gate] .rpg-card{width:min(100%,760px);border:1px solid #232323;background:#000;padding:32px;text-align:center;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+    [data-releu-playit-gate] .rpg-kicker{margin-bottom:16px;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#8a8a8a}
     [data-releu-playit-gate] .rpg-title{margin:0 auto;max-width:40rem;font-size:2.25rem;font-weight:900;line-height:1.1;text-transform:uppercase;color:#fff}
-    [data-releu-playit-gate] .rpg-copy{margin:16px auto 0;max-width:42rem;font-size:.95rem;line-height:1.8;color:#a1a1aa}
-    [data-releu-playit-gate] .rpg-status{margin:32px auto 0;max-width:42rem;border:1px solid #2b3642;background:#000;padding:18px 20px;text-align:left;font-size:.9rem;color:#a1a1aa}
+    [data-releu-playit-gate] .rpg-copy{margin:16px auto 0;max-width:42rem;font-size:.95rem;line-height:1.8;color:#b0b0b0}
+    [data-releu-playit-gate] .rpg-status{margin:32px auto 0;max-width:42rem;border:1px solid #232323;background:#000;padding:18px 20px;text-align:left;font-size:.9rem;color:#b0b0b0}
     [data-releu-playit-gate] .rpg-actions{margin-top:28px;display:flex;flex-wrap:wrap;justify-content:center;gap:12px}
+    [data-releu-playit-gate] .rpg-btn{display:inline-flex;align-items:center;justify-content:center;gap:.5rem;min-height:2.5rem;padding:0 1rem;border-radius:.5rem;border:1px solid #232323;background:#000;color:#fff;font-size:.8125rem;font-weight:600;text-decoration:none;transition:background-color .18s ease,border-color .18s ease,color .18s ease}
+    [data-releu-playit-gate] .rpg-btn:hover{background:#111;border-color:#4a4a4a;color:#fff}
+    [data-releu-playit-gate] .rpg-btn-primary{background:#000;border-color:#fff}
+    [data-releu-playit-gate] .rpg-btn-primary:hover{background:#18181b;border-color:#fff}
   `;
   document.head.append(style);
 }
@@ -1312,14 +1355,14 @@ function renderPlayitGateOverlay() {
     playit.statusMessage ||
     "You can relink or reset the agent later from Settings.";
   const primaryAction = waiting
-    ? `<a class="fi-btn fi-btn-color-primary fi-size-md" href="${escapeHtml(playit.claimUrl ?? playit.dashboardTunnelUrl ?? "https://playit.gg/account/tunnels")}" target="_blank" rel="noreferrer" data-releu-playit-gate-link>Open Playit Link</a>`
+    ? `<a class="rpg-btn rpg-btn-primary" href="${escapeHtml(playit.claimUrl ?? playit.dashboardTunnelUrl ?? "https://playit.gg/account/tunnels")}" target="_blank" rel="noreferrer" data-releu-playit-gate-link>Open Playit Link</a>`
     : startingLinkedAgent
-      ? `<button type="button" class="fi-btn fi-btn-outline fi-size-md" data-releu-playit-gate-refresh>Refresh Status</button>`
-      : `<button type="button" class="fi-btn fi-btn-color-primary fi-size-md" data-releu-playit-gate-connect>Connect Playit Agent</button>`;
+      ? `<button type="button" class="rpg-btn" data-releu-playit-gate-refresh>Refresh Status</button>`
+      : `<button type="button" class="rpg-btn rpg-btn-primary" data-releu-playit-gate-connect>Connect Playit Agent</button>`;
   const secondaryAction = waiting
-    ? `<button type="button" class="fi-btn fi-btn-outline fi-size-md" data-releu-playit-gate-refresh>Refresh Status</button>`
+    ? `<button type="button" class="rpg-btn" data-releu-playit-gate-refresh>Refresh Status</button>`
     : playit.dashboardTunnelUrl
-      ? `<a class="fi-btn fi-btn-outline fi-size-md" href="${escapeHtml(playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Dashboard</a>`
+      ? `<a class="rpg-btn" href="${escapeHtml(playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Dashboard</a>`
       : "";
 
   return `
@@ -1334,6 +1377,8 @@ function renderPlayitGateOverlay() {
             <div style="margin-bottom:.5rem;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#71717a;">Status</div>
             <p style="margin:0;">${escapeHtml(note)}</p>
           </div>
+          ${renderPlayitTunnelTargetsHtml()}
+          <p class="rpg-copy" style="margin-top:16px;font-size:.82rem;color:#71717a;">${escapeHtml(getPlayitTunnelGuidance())}</p>
           <div class="rpg-actions">${primaryAction}${secondaryAction}</div>
         </section>
       </main>
@@ -3409,6 +3454,7 @@ function patchPlayersPage() {
 function patchWorldsPage() {
   const server = activeServer();
   if (!server) return;
+  captureWorldsPageDraftFromDom();
   injectWorldPageStyles();
   const worlds = server.worlds ?? [];
   const activeWorld = worlds.find((entry) => entry.isActive) ?? worlds[0] ?? null;
@@ -3507,6 +3553,7 @@ function patchWorldsPage() {
   const uploadButton = section.querySelector("[data-world-upload]");
   const browseFolderButton = section.querySelector("[data-world-browse-folder]");
   const importFolderButton = section.querySelector("[data-world-import-folder]");
+  restoreWorldsPageDraftToDom(activeWorldName, levelSeed);
 
   const regenerateWithConfirm = async (worldName, button) => {
     if (!window.confirm(`Regenerate "${worldName}"?\n\nReleu will keep the current world as a saved switchable world, then Minecraft will generate a fresh "${worldName}" on the next server start.`)) {
@@ -3573,6 +3620,7 @@ function patchWorldsPage() {
         },
       );
       if (archiveFileInput) archiveFileInput.value = "";
+      APP_STATE.worldsPage.selectedWorld = worldSelect?.value ?? APP_STATE.worldsPage.selectedWorld;
       await refreshState(activeServerId());
       await refreshLogs();
       showStatus(`Imported world archive "${file.name}".`, "success");
@@ -3610,6 +3658,8 @@ function patchWorldsPage() {
       });
       if (folderPathInput) folderPathInput.value = "";
       if (folderNameInput) folderNameInput.value = "";
+      APP_STATE.worldsPage.folderPath = "";
+      APP_STATE.worldsPage.folderName = "";
       await refreshState(activeServerId());
       await refreshLogs();
       showStatus("Imported the world folder.", "success");
@@ -4100,6 +4150,141 @@ function renderInstalledAssetCard(kind, entry) {
   return `<div class="pm-result-card" data-pm-card><div class="pm-result-icon">${icon}</div><div class="pm-result-body"><div class="pm-result-top"><div><div class="pm-result-name">${escapeHtml(entry.displayName ?? entry.name)}</div><div class="pm-result-version">${escapeHtml(entry.versionNumber ?? entry.name)}</div></div></div><div class="pm-result-desc">${escapeHtml(entry.restartReason ?? `Installed ${kind}.`)}${clientSummary ? `<div class="mt-2 text-xs text-slate-400">${escapeHtml(clientSummary)}</div>` : ""}</div>${sideBadges ? `<div class="pm-result-badges">${sideBadges}</div>` : ""}<div class="pm-result-meta"><span class="pm-result-meta-item">${escapeHtml(formatDate(entry.installedAt ?? entry.updatedAt))}</span></div></div><div class="pm-result-actions">${actionButton}</div></div>`;
 }
 
+function captureAddonsPageDraftFromDom() {
+  const draft = APP_STATE.addonsPage;
+  draft.search = String(document.querySelector(".pm-searchbar-input")?.value ?? draft.search ?? "");
+
+  document.querySelectorAll(".pm-result-card [data-install-project]").forEach((button) => {
+    const key = `${button.dataset.installKind}:${button.dataset.installProject}`;
+    const select = button.closest("[data-pm-card]")?.querySelector("[data-install-version]");
+    if (key && select?.value) {
+      draft.installVersions[key] = select.value;
+    }
+  });
+
+  const pluginPane = document.querySelector('[data-pm-pane="plugins"]');
+  const modPane = document.querySelector('[data-pm-pane="mods"]');
+  const resourcePane = document.querySelector('[data-pm-pane="resourcepacks"]');
+  const pluginSelects = [...(pluginPane?.querySelectorAll(".pm-filter-select") ?? [])];
+  const modSelects = [...(modPane?.querySelectorAll(".pm-filter-select") ?? [])];
+  const resourceSelects = [...(resourcePane?.querySelectorAll(".pm-filter-select") ?? [])];
+
+  draft.filterValues.pluginGameVersion = pluginSelects[0]?.value ?? draft.filterValues.pluginGameVersion ?? "";
+  draft.filterValues.modGameVersion = modSelects[0]?.value ?? draft.filterValues.modGameVersion ?? "";
+  draft.filterValues.modProfile = modSelects[1]?.value ?? draft.filterValues.modProfile ?? "";
+  draft.filterValues.resourcepackGameVersion =
+    resourceSelects[0]?.value ?? draft.filterValues.resourcepackGameVersion ?? "";
+
+  const resourceUrlInput = resourcePane?.querySelector("[data-rp-url-input]");
+  const resourceSha1Input = resourcePane?.querySelector("[data-rp-sha1-input]");
+  const resourceRequireInput = resourcePane?.querySelector("[data-rp-require-input]");
+  const resourcePromptInput = resourcePane?.querySelector("[data-rp-prompt-input]");
+  draft.resourcePack.url = String(resourceUrlInput?.value ?? draft.resourcePack.url ?? "");
+  draft.resourcePack.sha1 = String(resourceSha1Input?.value ?? draft.resourcePack.sha1 ?? "");
+  draft.resourcePack.require = Boolean(resourceRequireInput?.checked ?? draft.resourcePack.require);
+  draft.resourcePack.prompt = String(resourcePromptInput?.value ?? draft.resourcePack.prompt ?? "");
+}
+
+function restoreAddonsPageDraftToDom(server) {
+  const draft = APP_STATE.addonsPage;
+  const searchInput = document.querySelector(".pm-searchbar-input");
+  if (searchInput) {
+    searchInput.value = draft.search ?? "";
+  }
+
+  document.querySelectorAll(".pm-result-card [data-install-project]").forEach((button) => {
+    const key = `${button.dataset.installKind}:${button.dataset.installProject}`;
+    const select = button.closest("[data-pm-card]")?.querySelector("[data-install-version]");
+    const selectedValue = draft.installVersions[key];
+    if (select && selectedValue && [...select.options].some((option) => option.value === selectedValue)) {
+      select.value = selectedValue;
+    }
+  });
+
+  const pluginPane = document.querySelector('[data-pm-pane="plugins"]');
+  const modPane = document.querySelector('[data-pm-pane="mods"]');
+  const resourcePane = document.querySelector('[data-pm-pane="resourcepacks"]');
+  const pluginSelects = [...(pluginPane?.querySelectorAll(".pm-filter-select") ?? [])];
+  const modSelects = [...(modPane?.querySelectorAll(".pm-filter-select") ?? [])];
+  const resourceSelects = [...(resourcePane?.querySelectorAll(".pm-filter-select") ?? [])];
+
+  ensureSelectValue(
+    pluginSelects[0],
+    draft.filterValues.pluginGameVersion || selectedGameVersion(),
+    selectedGameVersion(),
+  );
+  ensureSelectValue(
+    modSelects[0],
+    draft.filterValues.modGameVersion || selectedGameVersion(),
+    selectedGameVersion(),
+  );
+  ensureSelectValue(
+    modSelects[1],
+    draft.filterValues.modProfile || selectedCatalogProfileId("mod"),
+    selectedCatalogProfileId("mod"),
+  );
+  ensureSelectValue(
+    resourceSelects[0],
+    draft.filterValues.resourcepackGameVersion || selectedGameVersion(),
+    selectedGameVersion(),
+  );
+
+  const resourceUrlInput = resourcePane?.querySelector("[data-rp-url-input]");
+  const resourceSha1Input = resourcePane?.querySelector("[data-rp-sha1-input]");
+  const resourceRequireInput = resourcePane?.querySelector("[data-rp-require-input]");
+  const resourcePromptInput = resourcePane?.querySelector("[data-rp-prompt-input]");
+  if (resourceUrlInput) {
+    resourceUrlInput.value =
+      draft.resourcePack.url || String(server?.server?.properties?.["resource-pack"] ?? "");
+  }
+  if (resourceSha1Input) {
+    resourceSha1Input.value =
+      draft.resourcePack.sha1 || String(server?.server?.properties?.["resource-pack-sha1"] ?? "");
+  }
+  if (resourceRequireInput) {
+    resourceRequireInput.checked =
+      draft.resourcePack.require ??
+      (String(server?.server?.properties?.["require-resource-pack"] ?? "false").toLowerCase() ===
+        "true");
+  }
+  if (resourcePromptInput) {
+    resourcePromptInput.value =
+      draft.resourcePack.prompt || String(server?.server?.properties?.["resource-pack-prompt"] ?? "");
+  }
+}
+
+function captureWorldsPageDraftFromDom() {
+  const draft = APP_STATE.worldsPage;
+  draft.selectedWorld = String(document.querySelector("#releu-world-select")?.value ?? draft.selectedWorld ?? "");
+  draft.seed = String(document.querySelector("#releu-world-seed")?.value ?? draft.seed ?? "");
+  draft.folderPath = String(document.querySelector("[data-world-folder-path]")?.value ?? draft.folderPath ?? "");
+  draft.folderName = String(document.querySelector("[data-world-folder-name]")?.value ?? draft.folderName ?? "");
+}
+
+function restoreWorldsPageDraftToDom(activeWorldName, levelSeed) {
+  const draft = APP_STATE.worldsPage;
+  const worldSelect = document.querySelector("#releu-world-select");
+  const worldSeedInput = document.querySelector("#releu-world-seed");
+  const folderPathInput = document.querySelector("[data-world-folder-path]");
+  const folderNameInput = document.querySelector("[data-world-folder-name]");
+
+  if (worldSelect) {
+    const preferredWorld = draft.selectedWorld || activeWorldName;
+    if ([...worldSelect.options].some((option) => option.value === preferredWorld)) {
+      worldSelect.value = preferredWorld;
+    }
+  }
+  if (worldSeedInput) {
+    worldSeedInput.value = draft.seed || levelSeed;
+  }
+  if (folderPathInput) {
+    folderPathInput.value = draft.folderPath || "";
+  }
+  if (folderNameInput) {
+    folderNameInput.value = draft.folderName || "";
+  }
+}
+
 async function loadPluginCatalog(query = "", page = getCatalogPage("plugin")) {
   const payload = await api(
     `/api/servers/${encodeURIComponent(activeServerId())}/catalog/search?${new URLSearchParams({
@@ -4319,6 +4504,7 @@ function patchCatalogPagination(pane, kind, resultSet) {
 async function patchAddonsPage() {
   const server = activeServer();
   if (!server) return;
+  captureAddonsPageDraftFromDom();
   stripSavedAddonsPageListeners();
   const installedUi = ensureInstalledAddonsTab();
   const pluginSupported = kindSupported("plugin");
@@ -4414,6 +4600,7 @@ async function patchAddonsPage() {
     );
     patchCatalogPagination(resourcePane, "resourcepack", APP_STATE.catalogResults.resourcepack);
   }
+  restoreAddonsPageDraftToDom(server);
 
   const resourceUrlInput = resourcePane?.querySelector("[data-rp-url-input]");
   const resourceSha1Input = resourcePane?.querySelector("[data-rp-sha1-input]");
@@ -4440,18 +4627,23 @@ async function patchAddonsPage() {
     resourcePromptInput = extraControls.querySelector("[data-rp-prompt-input]");
   }
   if (resourceUrlInput && document.activeElement !== resourceUrlInput) {
-    resourceUrlInput.value = server.server?.properties?.["resource-pack"] ?? "";
+    resourceUrlInput.value =
+      APP_STATE.addonsPage.resourcePack.url || String(server.server?.properties?.["resource-pack"] ?? "");
   }
   if (resourceSha1Input && document.activeElement !== resourceSha1Input) {
-    resourceSha1Input.value = server.server?.properties?.["resource-pack-sha1"] ?? "";
+    resourceSha1Input.value =
+      APP_STATE.addonsPage.resourcePack.sha1 ||
+      String(server.server?.properties?.["resource-pack-sha1"] ?? "");
   }
   if (resourceRequireInput && document.activeElement !== resourceRequireInput) {
-    resourceRequireInput.checked =
+    resourceRequireInput.checked = APP_STATE.addonsPage.resourcePack.require ||
       String(server.server?.properties?.["require-resource-pack"] ?? "false").toLowerCase() ===
-      "true";
+        "true";
   }
   if (resourcePromptInput && document.activeElement !== resourcePromptInput) {
-    resourcePromptInput.value = server.server?.properties?.["resource-pack-prompt"] ?? "";
+    resourcePromptInput.value =
+      APP_STATE.addonsPage.resourcePack.prompt ||
+      String(server.server?.properties?.["resource-pack-prompt"] ?? "");
   }
   const resourcePackStatus = resourcePane?.querySelector("[data-pm-rp-status]");
   if (
@@ -7786,131 +7978,7 @@ function patchCloudBackupPage() {
 }
 
 function renderUpdaterSection() {
-  const mount = document.querySelector(".fi-page-content");
-  const state = APP_STATE.state;
-  const appUpdate = appUpdateState();
-  if (!mount || !state || !appUpdate) return;
-
-  let section = mount.querySelector("[data-releu-updater-section]");
-  if (!section) {
-    section = document.createElement("section");
-    section.className = "fi-section mt-6";
-    section.dataset.releuUpdaterSection = "true";
-    mount.append(section);
-  }
-
-  const statusMessage =
-    appUpdate.statusMessage ||
-    (appUpdate.updateReady
-      ? `Releu update ${appUpdate.stagedVersion ?? appUpdate.latestVersion ?? "next"} is ready.`
-      : appUpdate.available
-        ? `Releu update ${appUpdate.latestVersion ?? "next"} is available.`
-        : `Releu is on ${appUpdate.currentVersion ?? "unknown"}.`);
-
-  section.innerHTML = `
-    <header class="fi-section-header">
-      <div>
-        <h2 class="fi-section-header-heading">
-          <span class="releu-panel-title">
-            <svg class="releu-panel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            <span>App Updates</span>
-          </span>
-        </h2>
-        <p class="fi-section-header-description">GitHub update checks, staged downloads, and desktop self-update for this platform.</p>
-      </div>
-    </header>
-    <div class="fi-section-content" style="display:grid;gap:1rem;">
-      <div class="cb-status">Automatic updates are always enabled in Releu. The app keeps checking GitHub and auto-applies staged updates when it is safe to restart.</div>
-      <div style="display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));">
-        <label class="cb-field">
-          <span class="cb-field-label">Check Interval (hours)</span>
-          <input class="cb-plain-input" data-releu-updater-interval type="number" min="1" value="${escapeHtml(state.updaterSettings?.checkIntervalHours ?? 6)}">
-        </label>
-        <label style="display:flex;align-items:center;gap:.75rem;">
-          <input type="checkbox" data-releu-updater-prerelease ${state.updaterSettings?.allowPrerelease ? "checked" : ""}>
-          <span>Allow prerelease builds</span>
-        </label>
-      </div>
-      <div class="cb-chips">
-        <div class="cb-chip">Current: ${escapeHtml(appUpdate.currentVersion ?? "unknown")}</div>
-        <div class="cb-chip">Latest: ${escapeHtml(appUpdate.latestVersion ?? "Not checked")}</div>
-        <div class="cb-chip">Asset: ${escapeHtml(appUpdate.assetName ?? state.updaterSettings?.assetName ?? "Unknown")}</div>
-        <div class="cb-chip">Last checked: ${escapeHtml(appUpdate.lastCheckedAt ? formatDate(appUpdate.lastCheckedAt) : "Never")}</div>
-      </div>
-      <div class="cb-status">${escapeHtml(statusMessage)}</div>
-      <div class="cb-actions">
-        <button type="button" class="cb-btn" data-releu-updater-save>Save Update Settings</button>
-        <button type="button" class="cb-btn is-primary" data-releu-updater-check>Check GitHub Now</button>
-        ${isDesktopApp() && appUpdate.updateReady && appUpdate.stagedFilePath ? `<button type="button" class="cb-btn" data-releu-updater-apply>Apply Update</button>` : ""}
-        ${appUpdate.releasePageUrl ? `<a class="cb-btn" href="${escapeHtml(appUpdate.releasePageUrl)}" target="_blank" rel="noreferrer">Open Release Page</a>` : ""}
-      </div>
-    </div>`;
-
-  const saveButton = section.querySelector("[data-releu-updater-save]");
-  const checkButton = section.querySelector("[data-releu-updater-check]");
-  const applyButton = section.querySelector("[data-releu-updater-apply]");
-
-  if (saveButton && saveButton.dataset.releuBound !== "true") {
-    saveButton.dataset.releuBound = "true";
-    saveButton.addEventListener("click", async () => {
-      try {
-        setButtonBusy(saveButton, true, "Saving...");
-        const payload = await api("/api/settings/updater", {
-          method: "POST",
-          body: {
-            checkIntervalHours: Number(section.querySelector("[data-releu-updater-interval]")?.value) || 6,
-            allowPrerelease: Boolean(section.querySelector("[data-releu-updater-prerelease]")?.checked),
-          },
-        });
-        APP_STATE.state = payload.state ?? APP_STATE.state;
-        updateChrome(APP_STATE.state);
-        renderUpdaterSection();
-        showStatus("Update settings saved.", "success");
-      } catch (error) {
-        showError(error);
-      } finally {
-        setButtonBusy(saveButton, false);
-      }
-    });
-  }
-
-  if (checkButton && checkButton.dataset.releuBound !== "true") {
-    checkButton.dataset.releuBound = "true";
-    checkButton.addEventListener("click", async () => {
-      try {
-        setButtonBusy(checkButton, true, "Checking...");
-        await kickoffAppUpdateCheck({ force: true, showFeedback: true });
-        await refreshState(activeServerId());
-        renderUpdaterSection();
-      } catch (error) {
-        showError(error);
-      } finally {
-        setButtonBusy(checkButton, false);
-      }
-    });
-  }
-
-  if (applyButton && applyButton.dataset.releuBound !== "true") {
-    applyButton.dataset.releuBound = "true";
-    applyButton.addEventListener("click", async () => {
-      try {
-        setButtonBusy(applyButton, true, "Applying...");
-        const currentUpdate = appUpdateState();
-        if (!isDesktopApp() || !window.desktop?.installAppUpdate) {
-          throw new Error("App self-update is available only in the desktop build.");
-        }
-        if (!currentUpdate?.stagedFilePath) {
-          throw new Error("No downloaded Releu update is ready yet.");
-        }
-        await api("/api/app-update/applying", { method: "POST" });
-        await window.desktop.installAppUpdate(currentUpdate.stagedFilePath);
-      } catch (error) {
-        showError(error);
-      } finally {
-        setButtonBusy(applyButton, false);
-      }
-    });
-  }
+  document.querySelector("[data-releu-updater-section]")?.remove();
 }
 
 function patchSettingsPage() {
@@ -8036,8 +8104,8 @@ function patchSettingsPage() {
       valueNode.innerHTML = `<span class="playit-badge playit-badge-green">● ${safeText}</span>`;
       return;
     }
-    if (tone === "blue") {
-      valueNode.innerHTML = `<span class="playit-badge playit-badge-blue">● ${safeText}</span>`;
+    if (tone === "dark") {
+      valueNode.innerHTML = `<span class="playit-badge playit-badge-dark">● ${safeText}</span>`;
       return;
     }
     valueNode.innerHTML =
@@ -8056,11 +8124,14 @@ function patchSettingsPage() {
       return;
     }
     if (label === "auto-start") {
-      setPlayitBadge(value, state.playitSettings?.autoStart ? "Enabled" : "Disabled", "blue");
+      setPlayitBadge(value, state.playitSettings?.autoStart ? "Enabled" : "Disabled", "dark");
       return;
     }
     if (label === "public address") value.textContent = getPublicAddress(state, server) ?? "Run Server To Get Address";
-    if (label === "tunnel target") value.textContent = state.playit?.recommendedTunnelTarget ?? `127.0.0.1:${server.server?.properties?.["server-port"] ?? 25565}`;
+    if (label === "tunnel target") {
+      const targets = getPlayitTunnelTargets(server);
+      value.innerHTML = `<div style="display:grid;gap:.35rem;"><div style="font-family:ui-monospace,monospace;font-size:0.9rem;">${escapeHtml(state.playit?.recommendedTunnelTarget ?? targets.java)}</div><div style="font-size:0.72rem;color:#94a3b8;">Bedrock UDP if using Geyser: ${escapeHtml(targets.bedrock)}</div></div>`;
+    }
   });
   document.querySelector("[data-releu-server-properties]")?.remove();
   const iconPreview = document.querySelector('img[alt="icon"]');
@@ -8245,6 +8316,17 @@ function patchSettingsPage() {
     }
   }
 
+  const removeSettingsBlockByHeading = (matcher) => {
+    const headingNode = [...document.querySelectorAll("legend, .fi-section-header-heading, .fi-fo-fieldset-legend")]
+      .find((node) => matcher.test(node.textContent?.trim() ?? ""));
+    const container =
+      headingNode?.closest(".fi-section, .fi-sc-section, .fi-fieldset, fieldset, .fi-grid-col, [wire\\:partial]");
+    container?.remove();
+  };
+
+  removeSettingsBlockByHeading(/^limits$/i);
+  removeSettingsBlockByHeading(/^reinstall server$/i);
+
   renderUpdaterSection();
 }
 
@@ -8278,6 +8360,18 @@ async function pollCurrentPage() {
   }
   if (PAGE === "players.html") {
     patchPlayersPage();
+    return;
+  }
+  if (PAGE === "addons-mods.html") {
+    return;
+  }
+  if (
+    PAGE === "worlds.html" &&
+    (
+      document.querySelector("[data-world-archive-file]")?.files?.length ||
+      document.activeElement?.closest?.(".pw-card")
+    )
+  ) {
     return;
   }
   await refreshLogs().catch(() => []);

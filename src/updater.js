@@ -97,7 +97,7 @@ export class AppUpdater {
     this.getPanelConfig = getPanelConfig;
     this.hasRunningServers = hasRunningServers;
     this.state = {
-      supported: isWindows || isLinux || isMac,
+      supported: isLinux || isMac,
       currentVersion: "0.0.0",
       configured: false,
       enabled: false,
@@ -143,6 +143,17 @@ export class AppUpdater {
       String(config.assetName ?? getDefaultUpdaterAssetName()).trim() ||
       getDefaultUpdaterAssetName();
     this.state.configured = Boolean(this.state.githubOwner && this.state.githubRepo);
+    if (!this.state.supported) {
+      this.state.enabled = false;
+      this.state.available = false;
+      this.state.updateReady = false;
+      this.state.releasePageUrl = null;
+      this.state.latestVersion = null;
+      this.state.stagedFilePath = null;
+      this.state.stagedVersion = null;
+      this.state.statusMessage = "Windows updates are handled by the native launcher.";
+      return;
+    }
     if (!this.state.configured) {
       this.state.available = false;
       this.state.updateReady = false;

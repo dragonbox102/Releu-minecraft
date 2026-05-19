@@ -4,7 +4,7 @@ const LOG_POLL_MS = 2500;
 const SOFTWARE_ORDER = ["purpur", "paper", "vanilla", "fabric", "forge", "neoforge", "quilt"];
 const DEPENDENCY_CHECK_MIN_MS = 3000;
 const DEPENDENCY_CHECK_MAX_MS = 6000;
-const INITIAL_PANEL_CONNECT_TIMEOUT_MS = 15000;
+const INITIAL_PANEL_CONNECT_TIMEOUT_MS = 45000;
 const INITIAL_PANEL_CONNECT_RETRY_MS = 350;
 const UI_VARIANT_CLASSIC = "classic";
 const UI_VARIANT_PELICAN_BLUEPRINT = "pelican-blueprint";
@@ -212,6 +212,15 @@ async function apiRaw(path, body, headers = {}) {
 }
 
 function showError(error) {
+  if (ui.bootstrap.active && isTransientLaunchFetchError(error)) {
+    console.warn(error);
+    ui.bootstrap.warning = "Releu is retrying the local panel connection.";
+    if (!ui.bootstrap.detail) {
+      ui.bootstrap.detail = "Connecting to the local Releu panel.";
+    }
+    render();
+    return;
+  }
   window.alert(error.message ?? String(error));
 }
 
@@ -222,6 +231,32 @@ function isTransientLaunchFetchError(error) {
     message.includes("networkerror") ||
     message.includes("load failed")
   );
+}
+
+async function retryTransientLaunchFetch(
+  run,
+  {
+    timeoutMs = INITIAL_PANEL_CONNECT_TIMEOUT_MS,
+    retryMs = INITIAL_PANEL_CONNECT_RETRY_MS,
+    onRetry = null,
+  } = {},
+) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  let lastError = null;
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await run();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientLaunchFetchError(error) || Date.now() >= deadline) {
+        throw lastError;
+      }
+      attempt += 1;
+      onRetry?.(error, attempt);
+      await sleep(retryMs);
+    }
+  }
 }
 
 function escapeHtml(value) {
@@ -724,7 +759,7 @@ async function maybeAutoApplyAppUpdate() {
     render();
     return false;
   }
-  if (!isDesktopApp() || !window.desktop?.installAppUpdate) return false;
+  if (!appUpdate?.supported || !isDesktopApp() || !window.desktop?.installAppUpdate) return false;
   if (!appUpdate?.canAutoApply || !appUpdate?.stagedFilePath || !appUpdate?.stagedVersion) return false;
   if (ui.appUpdateAttemptedVersion === appUpdate.stagedVersion) return false;
 
@@ -1105,6 +1140,23 @@ function playitAddressState(server = activeServer()) {
       playit.statusMessage ??
       `Releu is waiting for playit.gg to publish the public join address for 127.0.0.1:${port}.`,
   };
+}
+
+function playitTunnelTargets(server = activeServer()) {
+  return {
+    java: `127.0.0.1:${serverPort(server)}`,
+    bedrock: "127.0.0.1:19132",
+  };
+}
+
+function playitTunnelGuidance(server = activeServer()) {
+  const targets = playitTunnelTargets(server);
+  return `Required target: Java TCP ${targets.java}. If you use Geyser Bedrock crossplay, also add a second UDP tunnel for ${targets.bedrock}.`;
+}
+
+function renderPlayitTunnelTargetsHtml(server = activeServer()) {
+  const targets = playitTunnelTargets(server);
+  return `<div class="mx-auto mt-5 max-w-2xl border border-outline bg-black px-5 py-4 text-left text-sm text-zinc-400"><div class="${C.label} mb-2">Required Tunnel Targets</div><p>Java TCP: <span class="font-mono text-white">${escapeHtml(targets.java)}</span></p><p class="mt-2">Bedrock UDP (only if you use Geyser crossplay): <span class="font-mono text-white">${escapeHtml(targets.bedrock)}</span></p></div>`;
 }
 
 function stopPlayitGatePolling() {
@@ -1917,15 +1969,19 @@ function renderPlayitGateScreen() {
     playit.lastError ||
     playit.statusMessage ||
     "You can relink or reset the agent later from Settings.";
+  const primaryButtonClass =
+    "releu-button inline-flex items-center justify-center border border-white bg-black px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-white transition hover:bg-zinc-900";
+  const secondaryButtonClass =
+    "releu-button inline-flex items-center justify-center border border-zinc-700 bg-black px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-300 transition hover:border-white hover:text-white";
   const primaryAction = waiting
-    ? `<a class="${C.btnPrimary}" href="${escapeHtml(playit.claimUrl ?? playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Playit Link</a>`
+    ? `<a class="${primaryButtonClass}" href="${escapeHtml(playit.claimUrl ?? playit.dashboardTunnelUrl)}" target="_blank" rel="noreferrer">Open Playit Link</a>`
     : startingLinkedAgent
-      ? `<button type="button" class="${C.btnGhost}" data-action="refresh-playit-gate">Refresh Status</button>`
-      : `<button type="button" class="${C.btnPrimary}" data-action="playit-connect">Connect Playit Agent</button>`;
+      ? `<button type="button" class="${secondaryButtonClass}" data-action="refresh-playit-gate">Refresh Status</button>`
+      : `<button type="button" class="${primaryButtonClass}" data-action="playit-connect">Connect Playit Agent</button>`;
   const secondaryAction = waiting
-    ? `<button type="button" class="${C.btnGhost}" data-action="refresh-playit-gate">Refresh Status</button>`
+    ? `<button type="button" class="${secondaryButtonClass}" data-action="refresh-playit-gate">Refresh Status</button>`
     : "";
-  return `<div class="releu-screen min-h-screen bg-black text-white"><header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-outline bg-black px-6"><div class="text-xl font-black tracking-tight text-white">Releu</div></header><main class="mx-auto flex min-h-[calc(100vh-64px)] max-w-3xl items-center justify-center p-8"><section class="releu-panel w-full border border-outline bg-surface p-8 text-center"><p class="${C.label} mb-4">Playit Agent</p><h1 class="mx-auto max-w-2xl text-4xl font-black uppercase tracking-tight text-white">${escapeHtml(title)}</h1><p class="mx-auto mt-4 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(detail)}</p><div class="mx-auto mt-8 max-w-2xl border border-outline bg-black px-5 py-4 text-left text-sm text-zinc-400"><div class="${C.label} mb-2">Status</div><p>${escapeHtml(note)}</p></div><div class="mt-8 flex flex-wrap justify-center gap-3">${primaryAction}${secondaryAction}</div></section></main></div>`;
+  return `<div class="releu-screen min-h-screen bg-black text-white"><header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-zinc-900 bg-black px-6"><div class="text-xl font-black tracking-tight text-white">Releu</div></header><main class="mx-auto flex min-h-[calc(100vh-64px)] max-w-3xl items-center justify-center p-8"><section class="w-full border border-zinc-900 bg-black p-8 text-center shadow-[0_24px_60px_rgba(0,0,0,0.45)]"><p class="${C.label} mb-4">Playit Agent</p><h1 class="mx-auto max-w-2xl text-4xl font-black uppercase tracking-tight text-white">${escapeHtml(title)}</h1><p class="mx-auto mt-4 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(detail)}</p><div class="mx-auto mt-8 max-w-2xl border border-zinc-900 bg-black px-5 py-4 text-left text-sm text-zinc-400"><div class="${C.label} mb-2">Status</div><p>${escapeHtml(note)}</p></div>${renderPlayitTunnelTargetsHtml()}<p class="mx-auto mt-4 max-w-2xl text-xs leading-6 text-zinc-500">${escapeHtml(playitTunnelGuidance())}</p><div class="mt-8 flex flex-wrap justify-center gap-3">${primaryAction}${secondaryAction}</div></section></main></div>`;
 }
 
 function renderBootstrapScreen() {
@@ -2724,7 +2780,7 @@ function renderSettingsSection(server) {
             : `<button type="button" class="${C.btnPrimary}" data-action="playit-connect">Connect Playit Agent</button>`}
         </div>
       </div>
-      <div class="${C.card}">
+      ${appUpdate?.supported ? `<div class="${C.card}">
         <div class="mb-4 border-b border-zinc-900 pb-2">
           <h2 class="text-xl font-semibold uppercase tracking-[0.12em] text-white">Releu Updates</h2>
         </div>
@@ -2753,7 +2809,7 @@ function renderSettingsSection(server) {
             ${appUpdate?.releasePageUrl ? `<a class="${C.btnGhost}" href="${escapeHtml(appUpdate.releasePageUrl)}" target="_blank" rel="noreferrer">Open Release</a>` : ""}
           </div>
         </form>
-      </div>
+      </div>` : ""}
       <div class="${C.card}">
         <div class="mb-4 border-b border-zinc-900 pb-2">
           <h2 class="text-xl font-semibold uppercase tracking-[0.12em] text-white">Cloud Backup</h2>
@@ -2896,18 +2952,29 @@ function shouldRenderBlockingBootstrap() {
   return ui.bootstrap.active;
 }
 
+function syncRootBackdrop(mode = "default") {
+  const forceBlack = mode === "bootstrap" || mode === "playit-gate";
+  const background = forceBlack ? "#000000" : "";
+  document.documentElement.style.backgroundColor = background;
+  document.body.style.backgroundColor = background;
+  app.style.backgroundColor = background;
+  app.style.minHeight = forceBlack ? "100vh" : "";
+}
+
 function render() {
   syncVariantAssets();
   const focusSnapshot = captureEditableFocus();
   let page;
   if (shouldRenderBlockingBootstrap()) {
     stopPlayitGatePolling();
+    syncRootBackdrop("bootstrap");
     app.innerHTML = renderBootstrapScreen();
     restoreEditableFocus(focusSnapshot);
     return;
   }
   if (!runtime.data) {
     stopPlayitGatePolling();
+    syncRootBackdrop("bootstrap");
     page = `<div class="min-h-screen bg-black text-white"><div class="mx-auto max-w-5xl p-8"><section class="${C.card}"><h2 class="text-2xl font-semibold text-white">Loading panel...</h2></section></div></div>`;
     app.innerHTML = `${page}${renderModal()}`;
     restoreEditableFocus(focusSnapshot);
@@ -2917,11 +2984,13 @@ function render() {
   if (playitLinkRequired()) {
     maybeKickoffPlayitGateConnection();
     startPlayitGatePolling();
+    syncRootBackdrop("playit-gate");
     app.innerHTML = `${renderPlayitGateScreen()}${renderModal()}`;
     restoreEditableFocus(focusSnapshot);
     return;
   }
   stopPlayitGatePolling();
+  syncRootBackdrop("default");
   const server = activeServer();
   if (ui.screen === "create-server") {
     const createScreen = renderCreateServerScreen();
@@ -2973,7 +3042,20 @@ async function ensureDependenciesReady() {
   const startedAt = Date.now();
   render();
 
-  const payload = await api("/api/dependencies/state");
+  const retryDependenciesConnection = () => {
+    ui.bootstrap.active = true;
+    ui.bootstrap.title = "Checking For Dependencies";
+    ui.bootstrap.detail = "Connecting to the local Releu panel.";
+    ui.bootstrap.warning = "Retrying";
+    ui.bootstrap.metaLeft = "System Node_01";
+    ui.bootstrap.metaRight = "Retrying";
+    ui.bootstrap.progressWidth = 30;
+    render();
+  };
+
+  const payload = await retryTransientLaunchFetch(() => api("/api/dependencies/state"), {
+    onRetry: retryDependenciesConnection,
+  });
   const dependencies = payload.dependencies;
   const waitForMinimum = async () => {
     const remainingMs = ui.bootstrap.minDurationMs - (Date.now() - startedAt);
@@ -2993,16 +3075,24 @@ async function ensureDependenciesReady() {
   render();
 
   let ensureError = null;
-  api("/api/dependencies/ensure", {
-    method: "POST",
-  }).catch((error) => {
+  retryTransientLaunchFetch(
+    () =>
+      api("/api/dependencies/ensure", {
+        method: "POST",
+      }),
+    {
+      onRetry: retryDependenciesConnection,
+    },
+  ).catch((error) => {
     ensureError = error;
   });
 
   for (;;) {
     await sleep(350);
     if (ensureError) throw ensureError;
-    const statePayload = await api("/api/dependencies/state");
+    const statePayload = await retryTransientLaunchFetch(() => api("/api/dependencies/state"), {
+      onRetry: retryDependenciesConnection,
+    });
     const current = statePayload.dependencies;
     updateBootstrapFromDependencies(current, "downloading");
     render();
@@ -3028,7 +3118,18 @@ async function ensureDependenciesReadyOnce() {
     runStartupAppUpdateCheck().catch((error) => {
       console.error(error);
     });
-    await refreshState();
+    await retryTransientLaunchFetch(() => refreshState(), {
+      onRetry: () => {
+        ui.bootstrap.active = true;
+        ui.bootstrap.title = "Opening Releu";
+        ui.bootstrap.detail = "Connecting to the local Releu panel.";
+        ui.bootstrap.warning = "Retrying";
+        ui.bootstrap.metaLeft = "System Node_01";
+        ui.bootstrap.metaRight = "Retrying";
+        ui.bootstrap.progressWidth = 35;
+        render();
+      },
+    });
     return dependencies;
   })().finally(() => {
     startup.dependencyPromise = null;
@@ -3064,22 +3165,35 @@ async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activ
 }
 
 async function waitForInitialState() {
-  const deadline = Date.now() + INITIAL_PANEL_CONNECT_TIMEOUT_MS;
-  let lastError = null;
-  for (;;) {
-    try {
-      await refreshState();
-      return;
-    } catch (error) {
-      lastError = error;
-      if (!isTransientLaunchFetchError(error) || Date.now() >= deadline) {
-        throw lastError;
-      }
+  await retryTransientLaunchFetch(() => refreshState(), {
+    onRetry: () => {
       ui.bootstrap.active = true;
       ui.bootstrap.stage = "checking";
       ui.bootstrap.title = "Opening Releu";
       ui.bootstrap.detail = "Connecting to the local Releu panel.";
       ui.bootstrap.warning = "";
+      ui.bootstrap.metaLeft = "System Node_01";
+      ui.bootstrap.metaRight = "Retrying";
+      ui.bootstrap.progressWidth = 30;
+      render();
+    },
+  });
+}
+
+async function waitForInitialStateResilient() {
+  for (;;) {
+    try {
+      await waitForInitialState();
+      return;
+    } catch (error) {
+      if (!isTransientLaunchFetchError(error)) {
+        throw error;
+      }
+      ui.bootstrap.active = true;
+      ui.bootstrap.stage = "checking";
+      ui.bootstrap.title = "Opening Releu";
+      ui.bootstrap.detail = "Connecting to the local Releu panel.";
+      ui.bootstrap.warning = "Retrying";
       ui.bootstrap.metaLeft = "System Node_01";
       ui.bootstrap.metaRight = "Retrying";
       ui.bootstrap.progressWidth = 30;
@@ -3118,9 +3232,25 @@ async function runStartupAppUpdateCheck() {
   }
 
   let checkError = null;
-  api("/api/app-update/check", {
-    method: "POST",
-  }).catch((error) => {
+  retryTransientLaunchFetch(
+    () =>
+      api("/api/app-update/check", {
+        method: "POST",
+      }),
+    {
+      onRetry: () => {
+        ui.bootstrap.active = true;
+        ui.bootstrap.stage = "checking";
+        ui.bootstrap.title = "Checking For Updates";
+        ui.bootstrap.detail = "Connecting to the local Releu panel.";
+        ui.bootstrap.warning = "Retrying";
+        ui.bootstrap.metaLeft = "Updater";
+        ui.bootstrap.metaRight = "Retrying";
+        ui.bootstrap.progressWidth = 32;
+        render();
+      },
+    },
+  ).catch((error) => {
     checkError = error;
   });
 
@@ -3130,7 +3260,19 @@ async function runStartupAppUpdateCheck() {
 
     const serverId = activeServer()?.id ?? runtime.data?.activeServerId ?? null;
     const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
-    const payload = await api(`/api/state${query}`);
+    const payload = await retryTransientLaunchFetch(() => api(`/api/state${query}`), {
+      onRetry: () => {
+        ui.bootstrap.active = true;
+        ui.bootstrap.stage = "checking";
+        ui.bootstrap.title = "Checking For Updates";
+        ui.bootstrap.detail = "Connecting to the local Releu panel.";
+        ui.bootstrap.warning = "Retrying";
+        ui.bootstrap.metaLeft = "Updater";
+        ui.bootstrap.metaRight = "Retrying";
+        ui.bootstrap.progressWidth = 32;
+        render();
+      },
+    });
     runtime.data = payload.state;
     syncInstallDraft();
     if (ui.installDraft?.software) await ensureVersions(ui.installDraft.software);
@@ -3481,6 +3623,10 @@ async function handleAction(event) {
         break;
       }
       case "check-app-update": {
+        const appUpdate = appUpdateState();
+        if (!appUpdate?.supported) {
+          break;
+        }
         const payload = await api("/api/app-update/check", { method: "POST" });
         runtime.data = payload.state;
         render();
@@ -3489,7 +3635,7 @@ async function handleAction(event) {
       }
       case "apply-app-update": {
         const appUpdate = appUpdateState();
-        if (!isDesktopApp() || !window.desktop?.installAppUpdate) {
+        if (!appUpdate?.supported || !isDesktopApp() || !window.desktop?.installAppUpdate) {
           throw new Error("App self-update is available only in the desktop build.");
         }
         if (!appUpdate?.stagedFilePath) {
@@ -4162,7 +4308,7 @@ async function boot() {
   document.addEventListener("keydown", handleKeydown);
   render();
   await sleep(25);
-  await waitForInitialState();
+  await waitForInitialStateResilient();
   scheduleLogsPolling();
   scheduleStatePolling();
   if (playitLinkRequired()) {
