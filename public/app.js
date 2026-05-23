@@ -28,6 +28,7 @@ const startup = {
   redirectReady: false,
   dependenciesReady: false,
   dependencyPromise: null,
+  requestedScreenApplied: false,
 };
 const ui = {
   bootstrap: {
@@ -53,6 +54,7 @@ const ui = {
   cloudBackupStatus: null,
   cloudBackupStatusLoading: false,
   cloudBackupStatusFetchedAt: 0,
+  remoteAccessDraft: null,
   cloudBackupDraft: {
     deviceLabel: "",
     accountUsername: "",
@@ -75,6 +77,53 @@ const sections = [
   { id: "misc", label: "Misc" },
   { id: "settings", label: "Settings" },
 ];
+
+const REMOTE_ACCESS_SECTIONS = [
+  ["dashboard", "Dashboard"],
+  ["overview", "Overview"],
+  ["console", "Console"],
+  ["players", "Players"],
+  ["worlds", "Worlds"],
+  ["addons", "Add-ons"],
+  ["backups", "Backups"],
+  ["software", "Software"],
+  ["misc", "Misc"],
+  ["settings", "Settings"],
+];
+
+const REMOTE_ACCESS_ACTIONS = [
+  ["powerControls", "Power controls"],
+  ["consoleCommands", "Console commands"],
+  ["playerModeration", "Player moderation"],
+  ["serverCreateDelete", "Server create/delete"],
+  ["softwareChanges", "Software changes"],
+  ["worldImportDelete", "World import/delete"],
+  ["addonInstallRemove", "Add-on install/remove"],
+  ["backupCreate", "Backup create"],
+  ["backupRestoreDelete", "Backup restore/delete"],
+  ["settingsChanges", "Settings changes"],
+];
+
+function buildRemoteAccessPreset(mode = "view") {
+  const sections = Object.fromEntries(REMOTE_ACCESS_SECTIONS.map(([id]) => [id, true]));
+  const actions = Object.fromEntries(REMOTE_ACCESS_ACTIONS.map(([id]) => [id, false]));
+  const normalized = String(mode ?? "").trim().toLowerCase();
+  if (normalized === "operator") {
+    actions.powerControls = true;
+    actions.consoleCommands = true;
+    actions.playerModeration = true;
+    actions.backupCreate = true;
+  } else if (normalized === "admin") {
+    for (const [actionId] of REMOTE_ACCESS_ACTIONS) {
+      actions[actionId] = true;
+    }
+  }
+  return {
+    mode: ["operator", "admin", "custom"].includes(normalized) ? normalized : "view",
+    sections,
+    actions,
+  };
+}
 
 const C = {
   card: "releu-panel border border-outline bg-surface p-6",
@@ -144,8 +193,24 @@ function buildPelicanShellUrl(serverId = activeServer()?.id ?? runtime.data?.act
   return `/pelican-demo/servers.html${query}`;
 }
 
+function requestedGlobalScreen() {
+  const url = new URL(window.location.href);
+  const queryScreen = String(url.searchParams.get("screen") ?? "").trim().toLowerCase();
+  if (queryScreen === "remote-access") {
+    return "remote-access";
+  }
+  const hashScreen = String(url.hash ?? "").replace(/^#/, "").trim().toLowerCase();
+  if (hashScreen === "remote-access") {
+    return "remote-access";
+  }
+  return "";
+}
+
 function maybeRedirectToPreferredUi() {
   if (!startup.redirectReady) {
+    return false;
+  }
+  if (requestedGlobalScreen() === "remote-access") {
     return false;
   }
   const uiSettings = currentUiSettings();
@@ -411,6 +476,65 @@ function activeServer() {
   return runtime.data?.activeServer ?? null;
 }
 
+function remoteAccessState() {
+  return runtime.data?.remoteAccess ?? {
+    enabled: false,
+    slug: "",
+    url: "",
+    passwordEnabled: false,
+    mode: "view",
+    sections: buildRemoteAccessPreset("view").sections,
+    actions: buildRemoteAccessPreset("view").actions,
+    online: false,
+    brokerReachable: false,
+    lastBrokerSyncAt: "",
+    lastError: null,
+    status: "disabled",
+    statusMessage: "Remote access is disabled.",
+  };
+}
+
+function syncRemoteAccessDraft(force = false) {
+  const remote = remoteAccessState();
+  if (!force && ui.remoteAccessDraft) {
+    return ui.remoteAccessDraft;
+  }
+  const preset = buildRemoteAccessPreset(remote.mode);
+  ui.remoteAccessDraft = {
+    step: remote.enabled ? 3 : 1,
+    passwordEnabled: Boolean(remote.passwordEnabled),
+    password: "",
+    mode: remote.mode === "custom" ? "custom" : preset.mode,
+    sections: { ...(remote.sections ?? preset.sections) },
+    actions: { ...(remote.actions ?? preset.actions) },
+  };
+  return ui.remoteAccessDraft;
+}
+
+function openRemoteAccessScreen({ reconfigure = false } = {}) {
+  const remote = remoteAccessState();
+  syncRemoteAccessDraft(true);
+  if (!remote.enabled || reconfigure) {
+    ui.remoteAccessDraft.step = reconfigure ? 2 : 1;
+  } else {
+    ui.remoteAccessDraft.step = 3;
+  }
+  ui.screen = "remote-access";
+  render();
+}
+
+function maybeOpenRequestedGlobalScreen() {
+  if (startup.requestedScreenApplied) {
+    return false;
+  }
+  startup.requestedScreenApplied = true;
+  if (requestedGlobalScreen() === "remote-access") {
+    openRemoteAccessScreen();
+    return true;
+  }
+  return false;
+}
+
 function activeServerStatus() {
   return String(activeServer()?.server?.status ?? "").toLowerCase();
 }
@@ -553,6 +677,17 @@ function playitMinecraftIp(server = activeServer()) {
   return playitPrimaryTunnel(server)?.publicAddress ?? null;
 }
 
+function playitHasUsableTunnel(playit = runtime.data?.playit) {
+  if (!playit) return false;
+  const hasPublicTunnel =
+    Array.isArray(playit.tunnels) &&
+    playit.tunnels.some((entry) => entry?.publicAddress);
+  return Boolean(
+    hasPublicTunnel ||
+      (playit.secretConfigured && Number(playit.configuredTunnelCount ?? 0) > 0),
+  );
+}
+
 function appUpdateState() {
   return runtime.data?.appUpdate ?? null;
 }
@@ -560,6 +695,7 @@ function appUpdateState() {
 function playitLinkRequired() {
   const playit = runtime.data?.playit;
   if (!playit) return false;
+  if (playitHasUsableTunnel(playit)) return false;
   if (!playit.secretConfigured) return true;
   return Boolean(playit.claimWaiting);
 }
@@ -1187,13 +1323,10 @@ function maybeKickoffPlayitGateConnection() {
   const playit = runtime.data?.playit;
   if (!playit || playitGateConnectPromise) return;
   if (playit.claimWaiting) return;
-  const hasPublicTunnel = Array.isArray(playit.tunnels)
-    && playit.tunnels.some((entry) => entry?.publicAddress);
   const hasUsableTunnel = Boolean(
-    playit.secretConfigured
-      && !playit.needsWebSetup
-      && !playit.claimWaiting
-      && (hasPublicTunnel || Number(playit.configuredTunnelCount || 0) > 0),
+    playit.secretConfigured &&
+      !playit.claimWaiting &&
+      playitHasUsableTunnel(playit),
   );
   if (hasUsableTunnel) return;
 
@@ -1783,6 +1916,9 @@ function icon(name, className = "h-4 w-4") {
     plug: `<path d="M9 7v6M15 7v6M6 10h12M12 13v5a2 2 0 0 1-2 2" />`,
     archive: `<path d="M4 7h16v4H4zM6 11h12v8H6z" /><path d="M10 15h4" />`,
     sliders: `<path d="M4 21v-7M4 10V3M12 21v-3M12 14V3M20 21v-5M20 12V3" /><path d="M2 14h4M10 10h4M18 12h4" />`,
+    shield: `<path d="M12 3 5 6v6c0 5 3.4 8.8 7 10 3.6-1.2 7-5 7-10V6l-7-3Z" />`,
+    lock: `<rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V8a4 4 0 1 1 8 0v3" />`,
+    link: `<path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4" /><path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L13 20" />`,
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="${escapeHtml(className)}">${paths[name] ?? `<circle cx="12" cy="12" r="9" />`}</svg>`;
 }
@@ -1792,17 +1928,26 @@ function renderHeader() {
   const navButtonClass = (active) =>
     `${active ? "releu-nav-active text-white" : "text-zinc-500 hover:text-white"} pb-4 text-[11px] font-bold uppercase tracking-[0.18em] transition`;
   const nav = ui.screen === "manager"
-    ? []
+    ? [
+        `<span class="${navButtonClass(true)}">Servers</span>`,
+        `<button type="button" data-action="open-remote-access" class="${navButtonClass(false)}">Remote Access</button>`,
+      ]
     : ui.screen === "setup"
     ? [
         `<button type="button" data-action="go-manager" class="${navButtonClass(true)}">Servers</button>`,
         `<span class="${navButtonClass(true)}">Setup</span>`,
+      ]
+    : ui.screen === "remote-access"
+    ? [
+        `<button type="button" data-action="go-manager" class="${navButtonClass(false)}">Servers</button>`,
+        `<button type="button" data-action="open-remote-access" class="${navButtonClass(true)}">Remote Access</button>`,
       ]
     : [
         `<button type="button" data-action="go-manager" class="${navButtonClass(false)}">Servers</button>`,
         ...sections.map(
           (item) => `<button type="button" data-action="switch-section" data-section="${escapeHtml(item.id)}" class="${navButtonClass(ui.section === item.id && ui.screen !== "manager")}">${escapeHtml(item.label)}</button>`,
         ),
+        `<button type="button" data-action="open-remote-access" class="${navButtonClass(false)}">Remote Access</button>`,
       ];
   return `<header class="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-outline bg-black px-6"><div class="flex min-w-0 items-center gap-8"><div class="text-xl font-black tracking-tight text-white">Releu</div>${nav.length ? `<nav class="hidden items-center gap-8 md:flex">${nav.join("")}</nav>` : ""}</div><div class="flex items-center gap-3">${server && ui.screen !== "manager" ? `<div class="hidden items-center gap-2 border border-outline px-3 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-400 lg:flex"><span class="${escapeHtml(serverStatusPresentation(server).tone.dot)} h-2 w-2 rounded-full"></span><span>${escapeHtml(server.name)}</span></div>` : ""}<button type="button" class="${C.btnPrimary}" data-action="add-server-prompt">Add Server</button></div></header>`;
 }
@@ -1821,7 +1966,10 @@ function pelicanSidebarItems(server) {
   }
 
   if (ui.screen === "manager" || !server) {
-    return [{ kind: "action", label: "Servers", active: true, action: "go-manager", iconName: "server" }];
+    return [
+      { kind: "action", label: "Servers", active: ui.screen === "manager", action: "go-manager", iconName: "server" },
+      { kind: "action", label: "Remote Access", active: ui.screen === "remote-access", action: "open-remote-access", iconName: "shield" },
+    ];
   }
 
   if (ui.screen === "setup" || !server.setupComplete) {
@@ -1848,6 +1996,7 @@ function pelicanSidebarItems(server) {
                     : section.id === "backups" ? "archive"
                       : "sliders",
     })),
+    { kind: "action", label: "Remote Access", active: ui.screen === "remote-access", action: "open-remote-access", iconName: "shield" },
   ];
 }
 
@@ -1873,6 +2022,14 @@ function pelicanPageMeta(server) {
       eyebrow: "Server Setup",
       title: server.name,
       detail: "Install software and tune runtime limits before opening the full panel.",
+    };
+  }
+
+  if (ui.screen === "remote-access") {
+    return {
+      eyebrow: "Hosted Link",
+      title: "Remote Access",
+      detail: "Generate a `releu.lol` link that stays live only while Releu remains open on this machine.",
     };
   }
 
@@ -2939,7 +3096,303 @@ function renderSettingsSection(server) {
         <button type="button" class="mt-4 border border-outline px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500 transition hover:border-white hover:text-white" data-action="delete-server" data-server-id="${escapeHtml(server.id)}" data-server-name="${escapeHtml(server.name)}">Delete Server</button>
       </div>
     </section>
-  </div>`;
+    </div>`;
+}
+
+function remoteAccessModeLabel(mode) {
+  if (mode === "operator") return "Operator";
+  if (mode === "admin") return "Full admin";
+  if (mode === "custom") return "Advanced";
+  return "View only";
+}
+
+function renderRemoteAccessStepChips(step) {
+  const items = [
+    ["Protection", 1],
+    ["Access", 2],
+    ["Link", 3],
+  ];
+  return `<div class="flex flex-wrap gap-2">
+      ${items
+        .map(
+          ([label, index]) =>
+            `<div class="rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] ${
+              step === index
+                ? "border-white bg-white text-black"
+                : "border-outline text-zinc-500"
+            }">${escapeHtml(label)}</div>`,
+        )
+        .join("")}
+    </div>`;
+}
+
+function renderRemoteAccessManageState(remote) {
+  const statusTone =
+    remote.status === "online"
+      ? { chip: "border-white bg-white text-black", dot: "bg-white" }
+      : remote.status === "waiting"
+        ? { chip: "border-zinc-300 text-zinc-100", dot: "bg-zinc-300" }
+        : { chip: "border-outline text-zinc-400", dot: "bg-zinc-500" };
+  const sectionsList = REMOTE_ACCESS_SECTIONS.filter(([id]) => remote.sections?.[id]).map(([, label]) => label);
+  const actionsList = REMOTE_ACCESS_ACTIONS.filter(([id]) => remote.actions?.[id]).map(([, label]) => label);
+  return `<div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+      <section class="${C.card}">
+        <div class="mb-6 flex flex-wrap items-start justify-between gap-4 border-b border-zinc-900 pb-4">
+          <div>
+            <div class="${C.label} mb-2">Remote Status</div>
+            <h2 class="text-2xl font-black tracking-tight text-white">Remote Access Is ${escapeHtml(remote.status === "online" ? "Live" : remote.status === "waiting" ? "Waiting" : "Offline")}</h2>
+            <p class="mt-2 max-w-2xl text-sm leading-7 text-zinc-400">${escapeHtml(remote.statusMessage ?? "Remote access is disabled.")}</p>
+          </div>
+          <div class="inline-flex items-center gap-2 rounded-full border px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] ${statusTone.chip}">
+            <span class="${statusTone.dot} h-2 w-2 rounded-full"></span>
+            <span>${escapeHtml(remote.status)}</span>
+          </div>
+        </div>
+        <div class="grid gap-5 md:grid-cols-2">
+          <div class="border border-outline bg-black p-5">
+            <div class="${C.label} mb-3">Remote Link</div>
+            <div class="break-all font-mono text-sm text-white">${escapeHtml(remote.url || "Not generated yet")}</div>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <button type="button" class="${C.btnPrimary}" data-action="remote-access-copy-link">Copy Link</button>
+              <button type="button" class="${C.btnGhost}" data-action="remote-access-regenerate">Regenerate</button>
+            </div>
+          </div>
+          <div class="border border-outline bg-black p-5">
+            <div class="${C.label} mb-3">Protection / Mode</div>
+            <div class="space-y-2 text-sm text-zinc-300">
+              <div>Password: <span class="font-semibold text-white">${escapeHtml(remote.passwordEnabled ? "Required" : "Secret link only")}</span></div>
+              <div>Access: <span class="font-semibold text-white">${escapeHtml(remoteAccessModeLabel(remote.mode))}</span></div>
+              <div>Last relay sync: <span class="font-semibold text-white">${escapeHtml(remote.lastBrokerSyncAt ? formatTimestamp(remote.lastBrokerSyncAt) : "Not yet")}</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="mt-6 rounded-xl border border-white/10 bg-white/[0.03] p-5">
+          <div class="${C.labelOn} mb-2">Warning</div>
+          <p class="text-sm leading-7 text-zinc-300">This only works while Releu is open.</p>
+        </div>
+      </section>
+      <section class="${C.card}">
+        <div class="mb-5 border-b border-zinc-900 pb-4">
+          <div class="${C.label} mb-2">Allowed Remote Areas</div>
+          <h3 class="text-xl font-semibold text-white">What This Link Can Reach</h3>
+        </div>
+        <div class="space-y-5">
+          <div>
+            <div class="${C.label} mb-2">Sections</div>
+            <div class="flex flex-wrap gap-2">${sectionsList.length ? sectionsList.map((label) => `<span class="${C.chip}">${escapeHtml(label)}</span>`).join("") : `<span class="text-sm text-zinc-500">No sections allowed.</span>`}</div>
+          </div>
+          <div>
+            <div class="${C.label} mb-2">Dangerous Actions</div>
+            <div class="flex flex-wrap gap-2">${actionsList.length ? actionsList.map((label) => `<span class="${C.chip}">${escapeHtml(label)}</span>`).join("") : `<span class="text-sm text-zinc-500">All dangerous actions are blocked.</span>`}</div>
+          </div>
+          <div class="flex flex-wrap gap-2 pt-2">
+            <button type="button" class="${C.btnGhost}" data-action="remote-access-reconfigure">Change Access</button>
+            <button type="button" class="border border-red-500/40 px-4 py-2 text-[11px] font-bold uppercase tracking-[0.18em] text-red-300 transition hover:border-red-300 hover:text-white" data-action="remote-access-disable">Disable</button>
+          </div>
+        </div>
+      </section>
+    </div>`;
+}
+
+function renderRemoteAccessWizard(draft) {
+  const presetCards = [
+    {
+      id: "view",
+      title: "View only",
+      detail: "Let people browse the whole hosted panel without changing anything.",
+    },
+    {
+      id: "operator",
+      title: "Operator",
+      detail: "Allow live controls like power, console commands, moderation, and backup creation.",
+    },
+    {
+      id: "admin",
+      title: "Full admin",
+      detail: "Allow the full hosted panel, except Remote Access management itself stays local-only.",
+    },
+  ];
+
+  const stepOne = `<section class="${C.card}">
+      <div class="mb-6 border-b border-zinc-900 pb-4">
+        <div class="${C.label} mb-2">Step 1</div>
+        <h2 class="text-2xl font-black tracking-tight text-white">Choose How The Link Is Protected</h2>
+        <p class="mt-2 max-w-3xl text-sm leading-7 text-zinc-400">You can use the random link itself as the secret, or add a password on top before anyone can open the hosted panel.</p>
+      </div>
+      <div class="grid gap-4 md:grid-cols-2">
+        <label class="releu-button flex cursor-pointer flex-col gap-3 border ${draft.passwordEnabled ? "border-outline bg-black text-white" : "border-white bg-white text-black"} p-5 transition">
+          <input type="radio" name="remoteProtection" value="link" ${!draft.passwordEnabled ? "checked" : ""} data-remote-access-protection="link" class="hidden" />
+          <div class="flex items-center justify-between">
+            <div>${icon("link", draft.passwordEnabled ? "h-5 w-5 text-zinc-500" : "h-5 w-5 text-black")}</div>
+            ${!draft.passwordEnabled ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}
+          </div>
+          <div>
+            <div class="text-base font-bold">No password</div>
+            <div class="mt-2 text-sm leading-6 ${draft.passwordEnabled ? "text-zinc-400" : "text-zinc-700"}">Anyone with the random releu.lol link can open the remote panel.</div>
+          </div>
+        </label>
+        <label class="releu-button flex cursor-pointer flex-col gap-3 border ${draft.passwordEnabled ? "border-white bg-white text-black" : "border-outline bg-black text-white"} p-5 transition">
+          <input type="radio" name="remoteProtection" value="password" ${draft.passwordEnabled ? "checked" : ""} data-remote-access-protection="password" class="hidden" />
+          <div class="flex items-center justify-between">
+            <div>${icon("lock", draft.passwordEnabled ? "h-5 w-5 text-black" : "h-5 w-5 text-zinc-500")}</div>
+            ${draft.passwordEnabled ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}
+          </div>
+          <div>
+            <div class="text-base font-bold">Require password</div>
+            <div class="mt-2 text-sm leading-6 ${draft.passwordEnabled ? "text-zinc-700" : "text-zinc-400"}">Visitors must know both the link and the password before the hosted panel opens.</div>
+          </div>
+        </label>
+      </div>
+      ${
+        draft.passwordEnabled
+          ? `<label class="mt-5 block">
+              <span class="${C.label}">Remote Password</span>
+              <input type="password" value="${escapeHtml(draft.password ?? "")}" data-remote-access-password="true" placeholder="At least 6 characters" class="${C.input} mt-3 w-full" />
+            </label>`
+          : ""
+      }
+      <div class="mt-6 flex justify-end">
+        <button type="button" class="${C.btnPrimary}" data-action="remote-access-next">Continue</button>
+      </div>
+    </section>`;
+
+  const advancedSectionGrid = `<div class="grid gap-6 xl:grid-cols-2">
+      <div class="border border-outline bg-black p-5">
+        <div class="${C.labelOn} mb-3">Sections</div>
+        <div class="space-y-3">
+          ${REMOTE_ACCESS_SECTIONS.map(
+            ([id, label]) => `<label class="flex items-center justify-between gap-4 border border-zinc-900 px-4 py-3 text-sm text-zinc-300">
+                <span>${escapeHtml(label)}</span>
+                <input type="checkbox" data-remote-access-section="${escapeHtml(id)}" ${draft.sections?.[id] ? "checked" : ""} class="h-4 w-4 accent-white" />
+              </label>`,
+          ).join("")}
+        </div>
+      </div>
+      <div class="border border-outline bg-black p-5">
+        <div class="${C.labelOn} mb-3">Dangerous Actions</div>
+        <div class="space-y-3">
+          ${REMOTE_ACCESS_ACTIONS.map(
+            ([id, label]) => `<label class="flex items-center justify-between gap-4 border border-zinc-900 px-4 py-3 text-sm text-zinc-300">
+                <span>${escapeHtml(label)}</span>
+                <input type="checkbox" data-remote-access-action="${escapeHtml(id)}" ${draft.actions?.[id] ? "checked" : ""} class="h-4 w-4 accent-white" />
+              </label>`,
+          ).join("")}
+        </div>
+      </div>
+    </div>`;
+
+  const stepTwo = `<section class="${C.card}">
+      <div class="mb-6 border-b border-zinc-900 pb-4">
+        <div class="${C.label} mb-2">Step 2</div>
+        <h2 class="text-2xl font-black tracking-tight text-white">Choose How Much The Remote Panel Can Do</h2>
+        <p class="mt-2 max-w-3xl text-sm leading-7 text-zinc-400">Use a preset to move fast, or open Advanced and decide section-by-section plus action-by-action.</p>
+      </div>
+      <div class="grid gap-4 xl:grid-cols-3">
+        ${presetCards
+          .map(
+            (preset) => `<button type="button" class="releu-button flex min-h-[220px] flex-col justify-between border ${
+              draft.mode === preset.id ? "border-white bg-white text-black" : "border-outline bg-black text-white hover:border-zinc-600"
+            } p-5 text-left transition" data-action="remote-access-preset" data-remote-access-mode="${escapeHtml(preset.id)}">
+              <div class="flex items-start justify-between gap-3">
+                <div>${icon("shield", draft.mode === preset.id ? "h-5 w-5 text-black" : "h-5 w-5 text-zinc-500")}</div>
+                ${draft.mode === preset.id ? `<div class="h-2 w-2 rounded-full bg-black"></div>` : ""}
+              </div>
+              <div>
+                <div class="text-lg font-bold">${escapeHtml(preset.title)}</div>
+                <p class="mt-3 text-sm leading-6 ${draft.mode === preset.id ? "text-zinc-700" : "text-zinc-400"}">${escapeHtml(preset.detail)}</p>
+              </div>
+            </button>`,
+          )
+          .join("")}
+      </div>
+      <div class="mt-5 rounded-xl border border-white/10 bg-white/[0.03] p-5">
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div class="${C.labelOn} mb-2">Advanced</div>
+            <p class="text-sm leading-7 text-zinc-300">Fine-tune which remote sections appear and which risky actions are allowed.</p>
+          </div>
+          <button type="button" class="${draft.mode === "custom" ? C.btnPrimary : C.btnGhost}" data-action="remote-access-enable-advanced">${draft.mode === "custom" ? "Advanced Enabled" : "Use Advanced"}</button>
+        </div>
+        ${draft.mode === "custom" ? advancedSectionGrid : ""}
+      </div>
+      <div class="mt-6 flex justify-between gap-3">
+        <button type="button" class="${C.btnGhost}" data-action="remote-access-back">Back</button>
+        <button type="button" class="${C.btnPrimary}" data-action="remote-access-next">Continue</button>
+      </div>
+    </section>`;
+
+  const enabledSections = REMOTE_ACCESS_SECTIONS.filter(([id]) => draft.sections?.[id]).map(([, label]) => label);
+  const enabledActions = REMOTE_ACCESS_ACTIONS.filter(([id]) => draft.actions?.[id]).map(([, label]) => label);
+  const stepThree = `<section class="${C.card}">
+      <div class="mb-6 border-b border-zinc-900 pb-4">
+        <div class="${C.label} mb-2">Step 3</div>
+        <h2 class="text-2xl font-black tracking-tight text-white">Generate The Hosted Link</h2>
+        <p class="mt-2 max-w-3xl text-sm leading-7 text-zinc-400">Releu will create a random releu.lol path, register it with the hosted broker, and keep it live only while this app stays open.</p>
+      </div>
+      <div class="grid gap-5 xl:grid-cols-2">
+        <div class="border border-outline bg-black p-5">
+          <div class="${C.label} mb-3">Protection</div>
+          <div class="text-sm text-white">${escapeHtml(draft.passwordEnabled ? "Password required" : "Secret link only")}</div>
+          ${
+            draft.passwordEnabled
+              ? `<div class="mt-2 text-xs text-zinc-500">The password itself is never shown back after setup.</div>`
+              : `<div class="mt-2 text-xs text-zinc-500">Anyone with the link can open the remote panel.</div>`
+          }
+        </div>
+        <div class="border border-outline bg-black p-5">
+          <div class="${C.label} mb-3">Access</div>
+          <div class="text-sm text-white">${escapeHtml(remoteAccessModeLabel(draft.mode))}</div>
+          <div class="mt-3 flex flex-wrap gap-2">${enabledSections.map((label) => `<span class="${C.chip}">${escapeHtml(label)}</span>`).join("")}</div>
+        </div>
+      </div>
+      <div class="mt-5 rounded-xl border border-white/10 bg-white/[0.03] p-5">
+        <div class="${C.labelOn} mb-2">Warning</div>
+        <p class="text-sm leading-7 text-zinc-300">This only works while Releu is open.</p>
+      </div>
+      <div class="mt-5">
+        <div class="${C.label} mb-2">Dangerous Actions That Will Be Allowed</div>
+        <div class="flex flex-wrap gap-2">${enabledActions.length ? enabledActions.map((label) => `<span class="${C.chip}">${escapeHtml(label)}</span>`).join("") : `<span class="text-sm text-zinc-500">None</span>`}</div>
+      </div>
+      <div class="mt-6 flex justify-between gap-3">
+        <button type="button" class="${C.btnGhost}" data-action="remote-access-back">Back</button>
+        <button type="button" class="${C.btnPrimary}" data-action="remote-access-generate" data-busy-label="Generating...">Generate Link</button>
+      </div>
+    </section>`;
+
+  return draft.step === 1 ? stepOne : draft.step === 2 ? stepTwo : stepThree;
+}
+
+function renderRemoteAccessScreen() {
+  const remote = remoteAccessState();
+  const draft = syncRemoteAccessDraft();
+  const content = remote.enabled && draft.step === 3
+    ? renderRemoteAccessManageState(remote)
+    : renderRemoteAccessWizard(draft);
+
+  const inner = isPelicanBlueprintVariant()
+    ? `<div class="space-y-6">
+        ${renderPelicanPageIntro({
+          eyebrow: "Hosted Control",
+          title: "Remote Access",
+          detail: "Publish a random releu.lol path that opens a hosted Releu panel while this app stays open here.",
+        })}
+        ${renderRemoteAccessStepChips(draft.step)}
+        ${content}
+      </div>`
+    : `<div class="releu-screen min-h-screen bg-black text-white">
+        ${renderHeader()}
+        <main class="mx-auto max-w-7xl p-8">
+          <div class="mb-6 space-y-3">
+            <p class="${C.label}">Hosted Control</p>
+            <h1 class="text-3xl font-black tracking-tight text-white">Remote Access</h1>
+            <p class="max-w-4xl text-sm leading-7 text-zinc-400">Publish a random releu.lol path that opens a hosted Releu panel while this app stays open here.</p>
+          </div>
+          ${renderRemoteAccessStepChips(draft.step)}
+          <div class="mt-6">${content}</div>
+        </main>
+      </div>`;
+
+  return inner;
 }
 
 function renderPanelScreen() {
@@ -3004,6 +3457,11 @@ function render() {
     page = isPelicanBlueprintVariant()
       ? renderPelicanBlueprintShell(createScreen, server)
       : createScreen;
+  } else if (ui.screen === "remote-access") {
+    const remoteScreen = renderRemoteAccessScreen();
+    page = isPelicanBlueprintVariant()
+      ? renderPelicanBlueprintShell(remoteScreen, server)
+      : remoteScreen;
   } else if (!server || ui.screen === "manager") {
     const managerScreen = renderManagerScreen();
     page = isPelicanBlueprintVariant()
@@ -3156,6 +3614,7 @@ async function refreshState(serverId = activeServer()?.id ?? runtime.data?.activ
   syncPlayerDrafts();
   syncInstallDraft();
   if (ui.installDraft?.software) await ensureVersions(ui.installDraft.software);
+  maybeOpenRequestedGlobalScreen();
   if (!startup.dependenciesReady && !ui.bootstrap.active && !playitLinkRequired()) {
     ensureDependenciesReadyOnce().catch((error) => {
       console.error(error);
@@ -3502,6 +3961,9 @@ async function handleAction(event) {
     "cloud-backup-restore",
     "backup-revert",
     "choose-ui-variant",
+    "remote-access-generate",
+    "remote-access-regenerate",
+    "remote-access-disable",
   ]);
 
   const run = async () => {
@@ -3510,6 +3972,9 @@ async function handleAction(event) {
         ui.createDraft = null;
         ui.screen = "manager";
         render();
+        break;
+      case "open-remote-access":
+        openRemoteAccessScreen();
         break;
       case "add-server-prompt":
       case "focus-add-server": {
@@ -3572,6 +4037,73 @@ async function handleAction(event) {
         render();
         if (ui.section === "console") await refreshLogs();
         break;
+      case "remote-access-next":
+        syncRemoteAccessDraft();
+        if (ui.remoteAccessDraft.step === 1 && ui.remoteAccessDraft.passwordEnabled && String(ui.remoteAccessDraft.password ?? "").trim().length < 6) {
+          throw new Error("Remote Access password must be at least 6 characters.");
+        }
+        ui.remoteAccessDraft.step = Math.min(3, Number(ui.remoteAccessDraft.step ?? 1) + 1);
+        render();
+        break;
+      case "remote-access-back":
+        syncRemoteAccessDraft();
+        ui.remoteAccessDraft.step = Math.max(1, Number(ui.remoteAccessDraft.step ?? 1) - 1);
+        render();
+        break;
+      case "remote-access-preset": {
+        syncRemoteAccessDraft();
+        const preset = buildRemoteAccessPreset(button.dataset.remoteAccessMode);
+        ui.remoteAccessDraft.mode = preset.mode;
+        ui.remoteAccessDraft.sections = { ...preset.sections };
+        ui.remoteAccessDraft.actions = { ...preset.actions };
+        render();
+        break;
+      }
+      case "remote-access-enable-advanced":
+        syncRemoteAccessDraft();
+        ui.remoteAccessDraft.mode = "custom";
+        render();
+        break;
+      case "remote-access-copy-link":
+        if (!remoteAccessState().url) throw new Error("Generate a remote access link first.");
+        await copyText(remoteAccessState().url);
+        break;
+      case "remote-access-regenerate": {
+        const payload = await api("/api/remote-access/regenerate", { method: "POST" });
+        runtime.data = payload.state;
+        syncRemoteAccessDraft(true);
+        render();
+        break;
+      }
+      case "remote-access-disable": {
+        const payload = await api("/api/remote-access/disable", { method: "POST" });
+        runtime.data = payload.state;
+        syncRemoteAccessDraft(true);
+        ui.screen = "remote-access";
+        render();
+        break;
+      }
+      case "remote-access-reconfigure":
+        openRemoteAccessScreen({ reconfigure: true });
+        break;
+      case "remote-access-generate": {
+        syncRemoteAccessDraft();
+        const payload = await api("/api/remote-access/setup", {
+          method: "POST",
+          body: {
+            passwordEnabled: ui.remoteAccessDraft.passwordEnabled,
+            password: ui.remoteAccessDraft.password,
+            mode: ui.remoteAccessDraft.mode,
+            sections: ui.remoteAccessDraft.sections,
+            actions: ui.remoteAccessDraft.actions,
+          },
+        });
+        runtime.data = payload.state;
+        syncRemoteAccessDraft(true);
+        ui.remoteAccessDraft.step = 3;
+        render();
+        break;
+      }
       case "open-setup":
         ui.screen = "setup";
         render();
@@ -4193,6 +4725,32 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  if (event.target?.dataset?.remoteAccessProtection) {
+    syncRemoteAccessDraft();
+    ui.remoteAccessDraft.passwordEnabled = event.target.dataset.remoteAccessProtection === "password";
+    if (!ui.remoteAccessDraft.passwordEnabled) {
+      ui.remoteAccessDraft.password = "";
+    }
+    render();
+    return;
+  }
+  if (event.target?.dataset?.remoteAccessPassword) {
+    syncRemoteAccessDraft();
+    ui.remoteAccessDraft.password = event.target.value;
+    return;
+  }
+  if (event.target?.dataset?.remoteAccessSection) {
+    syncRemoteAccessDraft();
+    ui.remoteAccessDraft.mode = "custom";
+    ui.remoteAccessDraft.sections[event.target.dataset.remoteAccessSection] = event.target.checked;
+    return;
+  }
+  if (event.target?.dataset?.remoteAccessAction) {
+    syncRemoteAccessDraft();
+    ui.remoteAccessDraft.mode = "custom";
+    ui.remoteAccessDraft.actions[event.target.dataset.remoteAccessAction] = event.target.checked;
+    return;
+  }
   if (event.target?.dataset?.modalInput === "server-name" && ui.modal?.type === "create-server") {
     ui.modal.name = event.target.value;
     ui.modal.selectionStart = event.target.selectionStart ?? ui.modal.name.length;

@@ -78,6 +78,18 @@ import {
   rotateWebsiteCloudRestoreKey,
   storeWebsiteCloudBackup,
 } from "./cloud-website.js";
+import {
+  buildRemoteAccessPreset,
+  generateRemoteDeviceId,
+  generateRemoteDeviceSecret,
+  generateRemoteSlug,
+  getPublicRemoteAccessConfig,
+  hashRemoteSecret,
+  normalizeRemoteAccessConfig,
+  remoteAccessAllowsAction,
+  remoteAccessAllowsSection,
+} from "./remote-access.js";
+import { RemoteAccessManager } from "./remote-access-manager.js";
 
 const gzip = promisify(zlib.gzip);
 const defaultInventoryTextureUrl =
@@ -1025,6 +1037,10 @@ export class MinecraftPanelService {
       getPanelConfig: () => this.panelConfig,
       hasRunningServers: () => this.hasRunningServers(),
     });
+    this.remoteAccess = new RemoteAccessManager({
+      panel: this,
+      appendLog: (source, line, level = "info") => this.appendLog(null, source, line, level),
+    });
   }
 
   async init() {
@@ -1061,6 +1077,7 @@ export class MinecraftPanelService {
     this.updater.maybeCheckForUpdates().catch((error) => {
       this.appendLog(null, "panel", error.message ?? "Releu update check failed.", "warn");
     });
+    await this.remoteAccess.syncConfig(this.panelConfig.remoteAccess);
     this.appendLog(
       null,
       "panel",
@@ -2064,14 +2081,16 @@ if (-not $sample) { exit 0 }
     await this.syncDetectedInstalledSoftware(context);
     await this.ensurePlayitInitialized();
     const playitSnapshot = this.playit.snapshot();
+    const hasPublicPlayitTunnel = playitSnapshot.tunnels.some((entry) => entry.publicAddress);
     const shouldForceTunnelRefresh =
       playitSnapshot.secretConfigured &&
-      !playitSnapshot.tunnels.some((entry) => entry.publicAddress) &&
-      (context.state.serverStatus === "starting" || context.state.serverStatus === "running");
+      !hasPublicPlayitTunnel &&
+      Number(playitSnapshot.configuredTunnelCount ?? 0) > 0;
     const shouldRefreshTunnelStatus =
       playitSnapshot.secretConfigured &&
       (!playitSnapshot.lastRefreshAt ||
         shouldForceTunnelRefresh ||
+        playitSnapshot.needsWebSetup ||
         (Number(playitSnapshot.configuredTunnelCount ?? 0) === 0 &&
           !playitSnapshot.checkingTunnelStatus));
     if (shouldRefreshTunnelStatus) {
@@ -2088,6 +2107,7 @@ if (-not $sample) { exit 0 }
       updaterSettings: this.panelConfig.updater,
       desktopSettings: this.panelConfig.desktop,
       cloudBackupSettings: getPublicCloudBackupConfig(this.panelConfig),
+      remoteAccess: this.remoteAccess.snapshot(),
       host: this.getHostResources(),
       dependencies: this.dependencies.snapshot(),
       softwareOptions: serverSoftwareOptions,
@@ -2101,6 +2121,341 @@ if (-not $sample) { exit 0 }
       playit: this.playit.snapshot(),
       appUpdate: this.updater.snapshot(),
     };
+  }
+
+  sanitizeRemoteServerSummary(server) {
+    if (!server) {
+      return null;
+    }
+    return {
+      id: server.id,
+      name: server.name,
+      description: server.description,
+      status: server.status,
+      ready: server.ready,
+      playerCount: server.playerCount,
+      operation: server.operation,
+      metrics: server.metrics,
+      port: server.port,
+      jarInstalled: server.jarInstalled,
+      lastStartedAt: server.lastStartedAt,
+      lastStoppedAt: server.lastStoppedAt,
+      install: server.install,
+      launcher: {
+        minRam: server.launcher?.minRam,
+        maxRam: server.launcher?.maxRam,
+        cpuCores: server.launcher?.cpuCores,
+        gpuShare: server.launcher?.gpuShare,
+      },
+      backups: server.backups,
+      misc: server.misc,
+    };
+  }
+
+  sanitizeRemoteActiveServer(server) {
+    if (!server) {
+      return null;
+    }
+    return {
+      id: server.id,
+      name: server.name,
+      description: server.description,
+      setupComplete: server.setupComplete,
+      launcher: {
+        minRam: server.launcher?.minRam,
+        maxRam: server.launcher?.maxRam,
+        cpuCores: server.launcher?.cpuCores,
+        gpuShare: server.launcher?.gpuShare,
+      },
+      install: server.install,
+      backups: server.backups,
+      misc: server.misc,
+      catalog: server.catalog,
+      server: server.server,
+      players: server.players,
+      plugins: server.plugins,
+      mods: server.mods,
+      worlds: server.worlds,
+    };
+  }
+
+  async buildRemoteAccessSnapshot() {
+    const state = await this.getState(this.activeServerId);
+    const activeServerId = state.activeServerId ?? state.activeServer?.id ?? null;
+    const logEntries = await this.getLogs(0, activeServerId);
+    return {
+      generatedAt: currentTimestamp(),
+      remoteAccess: this.remoteAccess.snapshot(),
+      host: {
+        cpuCores: state.host?.cpuCores ?? 0,
+        totalMemoryMb: state.host?.totalMemoryMb ?? 0,
+        freeMemoryMb: state.host?.freeMemoryMb ?? 0,
+        platform: state.host?.platform ?? "",
+        hostname: state.host?.hostname ?? "",
+      },
+      playit: state.playit,
+      softwareOptions: state.softwareOptions,
+      activeServerId,
+      servers: Array.isArray(state.servers)
+        ? state.servers.map((server) => this.sanitizeRemoteServerSummary(server))
+        : [],
+      activeServer: this.sanitizeRemoteActiveServer(state.activeServer),
+      logs: logEntries.slice(-200),
+    };
+  }
+
+  getRemoteAccessState() {
+    return this.remoteAccess.snapshot();
+  }
+
+  async setupRemoteAccess(payload = {}) {
+    const nextConfig = normalizeRemoteAccessConfig({
+      ...this.panelConfig.remoteAccess,
+      enabled: true,
+      slug: String(payload.slug ?? this.panelConfig.remoteAccess?.slug ?? "").trim() || generateRemoteSlug(),
+      passwordEnabled: Boolean(payload.passwordEnabled),
+      mode:
+        String(payload.mode ?? "").trim().toLowerCase() === "custom"
+          ? "custom"
+          : String(payload.mode ?? this.panelConfig.remoteAccess?.mode ?? "view").trim().toLowerCase(),
+      sections:
+        String(payload.mode ?? "").trim().toLowerCase() === "custom"
+          ? { ...(payload.sections ?? this.panelConfig.remoteAccess?.sections ?? {}) }
+          : buildRemoteAccessPreset(payload.mode ?? this.panelConfig.remoteAccess?.mode ?? "view").sections,
+      actions:
+        String(payload.mode ?? "").trim().toLowerCase() === "custom"
+          ? { ...(payload.actions ?? this.panelConfig.remoteAccess?.actions ?? {}) }
+          : buildRemoteAccessPreset(payload.mode ?? this.panelConfig.remoteAccess?.mode ?? "view").actions,
+      deviceId: String(this.panelConfig.remoteAccess?.deviceId ?? "").trim() || generateRemoteDeviceId(),
+      deviceSecret:
+        String(this.panelConfig.remoteAccess?.deviceSecret ?? "").trim() || generateRemoteDeviceSecret(),
+      lastHeartbeatAt: "",
+      lastPublishedAt: "",
+    });
+
+    if (nextConfig.passwordEnabled) {
+      const password = String(payload.password ?? "").trim();
+      if (password.length < 6) {
+        throw new Error("Remote Access password must be at least 6 characters.");
+      }
+      const hashedPassword = hashRemoteSecret(password);
+      nextConfig.passwordHash = hashedPassword.hash;
+      nextConfig.passwordSalt = hashedPassword.salt;
+    } else {
+      nextConfig.passwordHash = "";
+      nextConfig.passwordSalt = "";
+    }
+
+    this.panelConfig.remoteAccess = nextConfig;
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    await this.remoteAccess.syncConfig(this.panelConfig.remoteAccess);
+    this.appendLog(null, "panel", `Enabled Remote Access at ${this.remoteAccess.snapshot().url}.`);
+    return this.getState(this.activeServerId);
+  }
+
+  async regenerateRemoteAccess() {
+    let nextSlug = generateRemoteSlug();
+    const currentSlug = String(this.panelConfig.remoteAccess?.slug ?? "").trim().toLowerCase();
+    while (nextSlug === currentSlug) {
+      nextSlug = generateRemoteSlug();
+    }
+    this.panelConfig.remoteAccess = normalizeRemoteAccessConfig({
+      ...this.panelConfig.remoteAccess,
+      enabled: true,
+      slug: nextSlug,
+      lastHeartbeatAt: "",
+      lastPublishedAt: "",
+    });
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    await this.remoteAccess.syncConfig(this.panelConfig.remoteAccess);
+    this.appendLog(null, "panel", `Regenerated Remote Access link: ${this.remoteAccess.snapshot().url}.`);
+    return this.getState(this.activeServerId);
+  }
+
+  async disableRemoteAccess() {
+    this.panelConfig.remoteAccess = normalizeRemoteAccessConfig({
+      ...this.panelConfig.remoteAccess,
+      enabled: false,
+      lastHeartbeatAt: "",
+      lastPublishedAt: "",
+    });
+    this.panelConfig = await savePanelConfig(this.panelConfig);
+    await this.remoteAccess.syncConfig(this.panelConfig.remoteAccess);
+    this.appendLog(null, "panel", "Disabled Remote Access.");
+    return this.getState(this.activeServerId);
+  }
+
+  assertRemoteSection(sectionId) {
+    if (!remoteAccessAllowsSection(this.panelConfig.remoteAccess, sectionId)) {
+      throw new Error("That remote panel section is not allowed for this link.");
+    }
+  }
+
+  assertRemoteAction(actionId) {
+    if (!remoteAccessAllowsAction(this.panelConfig.remoteAccess, actionId)) {
+      throw new Error("That remote panel action is not allowed for this link.");
+    }
+  }
+
+  async executeRemoteAccessCommand(type, payload = {}) {
+    const serverId = String(payload.serverId ?? this.activeServerId ?? "").trim() || this.activeServerId;
+    switch (String(type ?? "").trim()) {
+      case "selectServer":
+        return this.selectServer(String(payload.serverId ?? "").trim());
+      case "createServer":
+        this.assertRemoteAction("serverCreateDelete");
+        return this.createServer(payload);
+      case "deleteServer":
+        this.assertRemoteAction("serverCreateDelete");
+        return this.deleteServer(String(payload.serverId ?? "").trim());
+      case "updateServerProfile":
+        this.assertRemoteAction("settingsChanges");
+        return this.updateServerProfile(serverId, payload);
+      case "startServer":
+        this.assertRemoteAction("powerControls");
+        return this.startServer(serverId);
+      case "stopServer":
+        this.assertRemoteAction("powerControls");
+        return this.stopServer(serverId);
+      case "restartServer":
+        this.assertRemoteAction("powerControls");
+        return this.restartServer(serverId);
+      case "killServer":
+        this.assertRemoteAction("powerControls");
+        return this.forceKillServer(serverId);
+      case "sendCommand":
+        this.assertRemoteAction("consoleCommands");
+        return this.sendCommand(serverId, payload.command);
+      case "playerAction":
+        this.assertRemoteAction("playerModeration");
+        return this.applyPlayerAction(serverId, payload.playerName, payload.action, payload);
+      case "listManagedFiles":
+        this.assertRemoteSection("misc");
+        return this.listManagedFiles(serverId, payload);
+      case "readManagedTextFile":
+        this.assertRemoteSection("misc");
+        return this.readManagedTextFile(serverId, String(payload.path ?? ""));
+      case "downloadManagedFile":
+        this.assertRemoteSection("misc");
+        return this.downloadManagedFile(serverId, String(payload.path ?? ""));
+      case "createManagedFolder":
+        this.assertRemoteAction("settingsChanges");
+        return this.createManagedFolder(serverId, payload);
+      case "uploadManagedFile":
+        this.assertRemoteAction("settingsChanges");
+        return this.uploadManagedFile(
+          serverId,
+          String(payload.path ?? ""),
+          String(payload.fileName ?? "upload.bin"),
+          Buffer.from(String(payload.contentBase64 ?? ""), "base64"),
+        );
+      case "writeManagedTextFile":
+        this.assertRemoteAction("settingsChanges");
+        return this.writeManagedTextFile(serverId, payload);
+      case "deleteManagedPath":
+        this.assertRemoteAction("settingsChanges");
+        return this.deleteManagedPath(serverId, String(payload.path ?? ""));
+      case "searchInventoryCatalog":
+        this.assertRemoteSection("players");
+        return this.searchInventoryCatalog(serverId, payload);
+      case "getPlayerInventory":
+        this.assertRemoteSection("players");
+        return this.getPlayerInventory(serverId, payload.playerName, {
+          refreshLiveData: Boolean(payload.refreshLiveData),
+        });
+      case "givePlayerInventoryItem":
+        this.assertRemoteAction("playerModeration");
+        return this.givePlayerInventoryItem(serverId, payload.playerName, payload);
+      case "clearPlayerInventory":
+        this.assertRemoteAction("playerModeration");
+        return this.clearPlayerInventory(serverId, payload.playerName, payload);
+      case "backupCreate":
+        this.assertRemoteAction("backupCreate");
+        return this.createBackup(serverId, "remote-access");
+      case "cloudBackupStatus":
+        this.assertRemoteSection("backups");
+        return this.getCloudBackupStatus(serverId);
+      case "updateCloudBackupSettings":
+        this.assertRemoteAction("settingsChanges");
+        return this.updateCloudBackupSettings(payload);
+      case "issueCloudBackupKey":
+        this.assertRemoteAction("settingsChanges");
+        return this.issueCloudBackupKey(payload);
+      case "rotateCloudBackupKey":
+        this.assertRemoteAction("settingsChanges");
+        return this.rotateCloudBackupKey();
+      case "registerCloudBackupAccount":
+        this.assertRemoteAction("settingsChanges");
+        return this.registerCloudBackupAccount(payload);
+      case "loginCloudBackupAccount":
+        this.assertRemoteAction("settingsChanges");
+        return this.loginCloudBackupAccount(payload);
+      case "logoutCloudBackupAccount":
+        this.assertRemoteAction("settingsChanges");
+        return this.logoutCloudBackupAccount();
+      case "uploadCloudBackup":
+        this.assertRemoteAction("backupCreate");
+        return this.uploadCloudBackup(serverId);
+      case "downloadCloudBackup":
+        this.assertRemoteAction("backupRestoreDelete");
+        return this.downloadCloudBackup(serverId, payload.backupId);
+      case "restoreCloudBackup":
+        this.assertRemoteAction("backupRestoreDelete");
+        return this.restoreCloudBackup(serverId, payload.backupId);
+      case "updateBackupSettings":
+        this.assertRemoteAction("settingsChanges");
+        return this.updateBackupSettings(serverId, payload);
+      case "backupRevert":
+        this.assertRemoteAction("backupRestoreDelete");
+        return this.restoreLocalBackup(serverId, String(payload.backupName ?? "").trim());
+      case "worldSelect":
+        this.assertRemoteAction("worldImportDelete");
+        return this.setActiveWorld(serverId, payload);
+      case "worldRegenerate":
+        this.assertRemoteAction("worldImportDelete");
+        return this.regenerateWorld(serverId, payload);
+      case "importWorldArchive":
+        this.assertRemoteAction("worldImportDelete");
+        return this.importWorldArchive(
+          serverId,
+          String(payload.fileName ?? "world.zip"),
+          Buffer.from(String(payload.contentBase64 ?? ""), "base64"),
+          {
+            worldName: payload.worldName,
+          },
+        );
+      case "catalogSearch":
+        this.assertRemoteSection("addons");
+        return this.searchCatalog(serverId, payload);
+      case "catalogInstall":
+        this.assertRemoteAction("addonInstallRemove");
+        return this.installCatalogProject(serverId, payload);
+      case "installAssetFromUrl":
+        this.assertRemoteAction("addonInstallRemove");
+        return this.installAssetFromUrl(serverId, payload.kind, payload.url, {
+          source: "url",
+        });
+      case "removeAsset":
+        this.assertRemoteAction("addonInstallRemove");
+        return this.removeAsset(serverId, payload.kind, payload.fileName);
+      case "softwareVersions":
+        this.assertRemoteSection("software");
+        return this.getSoftwareVersions(String(payload.software ?? "purpur"));
+      case "softwareInstall":
+        this.assertRemoteAction("softwareChanges");
+        return this.installServerSoftware(serverId, payload);
+      case "updateRuntimeSettings":
+        this.assertRemoteAction("settingsChanges");
+        return this.updateRuntimeSettings(serverId, payload);
+      case "updateServerProperties":
+        this.assertRemoteAction("settingsChanges");
+        return this.updateServerProperties(serverId, payload);
+      case "updateMiscSettings":
+        this.assertRemoteAction("settingsChanges");
+        return this.updateMiscSettings(serverId, payload);
+      default:
+        throw new Error("Unsupported remote panel command.");
+    }
   }
 
   async readEula(serverId) {
@@ -4260,6 +4615,7 @@ if (-not $sample) { exit 0 }
     }
 
     await this.playit.stopAgent().catch(() => {});
+    await this.remoteAccess.shutdown().catch(() => {});
   }
 
   async runScheduledBackups() {
@@ -4712,6 +5068,25 @@ if (-not $sample) { exit 0 }
       sizeBytes: stats.size,
       modifiedAt: stats.mtime.toISOString(),
       content: await fs.readFile(target.absolutePath, "utf8"),
+    };
+  }
+
+  async downloadManagedFile(serverId, relativePath) {
+    const target = this.resolveManagedServerPath(serverId, relativePath);
+    const stats = await fs.stat(target.absolutePath).catch(() => null);
+    if (!stats || !stats.isFile()) {
+      throw new Error("That file does not exist.");
+    }
+    if (stats.size > 16 * 1024 * 1024) {
+      throw new Error("This file is too large to download through Remote Access.");
+    }
+    const bytes = await fs.readFile(target.absolutePath);
+    return {
+      path: target.relativePath,
+      fileName: path.basename(target.absolutePath),
+      sizeBytes: stats.size,
+      mimeType: "application/octet-stream",
+      contentBase64: Buffer.from(bytes).toString("base64"),
     };
   }
 

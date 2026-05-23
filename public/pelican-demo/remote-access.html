@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" class="fi dark">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Remote Access - Releu</title>
+
+    <link rel="stylesheet" href="./Settings - Pelican Demo_files/app-BqSNlVOE.css">
+    <link rel="stylesheet" href="./Settings - Pelican Demo_files/index.css">
+    <link rel="stylesheet" href="./Settings - Pelican Demo_files/app.css">
+
+    <style>
+      [x-cloak]{display:none!important}
+      :root{
+        --font-family:"Inter Variable";
+        --mono-font-family:"ui-monospace";
+        --sidebar-width:20rem;
+        --collapsed-sidebar-width:4.5rem;
+        --default-theme-mode:system;
+      }
+      html.fi{--livewire-progress-bar-color:var(--primary-500)}
+      body{background:#0b0d10!important}
+      .fi-main-ctn,
+      .fi-main,
+      .fi-page,
+      .fi-page-main,
+      .fi-page-content,
+      .fi-section,
+      .fi-section-header,
+      .fi-section-content-ctn,
+      .fi-section-content{background:transparent!important}
+      .fi-main-ctn{
+        min-height:100vh;
+        align-items:center;
+        padding-block:2rem;
+      }
+      .fi-main{
+        display:flex;
+        width:100%;
+        justify-content:center;
+      }
+      .fi-page{
+        width:100%;
+      }
+      .fi-page-content{
+        display:flex;
+        min-height:calc(100vh - 8rem);
+        align-items:center;
+        justify-content:center;
+      }
+      .fi-page-content>.fi-section{
+        width:min(100%,72rem);
+        margin-inline:auto;
+      }
+    </style>
+  </head>
+  <body class="fi-body fi-panel-server fi-body-has-navigation">
+    <div class="fi-layout-sidebar-toggle-btn-ctn lg:fi-hidden">
+      <button class="fi-icon-btn fi-size-md fi-layout-sidebar-toggle-btn" type="button" aria-label="Expand sidebar" title="Expand sidebar">
+        <svg class="fi-icon fi-size-lg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h.5m3 0h1.5m3 0h6"></path>
+          <path d="M13 18l6 -6"></path>
+          <path d="M13 6l6 6"></path>
+        </svg>
+      </button>
+    </div>
+
+    <div class="fi-layout">
+      <aside class="fi-sidebar fi-main-sidebar fi-sidebar-open">
+        <div class="fi-sidebar-header-ctn">
+          <header class="fi-sidebar-header">
+            <div class="fi-sidebar-header-logo-ctn">
+              <a href="./servers.html">
+                <div class="fi-logo">Releu</div>
+              </a>
+            </div>
+          </header>
+        </div>
+
+        <div class="fi-dropdown fi-tenant-menu">
+          <div class="fi-dropdown-trigger">
+            <button type="button" class="fi-tenant-menu-trigger">
+              <img class="fi-avatar fi-size-md fi-tenant-avatar" src="./Settings - Pelican Demo_files/5da37ef6-58da-4169-90a6-e683e1721247.png" alt="Avatar of Releu Server" loading="lazy">
+              <span class="fi-tenant-menu-trigger-text">
+                <span class="fi-tenant-menu-trigger-tenant-name">Releu Server</span>
+              </span>
+              <svg class="fi-icon fi-size-md" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <nav class="fi-sidebar-nav">
+          <ul class="fi-sidebar-nav-groups">
+            <li class="fi-sidebar-group fi-active fi-collapsible">
+              <ul class="fi-sidebar-group-items">
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./overview.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Overview</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./console.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Console</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./players.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Players</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./files.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Files</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./backups.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Backups</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./worlds.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Worlds</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./addons-mods.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Add-ons / Mods</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./software.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Software</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./cloud-backup.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Cloud Backup</span></a></li>
+                <li class="fi-sidebar-item fi-active fi-sidebar-item-has-url"><a href="./remote-access.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Remote Access</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./misc.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Misc</span></a></li>
+                <li class="fi-sidebar-item fi-sidebar-item-has-url"><a href="./settings.html" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Settings</span></a></li>
+              </ul>
+            </li>
+          </ul>
+        </nav>
+      </aside>
+
+      <div class="fi-main-ctn" style="display:flex;opacity:1;">
+        <main class="fi-main fi-width-screen-2xl">
+          <div class="fi-page">
+            <div class="fi-page-content space-y-8">
+              <section class="fi-section fi-section-has-header">
+                <header class="fi-section-header">
+                  <div class="fi-section-header-text-ctn">
+                    <h2 class="fi-section-header-heading">Remote Access</h2>
+                    <p class="fi-section-header-description">Create, protect, and manage the hosted remote-control link for this Releu install.</p>
+                  </div>
+                </header>
+                <div class="fi-section-content-ctn">
+                  <div class="fi-section-content">
+                    <div data-releu-remote-access-root></div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+    <script src="./bridge.js"></script>
+  </body>
+</html>

@@ -1,0 +1,17 @@
+[Unit]
+Description=Releu hosted site and remote-access broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/releu-lol
+Environment=RELEU_SITE_ROOT=/opt/releu-lol/site/releu-lol
+Environment=RELEU_SITE_DATA_DIR=/opt/releu-lol/site/releu-lol/data
+Environment=RELEU_SITE_PORT=3080
+ExecStart=/usr/bin/node /opt/releu-lol/scripts/start-releu-lol-site.mjs
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

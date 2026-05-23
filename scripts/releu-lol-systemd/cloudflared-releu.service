@@ -1,0 +1,14 @@
+[Unit]
+Description=Cloudflared tunnel for releu.lol
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+TimeoutStartSec=15
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /etc/cloudflared-releu/config.yml tunnel run
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

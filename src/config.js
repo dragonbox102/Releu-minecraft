@@ -7,6 +7,7 @@ import {
   getDefaultUpdaterAssetName,
   getPlayitBinaryName,
 } from "./platform.js";
+import { normalizeRemoteAccessConfig } from "./remote-access.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const snapshotRootDir = path.resolve(moduleDir, "..");
@@ -135,6 +136,7 @@ export const defaultConfig = {
     accountUsername: "",
     sessionToken: "",
   },
+  remoteAccess: normalizeRemoteAccessConfig(),
 };
 
 export const lockedUpdaterSource = Object.freeze({
@@ -176,6 +178,10 @@ function normalizeCloudBackupConfig(config) {
   merged.accountUsername = String(merged.accountUsername ?? "").trim().toLowerCase();
   merged.sessionToken = String(merged.sessionToken ?? "").trim();
   return merged;
+}
+
+function normalizeRemoteAccessPanelConfig(config) {
+  return normalizeRemoteAccessConfig(config ?? {});
 }
 
 function normalizePlayitConfig(config) {
@@ -348,6 +354,7 @@ export async function loadPanelConfig() {
   merged.cloudBackup = normalizeCloudBackupConfig(
     applyHiddenCloudTarget(merged.cloudBackup, hiddenCloudTarget),
   );
+  merged.remoteAccess = normalizeRemoteAccessPanelConfig(merged.remoteAccess);
   await saveHiddenCloudTarget(merged.cloudBackup);
   await writeJsonFile(paths.configFile, merged);
   return merged;
@@ -363,6 +370,7 @@ export async function savePanelConfig(config) {
   merged.cloudBackup = normalizeCloudBackupConfig(
     applyHiddenCloudTarget(merged.cloudBackup, hiddenCloudTarget),
   );
+  merged.remoteAccess = normalizeRemoteAccessPanelConfig(merged.remoteAccess);
   await saveHiddenCloudTarget(merged.cloudBackup);
   await writeJsonFile(paths.configFile, merged);
   return merged;

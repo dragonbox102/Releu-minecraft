@@ -225,6 +225,49 @@ export async function startPanelServer() {
     }),
   );
 
+  app.get(
+    "/api/remote-access",
+    asyncRoute(async (request, response) => {
+      sendOk(response, {
+        remoteAccess: panel.getRemoteAccessState(),
+        state: await panel.getState(resolveServerId(request)),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/remote-access/setup",
+    asyncRoute(async (request, response) => {
+      const state = await panel.setupRemoteAccess(request.body ?? {});
+      sendOk(response, {
+        remoteAccess: panel.getRemoteAccessState(),
+        state,
+      });
+    }),
+  );
+
+  app.post(
+    "/api/remote-access/regenerate",
+    asyncRoute(async (request, response) => {
+      const state = await panel.regenerateRemoteAccess();
+      sendOk(response, {
+        remoteAccess: panel.getRemoteAccessState(),
+        state,
+      });
+    }),
+  );
+
+  app.post(
+    "/api/remote-access/disable",
+    asyncRoute(async (request, response) => {
+      const state = await panel.disableRemoteAccess();
+      sendOk(response, {
+        remoteAccess: panel.getRemoteAccessState(),
+        state,
+      });
+    }),
+  );
+
   app.post(
     "/api/servers",
     asyncRoute(async (request, response) => {

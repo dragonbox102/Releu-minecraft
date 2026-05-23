@@ -14,6 +14,53 @@ const SERVER_PAGES = new Set([
   "misc.html",
   "settings.html",
 ]);
+const REMOTE_ACCESS_SECTIONS = [
+  ["dashboard", "Dashboard"],
+  ["overview", "Overview"],
+  ["console", "Console"],
+  ["players", "Players"],
+  ["worlds", "Worlds"],
+  ["addons", "Add-ons"],
+  ["backups", "Backups"],
+  ["software", "Software"],
+  ["misc", "Misc"],
+  ["settings", "Settings"],
+];
+const REMOTE_ACCESS_ACTIONS = [
+  ["powerControls", "Power controls"],
+  ["consoleCommands", "Console commands"],
+  ["playerModeration", "Player moderation"],
+  ["serverCreateDelete", "Server create/delete"],
+  ["softwareChanges", "Software changes"],
+  ["worldImportDelete", "World import/delete"],
+  ["addonInstallRemove", "Add-on install/remove"],
+  ["backupCreate", "Backup create"],
+  ["backupRestoreDelete", "Backup restore/delete"],
+  ["settingsChanges", "Settings changes"],
+];
+const REMOTE_SLUG = String(window.RELEU_REMOTE_SLUG ?? new URLSearchParams(location.search).get("remoteSlug") ?? "").trim();
+const REMOTE_MODE = Boolean(REMOTE_SLUG);
+const REMOTE_COMMAND_WAIT_TIMEOUT_MS = 60000;
+const REMOTE_COMMAND_POLL_INTERVAL_MS = 600;
+const REMOTE_TOKEN_STORAGE_KEY = REMOTE_MODE ? `releu.remote.viewer:${REMOTE_SLUG}` : "";
+const LOCAL_PANEL_STATE_CACHE_KEY = "releu.pelican.localStateCache";
+const LOCAL_PANEL_LOGS_CACHE_KEY = "releu.pelican.localLogsCache";
+const LOCAL_PANEL_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
+const REMOTE_PAGE_SECTION = {
+  "servers.html": "dashboard",
+  "create-server.html": "dashboard",
+  "overview.html": "overview",
+  "console.html": "console",
+  "players.html": "players",
+  "files.html": "misc",
+  "cloud-backup.html": "backups",
+  "worlds.html": "worlds",
+  "addons-mods.html": "addons",
+  "backups.html": "backups",
+  "software.html": "software",
+  "misc.html": "misc",
+  "settings.html": "settings",
+};
 
 const APP_STATE = {
   state: null,
@@ -96,6 +143,11 @@ const APP_STATE = {
   consoleHelpOpen: false,
   consoleStickToBottom: true,
   consoleDistanceFromBottom: 0,
+};
+const REMOTE_STATE = {
+  bootstrap: null,
+  session: null,
+  token: "",
 };
 const PAGE_TRANSITION_MS = 170;
 
@@ -266,6 +318,45 @@ function ensureServersSidebarLink() {
   list.prepend(item);
 }
 
+function ensureRemoteAccessSidebarLink() {
+  if (isRemotePanel()) return;
+  const list = document.querySelector(".fi-sidebar-group-items");
+  if (!list) return;
+  const existing = [...list.querySelectorAll(".fi-sidebar-item-label")].find((node) => node.textContent?.trim().toLowerCase() === "remote access");
+  if (existing) {
+    const item = existing.closest(".fi-sidebar-item");
+    if (item) {
+      item.classList.toggle("fi-active", PAGE === "remote-access.html");
+      const anchor = item.querySelector("a.fi-sidebar-item-btn");
+      if (anchor) {
+        anchor.setAttribute("href", buildRemoteAccessHref());
+      }
+    }
+    return;
+  }
+  const item = document.createElement("li");
+  item.className = `fi-sidebar-item fi-sidebar-item-has-url${PAGE === "remote-access.html" ? " fi-active" : ""}`;
+  item.innerHTML = `<a href="${escapeHtml(buildRemoteAccessHref())}" class="fi-sidebar-item-btn"><span class="fi-sidebar-item-label">Remote Access</span></a>`;
+  const cloudItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "cloud backup",
+  );
+  const miscItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "misc",
+  );
+  const settingsItem = [...list.children].find((node) =>
+    node.querySelector(".fi-sidebar-item-label")?.textContent?.trim().toLowerCase() === "settings",
+  );
+  if (cloudItem?.parentNode) {
+    cloudItem.parentNode.insertBefore(item, cloudItem);
+  } else if (miscItem?.parentNode) {
+    miscItem.parentNode.insertBefore(item, miscItem);
+  } else if (settingsItem?.parentNode) {
+    settingsItem.parentNode.insertBefore(item, settingsItem);
+  } else {
+    list.append(item);
+  }
+}
+
 function ensureBackupsSidebarLink() {
   if (PAGE === "servers.html") return;
   const list = document.querySelector(".fi-sidebar-group-items");
@@ -319,6 +410,7 @@ function ensureMiscSidebarLink() {
 }
 
 function ensureCloudBackupSidebarLink() {
+  if (isRemotePanel()) return;
   if (PAGE === "servers.html") return;
   const list = document.querySelector(".fi-sidebar-group-items");
   if (!list) return;
@@ -431,6 +523,16 @@ function showStatus(message, tone = "info") {
 
 function clearStatus() {
   document.querySelector("[data-releu-status-banner]")?.remove();
+}
+
+function currentStatusMessage() {
+  return document.querySelector("[data-releu-status-banner]")?.textContent?.trim() ?? "";
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, Math.max(0, Number(ms ?? 0) || 0));
+  });
 }
 
 function devConsoleLogsEnabled() {
@@ -563,19 +665,42 @@ function activeServerSoftwareOption() {
   return APP_STATE.state?.softwareOptions?.find((entry) => entry.id === softwareId) ?? null;
 }
 
+function isRemotePanel() {
+  return REMOTE_MODE;
+}
+
+function serverStorageKey() {
+  return isRemotePanel() ? `releu.remote.serverId:${REMOTE_SLUG}` : "releu.pelican.serverId";
+}
+
 function activeServerId() {
-  return APP_STATE.state?.activeServerId ?? localStorage.getItem("releu.pelican.serverId") ?? "";
+  return APP_STATE.state?.activeServerId ?? localStorage.getItem(serverStorageKey()) ?? "";
+}
+
+function isKnownServerId(serverId) {
+  const normalized = String(serverId ?? "").trim();
+  if (!normalized) return false;
+  return Array.isArray(APP_STATE.state?.servers)
+    ? APP_STATE.state.servers.some((entry) => String(entry?.id ?? "").trim() === normalized)
+    : false;
 }
 
 function getRequestedServerId() {
   const params = new URLSearchParams(location.search);
-  return String(params.get("serverId") ?? "").trim() || localStorage.getItem("releu.pelican.serverId") || "";
+  const requested = String(params.get("serverId") ?? "").trim();
+  if (requested && !isRemotePanel()) {
+    return requested;
+  }
+  if (requested && (!APP_STATE.state || isKnownServerId(requested))) {
+    return requested;
+  }
+  return activeServerId() || localStorage.getItem(serverStorageKey()) || "";
 }
 
 function persistServerId(serverId) {
   const normalized = String(serverId ?? "").trim();
   if (normalized) {
-    localStorage.setItem("releu.pelican.serverId", normalized);
+    localStorage.setItem(serverStorageKey(), normalized);
   }
 }
 
@@ -596,13 +721,662 @@ function syncServerIdInLocation(serverId) {
 }
 
 function buildLocalPageHref(pageName, serverId = activeServerId()) {
-  const url = new URL(`./${pageName}`, location.href);
+  const baseHref = isRemotePanel() ? `${location.origin}/${encodeURIComponent(REMOTE_SLUG)}/${pageName}` : new URL(`./${pageName}`, location.href).href;
+  const url = new URL(baseHref, location.href);
   if (SERVER_PAGES.has(pageName) && serverId) {
     url.searchParams.set("serverId", serverId);
   } else {
     url.searchParams.delete("serverId");
   }
+  if (isRemotePanel()) {
+    return `${url.pathname}${url.search}`;
+  }
   return `${url.pathname.split("/").pop()}${url.search}`;
+}
+
+function buildRemoteAccessHref(serverId = activeServerId()) {
+  if (isRemotePanel()) {
+    return buildLocalPageHref("servers.html", serverId);
+  }
+  return buildLocalPageHref("remote-access.html", "");
+}
+
+function buildRemoteAccessPreset(mode = "view") {
+  const sections = Object.fromEntries(REMOTE_ACCESS_SECTIONS.map(([id]) => [id, true]));
+  const actions = Object.fromEntries(REMOTE_ACCESS_ACTIONS.map(([id]) => [id, false]));
+  const normalized = String(mode ?? "").trim().toLowerCase();
+  if (normalized === "operator") {
+    actions.powerControls = true;
+    actions.consoleCommands = true;
+    actions.playerModeration = true;
+    actions.backupCreate = true;
+  } else if (normalized === "admin") {
+    for (const [actionId] of REMOTE_ACCESS_ACTIONS) {
+      actions[actionId] = true;
+    }
+  }
+  return {
+    mode: ["operator", "admin", "custom"].includes(normalized) ? normalized : "view",
+    sections,
+    actions,
+  };
+}
+
+function remoteAccessModeLabel(mode) {
+  const normalized = String(mode ?? "").trim().toLowerCase();
+  if (normalized === "operator") return "Operator";
+  if (normalized === "admin") return "Full admin";
+  if (normalized === "custom") return "Advanced";
+  return "View only";
+}
+
+function remoteAccessSnapshot() {
+  return APP_STATE.state?.remoteAccess ?? {
+    enabled: false,
+    slug: "",
+    url: "",
+    passwordEnabled: false,
+    mode: "view",
+    sections: buildRemoteAccessPreset("view").sections,
+    actions: buildRemoteAccessPreset("view").actions,
+    online: false,
+    brokerReachable: false,
+    lastBrokerSyncAt: "",
+    lastError: null,
+    status: "disabled",
+    statusMessage: "Remote access is disabled.",
+  };
+}
+
+function remoteAccessPageState() {
+  if (!APP_STATE.remoteAccessPage) {
+    APP_STATE.remoteAccessPage = {
+      draft: null,
+      reconfiguring: false,
+    };
+  }
+  return APP_STATE.remoteAccessPage;
+}
+
+function remoteAccessPageIsEditing() {
+  const remote = remoteAccessSnapshot();
+  const pageState = remoteAccessPageState();
+  return !remote.enabled || Boolean(pageState.reconfiguring);
+}
+
+function remoteAccessPageShouldDeferRefresh() {
+  if (PAGE !== "remote-access.html") return false;
+  return remoteAccessPageIsEditing();
+}
+
+function syncRemoteAccessPageDraft(force = false) {
+  const pageState = remoteAccessPageState();
+  if (!force && pageState.draft) {
+    return pageState.draft;
+  }
+  const remote = remoteAccessSnapshot();
+  const preset = buildRemoteAccessPreset(remote.mode);
+  pageState.draft = {
+    step: remote.enabled ? 3 : 1,
+    passwordEnabled: Boolean(remote.passwordEnabled),
+    password: "",
+    mode: remote.mode === "custom" ? "custom" : preset.mode,
+    sections: { ...(remote.sections ?? preset.sections) },
+    actions: { ...(remote.actions ?? preset.actions) },
+  };
+  return pageState.draft;
+}
+
+const REMOTE_ACCESS_DESIGN_TEMPLATE_PATHS = {
+  manage: "./remote-access-design-src/01-remote-access-manage.html",
+  step1: "./remote-access-design-src/02-remote-access-step-1-protection.html",
+  step2: "./remote-access-design-src/03-remote-access-step-2-access.html",
+  step3: "./remote-access-design-src/04-remote-access-step-3-generate-link.html",
+};
+
+const REMOTE_ACCESS_PAGE_STYLE_FALLBACK = `
+  .fi-main-ctn{
+    display:flex!important;
+    min-height:100vh;
+    align-items:center;
+    padding-block:2rem;
+  }
+  .fi-main{
+    display:flex;
+    width:100%;
+    align-items:center;
+    justify-content:center;
+  }
+  .fi-page{
+    width:100%;
+  }
+  .fi-page-content{
+    display:flex;
+    min-height:calc(100vh - 8rem);
+    align-items:center;
+    justify-content:center;
+  }
+  .fi-page-content>.fi-section{
+    width:min(100%,72rem);
+    margin-inline:auto;
+  }
+  .ra-btn[disabled], .ra-option[disabled]{
+    opacity:.58!important;
+    pointer-events:none!important;
+    cursor:not-allowed!important;
+  }
+  .ra-btn[aria-busy="true"]{
+    opacity:.58!important;
+  }
+`;
+
+function titleCaseWord(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function normalizeRemoteAccessLabel(value) {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function getRemoteAccessLeadSvgHtml(element) {
+  if (!(element instanceof Element)) return "";
+  const firstSvg = Array.from(element.children).find((child) => child.tagName?.toLowerCase() === "svg");
+  return firstSvg ? firstSvg.outerHTML : "";
+}
+
+function setRemoteAccessInlineText(element, text) {
+  if (!(element instanceof Element)) return;
+  const svgHtml = getRemoteAccessLeadSvgHtml(element);
+  element.innerHTML = `${svgHtml}${escapeHtml(String(text ?? ""))}`;
+}
+
+function setRemoteAccessMetaRow(row, label, value) {
+  if (!(row instanceof Element)) return;
+  const svgHtml = getRemoteAccessLeadSvgHtml(row);
+  row.innerHTML = `${svgHtml}<span>${escapeHtml(label)}: <strong>${escapeHtml(String(value ?? ""))}</strong></span>`;
+}
+
+function setRemoteAccessButtonAction(button, action, extras = {}) {
+  if (!(button instanceof HTMLElement)) return;
+  button.dataset.remoteAccessAction = action;
+  for (const [key, value] of Object.entries(extras)) {
+    if (value === undefined || value === null) {
+      delete button.dataset[key];
+    } else {
+      button.dataset[key] = String(value);
+    }
+  }
+}
+
+function setRemoteAccessButtonBusy(button, busy) {
+  if (!(button instanceof HTMLElement)) return;
+  button.disabled = Boolean(busy);
+  if (busy) {
+    button.setAttribute("aria-busy", "true");
+  } else {
+    button.removeAttribute("aria-busy");
+  }
+}
+
+function setRemoteAccessOptionSelected(option, selected) {
+  if (!(option instanceof HTMLElement)) return;
+  option.classList.toggle("ra-option--selected", Boolean(selected));
+}
+
+function filterRemoteAccessPills(list, allowedLabels, emptyText = "None") {
+  if (!(list instanceof Element)) return;
+  const allowed = new Set((allowedLabels ?? []).map((label) => normalizeRemoteAccessLabel(label)));
+  const pills = Array.from(list.querySelectorAll(".ra-pill"));
+  pills.forEach((pill) => {
+    const keep = allowed.has(normalizeRemoteAccessLabel(pill.textContent));
+    if (!keep) pill.remove();
+  });
+  if (!list.querySelector(".ra-pill")) {
+    list.innerHTML = `<span class="ra-muted">${escapeHtml(emptyText)}</span>`;
+  }
+}
+
+function readSessionJson(key) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionJson(key, value) {
+  try {
+    if (value == null) {
+      sessionStorage.removeItem(key);
+    } else {
+      sessionStorage.setItem(key, JSON.stringify(value));
+    }
+  } catch {
+    // Ignore browser storage failures.
+  }
+}
+
+function persistLocalPanelStateCache(state) {
+  if (REMOTE_MODE || !state) return;
+  writeSessionJson(LOCAL_PANEL_STATE_CACHE_KEY, {
+    savedAt: Date.now(),
+    state,
+  });
+}
+
+function persistLocalPanelLogsCache(logs) {
+  if (REMOTE_MODE) return;
+  writeSessionJson(LOCAL_PANEL_LOGS_CACHE_KEY, {
+    savedAt: Date.now(),
+    logs: Array.isArray(logs) ? logs : [],
+  });
+}
+
+function readLocalPanelBootstrapCache() {
+  if (REMOTE_MODE) return null;
+  const stateCache = readSessionJson(LOCAL_PANEL_STATE_CACHE_KEY);
+  if (!stateCache?.state || !stateCache?.savedAt) {
+    return null;
+  }
+  if (Date.now() - Number(stateCache.savedAt) > LOCAL_PANEL_CACHE_MAX_AGE_MS) {
+    return null;
+  }
+  const logsCache = readSessionJson(LOCAL_PANEL_LOGS_CACHE_KEY);
+  const logs =
+    logsCache?.savedAt && Date.now() - Number(logsCache.savedAt) <= LOCAL_PANEL_CACHE_MAX_AGE_MS
+      ? logsCache.logs
+      : [];
+  return {
+    state: stateCache.state,
+    logs: Array.isArray(logs) ? logs : [],
+  };
+}
+
+async function renderCachedLocalPanelState() {
+  const cached = readLocalPanelBootstrapCache();
+  if (!cached?.state) {
+    return false;
+  }
+  APP_STATE.state = cached.state;
+  APP_STATE.logs = cached.logs;
+  if (cached.state?.activeServerId) {
+    persistServerId(cached.state.activeServerId);
+    syncServerIdInLocation(cached.state.activeServerId);
+  }
+  updateChrome(cached.state);
+  await syncDesktopIntegration();
+  syncAppUpdateStatusBanner();
+  await patchPage();
+  stripReleaseBranding();
+  finishShellEnter();
+  return true;
+}
+
+async function loadRemoteAccessPageDesign() {
+  if (APP_STATE.remoteAccessPageDesign?.templates) {
+    return APP_STATE.remoteAccessPageDesign;
+  }
+  if (APP_STATE.remoteAccessPageDesignPromise) {
+    return APP_STATE.remoteAccessPageDesignPromise;
+  }
+  APP_STATE.remoteAccessPageDesignPromise = (async () => {
+    const parser = new DOMParser();
+    const templates = {};
+    let sharedStyle = "";
+    for (const [key, relativePath] of Object.entries(REMOTE_ACCESS_DESIGN_TEMPLATE_PATHS)) {
+      const response = await fetch(new URL(relativePath, location.href).toString(), { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Failed to load Remote Access design template: ${relativePath}`);
+      }
+      const html = await response.text();
+      const doc = parser.parseFromString(html, "text/html");
+      if (!sharedStyle) {
+        sharedStyle = String(doc.querySelector("style")?.textContent ?? "").trim();
+      }
+      const inner = doc.querySelector(".fi-section-content")?.innerHTML?.trim();
+      if (!inner) {
+        throw new Error(`Remote Access design template was empty: ${relativePath}`);
+      }
+      templates[key] = inner;
+    }
+    APP_STATE.remoteAccessPageDesign = {
+      style: sharedStyle,
+      templates,
+    };
+    APP_STATE.remoteAccessPageDesignPromise = null;
+    return APP_STATE.remoteAccessPageDesign;
+  })().catch((error) => {
+    APP_STATE.remoteAccessPageDesignPromise = null;
+    throw error;
+  });
+  return APP_STATE.remoteAccessPageDesignPromise;
+}
+
+function ensureRemoteAccessPageStyles(styleText = "") {
+  let style = document.getElementById("releu-remote-access-page-style");
+  if (!(style instanceof HTMLStyleElement)) {
+    style = document.createElement("style");
+    style.id = "releu-remote-access-page-style";
+    document.head.append(style);
+  }
+  const merged = `${styleText || ""}\n${REMOTE_ACCESS_PAGE_STYLE_FALLBACK}`.trim();
+  if (style.textContent !== merged) {
+    style.textContent = merged;
+  }
+}
+
+function buildRemoteAccessTemplateFragment(html) {
+  const template = document.createElement("template");
+  template.innerHTML = String(html ?? "").trim();
+  return template.content.cloneNode(true);
+}
+
+function hydrateRemoteAccessManageTemplate(fragment, remote) {
+  const shell = fragment.querySelector(".ra-shell");
+  if (!(shell instanceof HTMLElement)) return fragment;
+  const tone = remote.status === "online" ? "online" : remote.status === "waiting" ? "waiting" : "offline";
+  const sectionsList = REMOTE_ACCESS_SECTIONS.filter(([id]) => remote.sections?.[id]).map(([, label]) => label);
+  const actionsList = REMOTE_ACCESS_ACTIONS.filter(([id]) => remote.actions?.[id]).map(([, label]) => label);
+  setRemoteAccessInlineText(
+    shell.querySelector(".ra-title"),
+    `Remote Access Is ${remote.status === "online" ? "Live" : remote.status === "waiting" ? "Waiting" : "Offline"}`,
+  );
+  const description = shell.querySelector(".ra-desc");
+  if (description) {
+    description.textContent = remote.statusMessage ?? "Remote access is disabled.";
+  }
+  const status = shell.querySelector(".ra-status");
+  if (status instanceof HTMLElement) {
+    status.dataset.tone = tone;
+    setRemoteAccessInlineText(status, titleCaseWord(remote.status ?? "offline"));
+  }
+  const link = shell.querySelector(".ra-link");
+  if (link) {
+    link.textContent = remote.url || "Not generated yet";
+  }
+  const metaRows = shell.querySelectorAll(".ra-meta-row");
+  setRemoteAccessMetaRow(metaRows[0], "Password", remote.passwordEnabled ? "Required" : "Secret link only");
+  setRemoteAccessMetaRow(metaRows[1], "Access", remoteAccessModeLabel(remote.mode));
+  setRemoteAccessMetaRow(metaRows[2], "Last relay sync", remote.lastBrokerSyncAt ? formatDate(remote.lastBrokerSyncAt) : "Not yet");
+  const cards = shell.querySelectorAll(".ra-card");
+  filterRemoteAccessPills(cards[2]?.querySelector(".ra-pill-list"), sectionsList, "No sections allowed.");
+  filterRemoteAccessPills(cards[3]?.querySelector(".ra-pill-list"), actionsList, "All dangerous actions are blocked.");
+  const buttons = shell.querySelectorAll("button");
+  setRemoteAccessButtonAction(buttons[0], "copy-link");
+  setRemoteAccessButtonAction(buttons[1], "regenerate");
+  setRemoteAccessButtonAction(buttons[2], "reconfigure");
+  setRemoteAccessButtonAction(buttons[3], "disable");
+  if (!remote.url && buttons[0] instanceof HTMLElement) {
+    buttons[0].disabled = true;
+  }
+  return fragment;
+}
+
+function hydrateRemoteAccessProtectionTemplate(fragment, draft) {
+  const shell = fragment.querySelector(".ra-shell");
+  if (!(shell instanceof HTMLElement)) return fragment;
+  const options = shell.querySelectorAll(".ra-option");
+  setRemoteAccessOptionSelected(options[0], !draft.passwordEnabled);
+  setRemoteAccessOptionSelected(options[1], draft.passwordEnabled);
+  setRemoteAccessButtonAction(options[0], "set-protection", { remoteAccessProtection: "link" });
+  setRemoteAccessButtonAction(options[1], "set-protection", { remoteAccessProtection: "password" });
+  const passwordInput = shell.querySelector(".ra-input");
+  if (passwordInput instanceof HTMLInputElement) {
+    passwordInput.value = draft.password ?? "";
+    passwordInput.dataset.remoteAccessPassword = "true";
+    const passwordWrapper = passwordInput.closest("label");
+    if (!draft.passwordEnabled) {
+      passwordWrapper?.remove();
+    }
+  }
+  const continueButton = shell.querySelector(".ra-btn-primary");
+  setRemoteAccessButtonAction(continueButton, "next");
+  return fragment;
+}
+
+function hydrateRemoteAccessAccessTemplate(fragment, draft) {
+  const shell = fragment.querySelector(".ra-shell");
+  if (!(shell instanceof HTMLElement)) return fragment;
+  const presetButtons = shell.querySelectorAll(".ra-option");
+  const presetModes = ["view", "operator", "admin"];
+  presetButtons.forEach((button, index) => {
+    const mode = presetModes[index];
+    setRemoteAccessOptionSelected(button, draft.mode === mode);
+    setRemoteAccessButtonAction(button, "preset", { remoteAccessMode: mode });
+  });
+  const actionButtons = shell.querySelectorAll(".ra-btn");
+  const advancedButton = actionButtons[0];
+  const backButton = actionButtons[1];
+  const nextButton = actionButtons[2];
+  setRemoteAccessButtonAction(advancedButton, "advanced");
+  setRemoteAccessButtonAction(backButton, "back");
+  setRemoteAccessButtonAction(nextButton, "next");
+  advancedButton?.classList.toggle("ra-btn-primary", draft.mode === "custom");
+  advancedButton?.classList.toggle("ra-btn-ghost", draft.mode !== "custom");
+  setRemoteAccessInlineText(advancedButton, draft.mode === "custom" ? "Advanced Enabled" : "Use Advanced");
+  const advancedCard = shell.querySelector(".ra-card");
+  const toggleGrid = advancedCard?.querySelector(".ra-grid-2");
+  if (draft.mode !== "custom") {
+    toggleGrid?.remove();
+  } else {
+    const toggleInputs = Array.from(advancedCard?.querySelectorAll('input[type="checkbox"]') ?? []);
+    const sectionInputs = toggleInputs.slice(0, REMOTE_ACCESS_SECTIONS.length);
+    const actionInputs = toggleInputs.slice(REMOTE_ACCESS_SECTIONS.length);
+    sectionInputs.forEach((input, index) => {
+      if (!(input instanceof HTMLInputElement)) return;
+      const [id] = REMOTE_ACCESS_SECTIONS[index] ?? [];
+      input.checked = Boolean(draft.sections?.[id]);
+      input.dataset.remoteAccessSection = id;
+    });
+    actionInputs.forEach((input, index) => {
+      if (!(input instanceof HTMLInputElement)) return;
+      const [id] = REMOTE_ACCESS_ACTIONS[index] ?? [];
+      input.checked = Boolean(draft.actions?.[id]);
+      input.dataset.remoteAccessActionId = id;
+    });
+  }
+  return fragment;
+}
+
+function hydrateRemoteAccessGenerateTemplate(fragment, draft) {
+  const shell = fragment.querySelector(".ra-shell");
+  if (!(shell instanceof HTMLElement)) return fragment;
+  const enabledSections = REMOTE_ACCESS_SECTIONS.filter(([id]) => draft.sections?.[id]).map(([, label]) => label);
+  const enabledActions = REMOTE_ACCESS_ACTIONS.filter(([id]) => draft.actions?.[id]).map(([, label]) => label);
+  const cards = shell.querySelectorAll(".ra-card");
+  const valueNodes = shell.querySelectorAll(".ra-value");
+  if (valueNodes[0]) {
+    valueNodes[0].textContent = draft.passwordEnabled ? "Password required" : "Secret link only";
+  }
+  if (valueNodes[1]) {
+    valueNodes[1].textContent = remoteAccessModeLabel(draft.mode);
+  }
+  const firstMuted = cards[0]?.querySelector(".ra-muted");
+  if (firstMuted) {
+    firstMuted.textContent = draft.passwordEnabled
+      ? "The password is never shown again after setup."
+      : "Anyone with the link can open the remote panel.";
+  }
+  filterRemoteAccessPills(cards[1]?.querySelector(".ra-pill-list"), enabledSections, "No sections allowed.");
+  filterRemoteAccessPills(cards[2]?.querySelector(".ra-pill-list"), enabledActions, "None");
+  const buttons = shell.querySelectorAll(".ra-btn");
+  setRemoteAccessButtonAction(buttons[0], "back");
+  setRemoteAccessButtonAction(buttons[1], "generate");
+  return fragment;
+}
+
+
+function renderRemoteAccessPageContent(design) {
+  const remote = remoteAccessSnapshot();
+  const pageState = remoteAccessPageState();
+  const draft = syncRemoteAccessPageDraft();
+  const key = remote.enabled && !pageState.reconfiguring ? "manage" : draft.step === 1 ? "step1" : draft.step === 2 ? "step2" : "step3";
+  const fragment = buildRemoteAccessTemplateFragment(design.templates[key] ?? "");
+  if (key === "manage") return hydrateRemoteAccessManageTemplate(fragment, remote);
+  if (key === "step1") return hydrateRemoteAccessProtectionTemplate(fragment, draft);
+  if (key === "step2") return hydrateRemoteAccessAccessTemplate(fragment, draft);
+  return hydrateRemoteAccessGenerateTemplate(fragment, draft);
+}
+
+function bindRemoteAccessPage(root) {
+  if (!root || root.dataset.releuBound === "true") return;
+  root.dataset.releuBound = "true";
+  root.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    const draft = syncRemoteAccessPageDraft();
+    if (target.matches("[data-remote-access-password]")) {
+      draft.password = target.value;
+      return;
+    }
+    if (target.matches("[data-remote-access-section]")) {
+      draft.mode = "custom";
+      draft.sections[target.dataset.remoteAccessSection] = Boolean(target.checked);
+      return;
+    }
+    if (target.matches("[data-remote-access-action-id]")) {
+      draft.mode = "custom";
+      draft.actions[target.dataset.remoteAccessActionId] = Boolean(target.checked);
+    }
+  });
+  root.addEventListener("click", async (event) => {
+    const button = event.target.closest?.("[data-remote-access-action]");
+    if (!(button instanceof HTMLElement)) return;
+    const action = String(button.dataset.remoteAccessAction ?? "").trim();
+    const draft = syncRemoteAccessPageDraft();
+    const pageState = remoteAccessPageState();
+    try {
+      if (action === "set-protection") {
+        draft.passwordEnabled = button.dataset.remoteAccessProtection === "password";
+        if (!draft.passwordEnabled) {
+          draft.password = "";
+        }
+        patchRemoteAccessPage();
+        return;
+      }
+      if (action === "preset") {
+        const preset = buildRemoteAccessPreset(button.dataset.remoteAccessMode);
+        draft.mode = preset.mode;
+        draft.sections = { ...preset.sections };
+        draft.actions = { ...preset.actions };
+        patchRemoteAccessPage();
+        return;
+      }
+      if (action === "advanced") {
+        draft.mode = "custom";
+        patchRemoteAccessPage();
+        return;
+      }
+      if (action === "next") {
+        if (draft.step === 1 && draft.passwordEnabled && String(draft.password ?? "").trim().length < 6) {
+          throw new Error("Remote Access password must be at least 6 characters.");
+        }
+        draft.step = Math.min(3, Number(draft.step ?? 1) + 1);
+        patchRemoteAccessPage();
+        return;
+      }
+      if (action === "back") {
+        draft.step = Math.max(1, Number(draft.step ?? 1) - 1);
+        patchRemoteAccessPage();
+        return;
+      }
+      if (action === "copy-link") {
+        if (!remoteAccessSnapshot().url) {
+          throw new Error("Generate a remote access link first.");
+        }
+        await navigator.clipboard.writeText(String(remoteAccessSnapshot().url ?? ""));
+        showStatus("Remote access link copied.", "success");
+        return;
+      }
+      if (action === "reconfigure") {
+        pageState.reconfiguring = true;
+        syncRemoteAccessPageDraft(true);
+        pageState.draft.step = 2;
+        patchRemoteAccessPage();
+        return;
+      }
+      if (action === "regenerate") {
+        setRemoteAccessButtonBusy(button, true);
+        const payload = await api("/api/remote-access/regenerate", { method: "POST" });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        pageState.reconfiguring = false;
+        syncRemoteAccessPageDraft(true);
+        patchRemoteAccessPage();
+        showStatus("Remote access link regenerated.", "success");
+        return;
+      }
+      if (action === "disable") {
+        if (!window.confirm("Disable Remote Access?")) return;
+        setRemoteAccessButtonBusy(button, true);
+        const payload = await api("/api/remote-access/disable", { method: "POST" });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        pageState.reconfiguring = false;
+        syncRemoteAccessPageDraft(true);
+        patchRemoteAccessPage();
+        showStatus("Remote access disabled.", "success");
+        return;
+      }
+      if (action === "generate") {
+        setRemoteAccessButtonBusy(button, true);
+        const payload = await api("/api/remote-access/setup", {
+          method: "POST",
+          body: {
+            passwordEnabled: draft.passwordEnabled,
+            password: draft.password,
+            mode: draft.mode,
+            sections: draft.sections,
+            actions: draft.actions,
+          },
+        });
+        APP_STATE.state = payload.state ?? APP_STATE.state;
+        pageState.reconfiguring = false;
+        syncRemoteAccessPageDraft(true);
+        patchRemoteAccessPage();
+        showStatus("Remote access link generated.", "success");
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      if (action === "regenerate" || action === "disable" || action === "generate") {
+        setRemoteAccessButtonBusy(button, false);
+      }
+    }
+  });
+}
+
+async function patchRemoteAccessPage() {
+  document.title = "Remote Access - Releu";
+  const sectionHeading = document.querySelector(".fi-section-header-heading");
+  if (sectionHeading) {
+    sectionHeading.textContent = "Remote Access";
+  }
+  const sectionDescription = document.querySelector(".fi-section-header-description");
+  if (sectionDescription) {
+    sectionDescription.textContent = "Create, protect, and manage the hosted remote-control link for this Releu install.";
+  }
+  const root = document.querySelector("[data-releu-remote-access-root]");
+  if (!root) return;
+  const pageState = remoteAccessPageState();
+  pageState.renderVersion = Number(pageState.renderVersion ?? 0) + 1;
+  const renderVersion = pageState.renderVersion;
+  try {
+    const design = await loadRemoteAccessPageDesign();
+    if (remoteAccessPageState().renderVersion !== renderVersion) return;
+    ensureRemoteAccessPageStyles(design.style);
+    const fragment = renderRemoteAccessPageContent(design);
+    root.replaceChildren(fragment);
+  } catch (error) {
+    showError(error);
+    return;
+  }
+  root.dataset.releuBound = "false";
+  bindRemoteAccessPage(root);
 }
 
 function normalizeSavedServerRoute(rawHref, serverIdFallback = activeServerId()) {
@@ -708,6 +1482,7 @@ function updateChrome(state) {
   });
   updateLocalLinks();
   ensureServersSidebarLink();
+  ensureRemoteAccessSidebarLink();
   ensureBackupsSidebarLink();
   ensureCloudBackupSidebarLink();
   ensureMiscSidebarLink();
@@ -733,6 +1508,9 @@ function buildPelicanUiUrl(serverId = activeServerId()) {
 }
 
 function maybeRedirectToPreferredUi() {
+  if (isRemotePanel()) {
+    return false;
+  }
   const uiSettings = currentUiSettings();
   if (!uiSettings.hasChosenVariant) {
     return false;
@@ -747,7 +1525,657 @@ function maybeRedirectToPreferredUi() {
   return true;
 }
 
+function readRemoteToken() {
+  if (!isRemotePanel()) return "";
+  if (REMOTE_STATE.token) return REMOTE_STATE.token;
+  try {
+    REMOTE_STATE.token = sessionStorage.getItem(REMOTE_TOKEN_STORAGE_KEY) ?? "";
+  } catch {
+    REMOTE_STATE.token = "";
+  }
+  return REMOTE_STATE.token;
+}
+
+function writeRemoteToken(token) {
+  if (!isRemotePanel()) return;
+  REMOTE_STATE.token = String(token ?? "").trim();
+  try {
+    if (REMOTE_STATE.token) {
+      sessionStorage.setItem(REMOTE_TOKEN_STORAGE_KEY, REMOTE_STATE.token);
+    } else {
+      sessionStorage.removeItem(REMOTE_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore sessionStorage failures.
+  }
+}
+
+function bytesToBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function remoteViewerStateToPanelState(viewer) {
+  const snapshot = viewer?.snapshot ?? {};
+  return {
+    panel: { name: "Releu" },
+    uiSettings: { variant: "pelican-blueprint", hasChosenVariant: true },
+    playitSettings: {},
+    updaterSettings: { enabled: false, autoInstall: false, checkIntervalHours: 6, allowPrerelease: false },
+    desktopSettings: { keepServerRunningOnClose: false, quickConsoleShortcut: "Ctrl+Shift+Space" },
+    cloudBackupSettings: { provider: "website", ...(snapshot.cloudBackupSettings ?? {}) },
+    remoteAccess: viewer?.remoteAccess ?? snapshot.remoteAccess ?? null,
+    host: snapshot.host ?? {},
+    dependencies: { installed: true, ready: true, statusMessage: "Remote relay connected." },
+    softwareOptions: Array.isArray(snapshot.softwareOptions) ? snapshot.softwareOptions : [],
+    activeServerId: snapshot.activeServerId ?? "",
+    servers: Array.isArray(snapshot.servers) ? snapshot.servers : [],
+    activeServer: snapshot.activeServer ?? null,
+    playit: snapshot.playit ?? null,
+    appUpdate: { supported: false, enabled: false, checking: false, downloading: false, applying: false },
+  };
+}
+
+function remoteRawStateToPanelState(rawState) {
+  if (!rawState || typeof rawState !== "object") {
+    return remoteViewerStateToPanelState(REMOTE_STATE.session?.viewer ?? {});
+  }
+  return {
+    ...rawState,
+    uiSettings: { variant: "pelican-blueprint", hasChosenVariant: true, ...(rawState.uiSettings ?? {}) },
+    updaterSettings: { ...(rawState.updaterSettings ?? {}), enabled: false, autoInstall: false },
+    cloudBackupSettings: { provider: "website", ...(rawState.cloudBackupSettings ?? {}) },
+    appUpdate: { ...(rawState.appUpdate ?? {}), supported: false, enabled: false, checking: false, downloading: false, applying: false },
+  };
+}
+
+function syncRemoteViewerSession(payload) {
+  REMOTE_STATE.session = payload;
+  APP_STATE.state = remoteViewerStateToPanelState(payload?.viewer ?? {});
+  APP_STATE.logs = Array.isArray(payload?.viewer?.snapshot?.logs) ? payload.viewer.snapshot.logs : [];
+  if (APP_STATE.state?.activeServerId) {
+    persistServerId(APP_STATE.state.activeServerId);
+    syncServerIdInLocation(APP_STATE.state.activeServerId);
+  }
+  return APP_STATE.state;
+}
+
+function currentRemoteSectionId() {
+  return REMOTE_PAGE_SECTION[PAGE] ?? null;
+}
+
+function firstAllowedRemotePage() {
+  const sections = APP_STATE.state?.remoteAccess?.sections ?? {};
+  const entries = Object.entries(REMOTE_PAGE_SECTION);
+  const match = entries.find(([, sectionId]) => Boolean(sections?.[sectionId]));
+  return match?.[0] ?? "servers.html";
+}
+
+function renderRemoteAuthOverlay(message = "") {
+  let host = document.getElementById("releu-remote-auth");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "releu-remote-auth";
+    document.body.append(host);
+  }
+  host.innerHTML = `
+    <div style="position:fixed;inset:0;z-index:10080;display:grid;place-items:center;background:rgba(0,0,0,.82);padding:24px;">
+      <div style="width:min(460px,100%);border:1px solid rgba(255,255,255,.12);background:#090909;padding:28px;">
+        <div style="font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#8a8a8a;">Remote Access</div>
+        <h1 style="margin:16px 0 10px;font-size:34px;line-height:1;color:#fff;">Enter Password</h1>
+        <p style="margin:0 0 20px;color:#b3b3b3;line-height:1.7;">This remote Releu panel is protected. Enter the password to continue.</p>
+        <form data-remote-auth-form style="display:grid;gap:12px;">
+          <input data-remote-auth-password type="password" autocomplete="current-password" placeholder="Remote Access password" style="width:100%;border:1px solid #2a2a2a;background:#050505;color:#fff;padding:12px 14px;outline:none;" />
+          <button type="submit" style="border:1px solid #fff;background:#fff;color:#000;padding:12px 14px;font-weight:700;">Unlock Remote Panel</button>
+        </form>
+        <div data-remote-auth-error style="min-height:22px;margin-top:12px;color:#fca5a5;font-size:.9rem;">${escapeHtml(message)}</div>
+      </div>
+    </div>`;
+  host.querySelector("[data-remote-auth-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const password = String(host.querySelector("[data-remote-auth-password]")?.value ?? "");
+    try {
+      const payload = await fetchRemoteJson("/api/remote/viewer/auth", {
+        method: "POST",
+        includeAuth: false,
+        body: {
+          slug: REMOTE_SLUG,
+          password,
+        },
+      });
+      writeRemoteToken(payload.token);
+      clearRemoteAuthOverlay();
+      await loadRemoteViewerSession();
+      boot().catch(showError);
+    } catch (error) {
+      host.querySelector("[data-remote-auth-error]").textContent =
+        error?.message ?? "Remote authentication failed.";
+    }
+  });
+}
+
+function clearRemoteAuthOverlay() {
+  document.getElementById("releu-remote-auth")?.remove();
+}
+
+async function fetchRemoteJson(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method ?? "GET",
+    headers: {
+      Accept: "application/json",
+      ...(options.includeAuth === false ? {} : readRemoteToken() ? { authorization: `Bearer ${readRemoteToken()}` } : {}),
+      ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers ?? {}),
+    },
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.ok) {
+    const error = new Error(payload?.error ?? `Request failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+async function loadRemoteBootstrap() {
+  REMOTE_STATE.bootstrap = await fetchRemoteJson(
+    `/api/remote/slug/${encodeURIComponent(REMOTE_SLUG)}/bootstrap`,
+    { includeAuth: false },
+  );
+  return REMOTE_STATE.bootstrap;
+}
+
+async function loadRemoteViewerSession() {
+  const payload = await fetchRemoteJson("/api/remote/viewer/session");
+  return syncRemoteViewerSession(payload);
+}
+
+async function ensureRemoteViewerReady() {
+  if (!isRemotePanel()) {
+    return true;
+  }
+  await loadRemoteBootstrap();
+  const existingToken = readRemoteToken();
+  if (existingToken) {
+    try {
+      await loadRemoteViewerSession();
+      clearRemoteAuthOverlay();
+      return true;
+    } catch (error) {
+      if (error?.status !== 401) {
+        throw error;
+      }
+      writeRemoteToken("");
+    }
+  }
+  if (!REMOTE_STATE.bootstrap?.passwordEnabled) {
+    const payload = await fetchRemoteJson("/api/remote/viewer/auth", {
+      method: "POST",
+      includeAuth: false,
+      body: { slug: REMOTE_SLUG, password: "" },
+    });
+    writeRemoteToken(payload.token);
+    await loadRemoteViewerSession();
+    clearRemoteAuthOverlay();
+    return true;
+  }
+  renderRemoteAuthOverlay();
+  return false;
+}
+
+async function queueRemoteCommand(type, payload = {}) {
+  const queued = await fetchRemoteJson("/api/remote/viewer/command", {
+    method: "POST",
+    body: {
+      type,
+      payload,
+    },
+  });
+  const commandId = String(queued?.command?.id ?? "").trim();
+  if (!commandId) {
+    return null;
+  }
+  const deadline = Date.now() + REMOTE_COMMAND_WAIT_TIMEOUT_MS;
+  for (;;) {
+    await sleep(REMOTE_COMMAND_POLL_INTERVAL_MS);
+    const payloadState = await fetchRemoteJson("/api/remote/viewer/session");
+    syncRemoteViewerSession(payloadState);
+    const command = (payloadState?.commands ?? []).find((entry) => entry?.id === commandId);
+    if (command && command.status && command.status !== "pending") {
+      if (command.status === "error" || command.status === "failed") {
+        throw new Error(command.error ?? "Remote command failed.");
+      }
+      return command.result ?? null;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error("The remote action timed out while waiting for Releu.");
+    }
+  }
+}
+
+async function remoteStateAfterCommand(serverId, result = null) {
+  if (result && typeof result === "object" && Array.isArray(result.servers) && "activeServerId" in result) {
+    APP_STATE.state = remoteRawStateToPanelState(result);
+    return APP_STATE.state;
+  }
+  await loadRemoteViewerSession();
+  if (serverId && APP_STATE.state?.activeServerId && APP_STATE.state.activeServerId !== serverId) {
+    const fallback = APP_STATE.state.servers?.find((entry) => entry.id === serverId) ?? null;
+    if (fallback) {
+      APP_STATE.state.activeServerId = fallback.id;
+    }
+  }
+  return APP_STATE.state;
+}
+
+async function remoteRefreshState(serverId = getRequestedServerId()) {
+  const requestedServerId = String(serverId ?? "").trim();
+  if (requestedServerId && APP_STATE.state && !isKnownServerId(requestedServerId)) {
+    syncServerIdInLocation(APP_STATE.state.activeServerId ?? "");
+    await loadRemoteViewerSession();
+    return APP_STATE.state;
+  }
+  if (
+    requestedServerId &&
+    APP_STATE.state?.activeServerId &&
+    APP_STATE.state.activeServerId !== requestedServerId
+  ) {
+    const result = await queueRemoteCommand("selectServer", { serverId: requestedServerId });
+    return remoteStateAfterCommand(requestedServerId, result);
+  }
+  await loadRemoteViewerSession();
+  return APP_STATE.state;
+}
+
+async function remoteApi(url, options = {}) {
+  const requestUrl = new URL(url, location.origin);
+  const pathname = requestUrl.pathname;
+  const method = String(options.method ?? "GET").toUpperCase();
+
+  if (pathname === "/api/cloud-backup/config" && method === "GET") {
+    await remoteRefreshState(requestUrl.searchParams.get("serverId"));
+    return { ok: true, cloudBackup: APP_STATE.state?.cloudBackupSettings ?? {} };
+  }
+  if (pathname === "/api/cloud-backup/status" && method === "GET") {
+    const result = await queueRemoteCommand("cloudBackupStatus", {
+      serverId: requestUrl.searchParams.get("serverId") ?? getRequestedServerId(),
+    });
+    APP_STATE.cloudBackup.status = result ?? null;
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+    return { ok: true, cloudBackup: result };
+  }
+  if (pathname === "/api/cloud-backup/settings" && method === "POST") {
+    const result = await queueRemoteCommand("updateCloudBackupSettings", options.body ?? {});
+    const state = await remoteStateAfterCommand(getRequestedServerId(), result);
+    APP_STATE.cloudBackup.status = await queueRemoteCommand("cloudBackupStatus", {
+      serverId: getRequestedServerId(),
+    });
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+    return { ok: true, cloudBackup: result, status: APP_STATE.cloudBackup.status, state };
+  }
+  if (pathname === "/api/cloud-backup/issue-key" && method === "POST") {
+    const result = await queueRemoteCommand("issueCloudBackupKey", options.body ?? {});
+    const state = await remoteRefreshState(getRequestedServerId());
+    APP_STATE.cloudBackup.status = result ?? null;
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+    return { ok: true, cloudBackup: result, state };
+  }
+  if (pathname === "/api/cloud-backup/rotate-key" && method === "POST") {
+    const result = await queueRemoteCommand("rotateCloudBackupKey", {});
+    const state = await remoteRefreshState(getRequestedServerId());
+    APP_STATE.cloudBackup.status = result ?? null;
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+    return { ok: true, cloudBackup: result, state };
+  }
+  if (pathname === "/api/cloud-backup/register" && method === "POST") {
+    const result = await queueRemoteCommand("registerCloudBackupAccount", options.body ?? {});
+    const state = await remoteRefreshState(getRequestedServerId());
+    APP_STATE.cloudBackup.status = result ?? null;
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+    return { ok: true, cloudBackup: result, state };
+  }
+  if (pathname === "/api/cloud-backup/login" && method === "POST") {
+    const result = await queueRemoteCommand("loginCloudBackupAccount", options.body ?? {});
+    const state = await remoteRefreshState(getRequestedServerId());
+    APP_STATE.cloudBackup.status = result ?? null;
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+    return { ok: true, cloudBackup: result, state };
+  }
+  if (pathname === "/api/cloud-backup/logout" && method === "POST") {
+    const result = await queueRemoteCommand("logoutCloudBackupAccount", {});
+    const state = await remoteRefreshState(getRequestedServerId());
+    APP_STATE.cloudBackup.status = result ?? null;
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+    return { ok: true, cloudBackup: result, state };
+  }
+  if (pathname === "/api/state") {
+    return { ok: true, state: await remoteRefreshState(requestUrl.searchParams.get("serverId")) };
+  }
+  if (pathname === "/api/logs") {
+    await remoteRefreshState(requestUrl.searchParams.get("serverId"));
+    return { ok: true, entries: APP_STATE.logs };
+  }
+  if (pathname === "/api/software/versions") {
+    const result = await queueRemoteCommand("softwareVersions", {
+      software: requestUrl.searchParams.get("software") ?? "purpur",
+    });
+    return { ok: true, versions: Array.isArray(result?.versions) ? result.versions : Array.isArray(result) ? result : [] };
+  }
+  if (pathname === "/api/servers" && method === "POST") {
+    const result = await queueRemoteCommand("createServer", options.body ?? {});
+    return { ok: true, state: await remoteStateAfterCommand(null, result) };
+  }
+
+  let match = pathname.match(/^\/api\/servers\/([^/]+)\/select$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("selectServer", { serverId });
+    return { ok: true, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/delete$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("deleteServer", { serverId });
+    return { ok: true, state: await remoteStateAfterCommand(null, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/settings\/profile$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("updateServerProfile", { serverId, ...(options.body ?? {}) });
+    return { ok: true, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/settings\/runtime$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("updateRuntimeSettings", { serverId, ...(options.body ?? {}) });
+    return { ok: true, config: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/settings\/server-properties$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("updateServerProperties", { serverId, ...(options.body ?? {}) });
+    return { ok: true, properties: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/settings\/misc$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("updateMiscSettings", { serverId, ...(options.body ?? {}) });
+    return { ok: true, misc: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/settings\/backups$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("updateBackupSettings", { serverId, ...(options.body ?? {}) });
+    return { ok: true, backups: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/install\/server$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const body = options.body ?? {};
+    const result = await queueRemoteCommand("softwareInstall", {
+      serverId,
+      software: body.software,
+      requestedVersion: body.version ?? body.requestedVersion,
+      acceptEula: body.acceptEula,
+    });
+    return { ok: true, install: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/server\/(start|stop|restart|kill)$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const type = match[2].toLowerCase();
+    const commandType =
+      type === "start" ? "startServer" :
+      type === "stop" ? "stopServer" :
+      type === "restart" ? "restartServer" :
+      "killServer";
+    const result = await queueRemoteCommand(commandType, { serverId });
+    return { ok: true, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/server\/command$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("sendCommand", {
+      serverId,
+      command: options.body?.command ?? "",
+    });
+    return { ok: true, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/server\/backup$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("backupCreate", { serverId });
+    return { ok: true, backupPath: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/backups\/revert$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("backupRevert", {
+      serverId,
+      backupName: options.body?.backupName,
+    });
+    return { ok: true, restore: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/players\/([^/]+)\/action$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const playerName = decodeURIComponent(match[2]);
+    const result = await queueRemoteCommand("playerAction", {
+      serverId,
+      playerName,
+      ...(options.body ?? {}),
+    });
+    return { ok: true, players: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/items\/catalog$/i);
+  if (match && method === "GET") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("searchInventoryCatalog", {
+      serverId,
+      query: requestUrl.searchParams.get("query") ?? "",
+      limit: requestUrl.searchParams.get("limit") ?? "",
+      page: requestUrl.searchParams.get("page") ?? "",
+    });
+    return { ok: true, catalog: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/players\/([^/]+)\/inventory$/i);
+  if (match && method === "GET") {
+    const serverId = decodeURIComponent(match[1]);
+    const playerName = decodeURIComponent(match[2]);
+    const result = await queueRemoteCommand("getPlayerInventory", {
+      serverId,
+      playerName,
+      refreshLiveData: false,
+    });
+    return { ok: true, inventory: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/players\/([^/]+)\/inventory\/give$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const playerName = decodeURIComponent(match[2]);
+    const result = await queueRemoteCommand("givePlayerInventoryItem", {
+      serverId,
+      playerName,
+      ...(options.body ?? {}),
+    });
+    return { ok: true, inventory: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/players\/([^/]+)\/inventory\/clear$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const playerName = decodeURIComponent(match[2]);
+    const result = await queueRemoteCommand("clearPlayerInventory", {
+      serverId,
+      playerName,
+      ...(options.body ?? {}),
+    });
+    return { ok: true, inventory: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/files$/i);
+  if (match && method === "GET") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("listManagedFiles", {
+      serverId,
+      path: requestUrl.searchParams.get("path") ?? "",
+      search: requestUrl.searchParams.get("search") ?? "",
+    });
+    return { ok: true, files: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/files\/read$/i);
+  if (match && method === "GET") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("readManagedTextFile", {
+      serverId,
+      path: requestUrl.searchParams.get("path") ?? "",
+    });
+    return { ok: true, file: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/files\/write$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("writeManagedTextFile", {
+      serverId,
+      ...(options.body ?? {}),
+    });
+    return { ok: true, file: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/files\/folder$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("createManagedFolder", {
+      serverId,
+      ...(options.body ?? {}),
+    });
+    return { ok: true, files: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/files$/i);
+  if (match && method === "DELETE") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("deleteManagedPath", {
+      serverId,
+      path: requestUrl.searchParams.get("path") ?? "",
+    });
+    return { ok: true, files: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/files\/upload$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("uploadManagedFile", {
+      serverId,
+      ...(options.body ?? {}),
+    });
+    return { ok: true, upload: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/worlds\/select$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("worldSelect", { serverId, ...(options.body ?? {}) });
+    return { ok: true, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/worlds\/regenerate$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("worldRegenerate", { serverId, ...(options.body ?? {}) });
+    return { ok: true, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/cloud-backup\/upload$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("uploadCloudBackup", { serverId });
+    const state = await remoteStateAfterCommand(serverId, result);
+    APP_STATE.cloudBackup.status = result?.cloudBackup ?? (await queueRemoteCommand("cloudBackupStatus", { serverId }));
+    APP_STATE.cloudBackup.lastFetchedAt = Date.now();
+    return { ok: true, upload: result, state };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/cloud-backup\/download$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("downloadCloudBackup", {
+      serverId,
+      backupId: options.body?.backupId,
+    });
+    return { ok: true, download: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/cloud-backup\/restore$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("restoreCloudBackup", {
+      serverId,
+      backupId: options.body?.backupId,
+    });
+    return { ok: true, restore: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/catalog\/search$/i);
+  if (match && method === "GET") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("catalogSearch", {
+      serverId,
+      kind: requestUrl.searchParams.get("kind") ?? "plugin",
+      query: requestUrl.searchParams.get("query") ?? "",
+      profileId: requestUrl.searchParams.get("profileId") ?? "",
+      gameVersion: requestUrl.searchParams.get("gameVersion") ?? "",
+      limit: requestUrl.searchParams.get("limit") ?? "",
+      page: requestUrl.searchParams.get("page") ?? "",
+      index: requestUrl.searchParams.get("index") ?? "",
+    });
+    return { ok: true, catalog: result };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/catalog\/install$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("catalogInstall", { serverId, ...(options.body ?? {}) });
+    return { ok: true, install: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  match = pathname.match(/^\/api\/servers\/([^/]+)\/assets\/remove$/i);
+  if (match && method === "POST") {
+    const serverId = decodeURIComponent(match[1]);
+    const result = await queueRemoteCommand("removeAsset", { serverId, ...(options.body ?? {}) });
+    return { ok: true, removed: result, state: await remoteStateAfterCommand(serverId, result) };
+  }
+
+  throw new Error("This part of Releu is not available from the hosted remote panel yet.");
+}
+
 async function api(url, options = {}) {
+  if (isRemotePanel()) {
+    return remoteApi(url, options);
+  }
   const timeoutMs = Math.max(0, Number(options.timeoutMs ?? 0) || 0);
   const controller = timeoutMs ? new AbortController() : null;
   let timeoutId = null;
@@ -786,6 +2214,46 @@ async function api(url, options = {}) {
 }
 
 async function apiBinary(url, body, headers = {}, options = {}) {
+  if (isRemotePanel()) {
+    const requestUrl = new URL(url, location.origin);
+    const pathname = requestUrl.pathname;
+    const bytes = body instanceof ArrayBuffer
+      ? new Uint8Array(body)
+      : body instanceof Uint8Array
+        ? body
+        : body?.arrayBuffer
+          ? new Uint8Array(await body.arrayBuffer())
+          : new Uint8Array();
+    const contentBase64 = bytesToBase64(bytes);
+    let match = pathname.match(/^\/api\/servers\/([^/]+)\/files\/upload$/i);
+    if (match) {
+      const serverId = decodeURIComponent(match[1]);
+      return {
+        ok: true,
+        ...(await remoteApi(`/api/servers/${encodeURIComponent(serverId)}/files/upload`, {
+          method: options.method ?? "POST",
+          body: {
+            serverId,
+            path: requestUrl.searchParams.get("path") ?? "",
+            fileName: headers?.["x-file-name"] ?? headers?.["X-File-Name"] ?? "upload.bin",
+            contentBase64,
+          },
+        })),
+      };
+    }
+    match = pathname.match(/^\/api\/servers\/([^/]+)\/worlds\/upload-archive$/i);
+    if (match) {
+      const serverId = decodeURIComponent(match[1]);
+      const result = await queueRemoteCommand("importWorldArchive", {
+        serverId,
+        fileName: headers?.["x-file-name"] ?? headers?.["X-File-Name"] ?? requestUrl.searchParams.get("fileName") ?? "world.zip",
+        worldName: requestUrl.searchParams.get("worldName") ?? "",
+        contentBase64,
+      });
+      return { ok: true, state: await remoteStateAfterCommand(serverId, result) };
+    }
+    throw new Error("This binary upload is not available from the hosted remote panel yet.");
+  }
   const timeoutMs = Math.max(0, Number(options.timeoutMs ?? 0) || 0);
   const controller = timeoutMs ? new AbortController() : null;
   let timeoutId = null;
@@ -823,6 +2291,9 @@ async function apiBinary(url, body, headers = {}, options = {}) {
 }
 
 function isDesktopApp() {
+  if (isRemotePanel()) {
+    return false;
+  }
   return Boolean(window.desktop);
 }
 
@@ -830,9 +2301,24 @@ function appUpdateState() {
   return APP_STATE.state?.appUpdate ?? null;
 }
 
+function playitHasUsableTunnel(playit = APP_STATE.state?.playit) {
+  if (!playit) return false;
+  const hasPublicTunnel =
+    Array.isArray(playit.tunnels) &&
+    playit.tunnels.some((entry) => entry?.publicAddress);
+  return Boolean(
+    hasPublicTunnel ||
+      (playit.secretConfigured && Number(playit.configuredTunnelCount ?? 0) > 0),
+  );
+}
+
 function playitLinkRequired(state = APP_STATE.state) {
+  if (isRemotePanel()) {
+    return false;
+  }
   const playit = state?.playit;
   if (!playit) return false;
+  if (playitHasUsableTunnel(playit)) return false;
   if (!playit.secretConfigured) return true;
   return Boolean(playit.claimWaiting);
 }
@@ -1185,6 +2671,7 @@ async function refreshState(serverId = getRequestedServerId()) {
   const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
   const payload = await api(`/api/state${query}`);
   APP_STATE.state = payload.state;
+  persistLocalPanelStateCache(payload.state);
   if (maybeRedirectToPreferredUi()) {
     return APP_STATE.state;
   }
@@ -1207,6 +2694,7 @@ async function refreshLogs() {
   const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
   const payload = await api(`/api/logs${query}`);
   APP_STATE.logs = payload.entries ?? [];
+  persistLocalPanelLogsCache(APP_STATE.logs);
   return APP_STATE.logs;
 }
 
@@ -6001,6 +7489,14 @@ function normalizeFilesBrowserPath(value) {
 function filesDownloadHref(relativePath) {
   const params = new URLSearchParams();
   params.set("path", relativePath);
+  if (isRemotePanel()) {
+    params.set("serverId", activeServerId());
+    const token = readRemoteToken();
+    if (token) {
+      params.set("token", token);
+    }
+    return `/api/remote/viewer/files/download?${params.toString()}`;
+  }
   return `/api/servers/${encodeURIComponent(activeServerId())}/files/download?${params.toString()}`;
 }
 
@@ -8345,6 +9841,104 @@ function patchSettingsPage() {
   renderUpdaterSection();
 }
 
+function applyRemotePanelRestrictions() {
+  if (!isRemotePanel()) {
+    return;
+  }
+
+  const allowedSections = APP_STATE.state?.remoteAccess?.sections ?? {};
+  const currentSection = currentRemoteSectionId();
+  if (currentSection && !allowedSections[currentSection]) {
+    const nextPage = firstAllowedRemotePage();
+    if (nextPage && nextPage !== PAGE) {
+      navigateTo(buildLocalPageHref(nextPage, activeServerId()));
+      return;
+    }
+  }
+
+  const sidebarEntries = [
+    ["overview", "Overview"],
+    ["console", "Console"],
+    ["players", "Players"],
+    ["misc", "Files"],
+    ["backups", "Cloud Backup"],
+    ["worlds", "Worlds"],
+    ["addons", "Add-ons _ Mods"],
+    ["backups", "Backups"],
+    ["software", "Software"],
+    ["misc", "Misc"],
+    ["settings", "Settings"],
+  ];
+  document.querySelectorAll(".fi-sidebar-item").forEach((item) => {
+    const labelNode = item.querySelector(".fi-sidebar-item-label");
+    const label = labelNode?.textContent?.trim() ?? "";
+    if (!label) return;
+    if (label === "Remote Access") {
+      item.remove();
+      return;
+    }
+    const mapped = sidebarEntries.find((entry) => entry[1] === label);
+    if (mapped && !allowedSections[mapped[0]]) {
+      item.remove();
+    }
+  });
+
+  document
+    .querySelectorAll(
+      "[data-world-browse-folder],[data-world-import-folder],[data-world-open],[data-releu-backup-open-path]",
+    )
+    .forEach((node) => node.remove());
+
+  if (!(APP_STATE.state?.remoteAccess?.actions?.playerModeration)) {
+    document.querySelectorAll("[data-player-inventory],[data-player-action]").forEach((node) => {
+      node.setAttribute("disabled", "disabled");
+      node.classList.add("fi-disabled");
+    });
+  }
+  if (!(APP_STATE.state?.remoteAccess?.actions?.powerControls)) {
+    document.querySelectorAll("[data-control]").forEach((node) => {
+      node.setAttribute("disabled", "disabled");
+      node.classList.add("fi-disabled");
+    });
+  }
+  if (!(APP_STATE.state?.remoteAccess?.actions?.serverCreateDelete)) {
+    document.querySelectorAll("[data-delete-server]").forEach((node) => {
+      node.setAttribute("disabled", "disabled");
+      node.classList.add("fi-disabled");
+    });
+    document.querySelectorAll('a[href*="create-server.html"]').forEach((node) => node.remove());
+  }
+  if (!(APP_STATE.state?.remoteAccess?.actions?.worldImportDelete)) {
+    document.querySelectorAll("[data-world-use],[data-world-regen],[data-world-use-active],[data-world-regen-active]").forEach((node) => {
+      node.setAttribute("disabled", "disabled");
+      node.classList.add("fi-disabled");
+    });
+  }
+  if (!(APP_STATE.state?.remoteAccess?.actions?.backupCreate)) {
+    document.querySelectorAll("[data-releu-backup-create]").forEach((node) => {
+      node.setAttribute("disabled", "disabled");
+      node.classList.add("fi-disabled");
+    });
+  }
+  if (!(APP_STATE.state?.remoteAccess?.actions?.backupRestoreDelete)) {
+    document.querySelectorAll("[data-releu-backup-revert]").forEach((node) => {
+      node.setAttribute("disabled", "disabled");
+      node.classList.add("fi-disabled");
+    });
+  }
+  if (!(APP_STATE.state?.remoteAccess?.actions?.softwareChanges)) {
+    document.querySelectorAll("[data-software-id],[data-install-project],[data-remove-asset]").forEach((node) => {
+      node.setAttribute("disabled", "disabled");
+      node.classList.add("fi-disabled");
+    });
+  }
+  if (!(APP_STATE.state?.remoteAccess?.actions?.consoleCommands)) {
+    document
+      .querySelectorAll(".rqc-input,.rqc-btn[data-rqc-send],[data-releu-console-send],textarea[name='command'],input[name='command']")
+      .forEach((node) => node.setAttribute("disabled", "disabled"));
+  }
+}
+
 async function patchPage() {
   if (PAGE === "servers.html") patchServersPageExactShell();
   if (PAGE === "create-server.html") patchCreateServerPage();
@@ -8358,9 +9952,11 @@ async function patchPage() {
   if (PAGE === "backups.html") patchBackupsPageLive();
   if (PAGE === "files.html") patchFilesPage();
   if (PAGE === "misc.html") patchMiscPage();
+  if (PAGE === "remote-access.html") patchRemoteAccessPage();
   if (PAGE === "settings.html") patchSettingsPage();
   syncPlayitGateOverlay();
   syncAppUpdateStatusBanner();
+  applyRemotePanelRestrictions();
   APP_STATE.quickConsole.open = false;
   renderQuickConsoleOverlay();
 }
@@ -8368,6 +9964,9 @@ async function patchPage() {
 async function pollCurrentPage() {
   if (document.visibilityState === "hidden") return;
   await refreshState(activeServerId());
+  if (remoteAccessPageShouldDeferRefresh()) {
+    return;
+  }
   if (isDesktopApp()) {
     kickoffAppUpdateCheck().catch((error) => {
       console.error(error);
@@ -8417,7 +10016,15 @@ async function boot() {
   beginShellEnter();
   wireLocalNavigation();
   suppressSavedShellBehavior();
+  if (!(await ensureRemoteViewerReady())) {
+    return;
+  }
   showStatus("Loading Releu...");
+  if (!REMOTE_MODE) {
+    await renderCachedLocalPanelState().catch((error) => {
+      console.warn("Failed to render cached local panel state.", error);
+    });
+  }
   await waitForInitialState();
   if (isDesktopApp()) {
     kickoffAppUpdateCheck().catch((error) => {
@@ -8428,6 +10035,15 @@ async function boot() {
   await patchPage();
   stripReleaseBranding();
   finishShellEnter();
+  if (
+    [
+      "Loading Releu...",
+      "Connecting to the local Releu panel...",
+      "Syncing with local Releu...",
+    ].includes(currentStatusMessage())
+  ) {
+    clearStatus();
+  }
   if (!appUpdateState()?.checking && !appUpdateState()?.downloading && !appUpdateState()?.applying) {
     clearStatus();
   }
