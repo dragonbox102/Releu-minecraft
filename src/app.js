@@ -79,6 +79,9 @@ export async function startPanelServer() {
 
   const app = express();
   app.use(express.json({ limit: "2mb" }));
+  app.get("/", (_request, response) => {
+    response.redirect(302, "/pelican-demo/servers.html");
+  });
   app.use(express.static(paths.publicDir));
   app.get("/server/:serverId", (request, response) => {
     response.redirect(

@@ -274,6 +274,14 @@ function createWindow(url) {
   return window;
 }
 
+function buildMainPanelUrl(baseUrl) {
+  const targetUrl = new URL(baseUrl);
+  targetUrl.pathname = "/pelican-demo/servers.html";
+  targetUrl.search = "";
+  targetUrl.hash = "";
+  return targetUrl.toString();
+}
+
 function openQuickConsoleWindow(serverId = "") {
   if (!panelRuntime?.url) {
     throw new Error("Panel runtime is not available.");
@@ -786,12 +794,12 @@ app.whenReady().then(async () => {
   desktopStartupLog("Starting embedded panel server.");
   panelRuntime = await startPanelServer();
   desktopStartupLog(`Embedded panel server started at ${panelRuntime?.url ?? "unknown"}.`);
-  mainWindow = createWindow(panelRuntime.url);
+  mainWindow = createWindow(buildMainPanelUrl(panelRuntime.url));
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0 && panelRuntime) {
       desktopStartupLog("Recreating main window on activate.");
-      mainWindow = createWindow(panelRuntime.url);
+      mainWindow = createWindow(buildMainPanelUrl(panelRuntime.url));
     }
   });
 }).catch((error) => {
